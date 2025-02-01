@@ -6,16 +6,26 @@ public final class AGC {
     public let io: AGCIO
     public let engine: AGCEngine
     
-    public init(coreFile: URL) throws {
-
-        let data = try Data(contentsOf: coreFile)
-
+    public init(binFile: URL) throws {
+        // Load core image data
+        let data = try Data(contentsOf: binFile)
+        
+        // Validate core image size
+        guard data.count % 2 == 0 else {
+            throw AGCError.invalidBinFile // Must be even number of bytes
+        }
+        
+        guard data.count/2 <= 36 * 0o2000 else {
+            throw AGCError.invalidBinFile // Must fit in core memory
+        }
+        
+        // Initialize state and components
         self.state = AGCState()
-        state.coreImage = data
-
+        state.binFile = data
+        
         self.io = AGCIO()
         self.engine = try AGCEngine(state: state)
-
+        
         self.engine.ioDelegate = self.io
     }
 

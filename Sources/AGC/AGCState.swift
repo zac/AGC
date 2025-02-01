@@ -5,6 +5,9 @@ public final class AGCState {
     // Memory banks
     public var erasableMemory: [[Int]] = Array(repeating: Array(repeating: 0, count: 0x400), count: 8)
     public var fixedMemory: [[Int]] = Array(repeating: Array(repeating: 0, count: 0x2000), count: 40)
+
+    // Parity checking
+    public var parities: [Int] = Array(repeating: 0, count: 40 * 0x2000 / 32)
     
     // Registers
     public var accumulator: Int = 0  // A register
@@ -20,7 +23,7 @@ public final class AGCState {
     
     // CPU state
     public var cycleCounter: UInt64 = 0
-    public var extracode: Bool = false
+    public var extraCode: Bool = false
     public var allowInterrupt: Bool = true
     public var pendFlag: Bool = false
     public var pendDelay: Int = 0
@@ -49,6 +52,7 @@ public final class AGCState {
     
     // Error states
     public var parityFail: Bool = false
+    public var checkParity: Bool = false
     public var warningFilter: Int = 0
     public var generatedWarning: Bool = false
     
@@ -72,8 +76,8 @@ public final class AGCState {
     public var trap32: Bool = false
     public var radarGateCounter: Int = 0
     
-    /// Holds the core binary image loaded from a file
-    public var coreImage: Data?
+    /// Holds the binary image loaded from a file
+    public var binFile: Data?
     
     public init() {
         // Clear I/O channels
@@ -99,7 +103,7 @@ public final class AGCState {
         
         // Initialize CPU state
         cycleCounter = 0
-        extracode = false
+        extraCode = false
         allowInterrupt = true  // The GOJAM sequence enables interrupts
         interruptRequests[8] = 1  // DOWNRUPT
         pendFlag = false
