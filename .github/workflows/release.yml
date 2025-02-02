@@ -8,10 +8,13 @@ on:
 jobs:
   release:
     name: Create Release
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+      - name: Setup Swift 6
+        uses: fwal/setup-swift@v1
+        with:
+          swift-version: '6.0'
       - name: Build Release
         run: swift build -c release
         
