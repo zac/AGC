@@ -2,9 +2,9 @@ import Foundation
 
 /// A facade for the AGC.
 public final class AGC {
-    public let state: AGCState
-    public let io: AGCIO
-    public let engine: AGCEngine
+    public private(set) var state: AGCState
+    public private(set) var io: AGCIO
+    public private(set) var engine: AGCEngine
     
     public init(binFile: URL) throws {
         // Load core image data
@@ -26,6 +26,20 @@ public final class AGC {
         self.io = AGCIO()
         self.engine = try AGCEngine(state: state)
         
+        self.engine.ioDelegate = self.io
+    }
+
+    public func run(for cycles: UInt64) async {
+        await engine.runEngine(for: cycles)
+    }
+
+    public func reset() throws {
+        let binFile = state.binFile
+        self.state = AGCState()
+        state.binFile = binFile
+
+        self.io = AGCIO()
+        self.engine = try AGCEngine(state: state)
         self.engine.ioDelegate = self.io
     }
 

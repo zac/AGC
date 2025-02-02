@@ -16,8 +16,8 @@ public final class AGCState {
     public var index: Int = 0 // B register
     
     // I/O channels
-    public var inputChannels: [Int] = Array(repeating: 0, count: 0x100)
-    public var outputChannels: [Int] = Array(repeating: 0, count: 0x100)
+    public var inputChannels: [Int] = Array(repeating: 0, count: 512)
+    public var outputChannels: [Int] = Array(repeating: 0, count: 512)
     public var outputChannel7: Int = 0
     public var outputChannel10: [Int] = Array(repeating: 0, count: 16)
     

@@ -352,12 +352,18 @@ public final class AGCEngine {
     // Number of interrupt types supported by the AGC
     private let NUM_INTERRUPT_TYPES = 10
     
+    // ** NEW constant added for I/O channels **
+    private let NUM_CHANNELS = 512   // Total number of channels
+    
     // AGC numerical constants in AGC 1's complement format
     private let AGC_P0 = 0                // Positive zero
     private let AGC_M0 = 0o77777         // Negative zero 
     private let AGC_P1 = 1               // Positive one
     private let AGC_M1 = 0o77776         // Negative one
     
+    // Add near the top with other constants:
+    private let AGC_PER_SECOND: UInt64 = 11_700  // Machine cycles per second
+
     public init(state: AGCState) throws {
         self.state = state
         
@@ -540,66 +546,127 @@ public final class AGCEngine {
     private func readRegister(_ register: Register) -> Int {
         return readMemory(register.rawValue)
     }
+
+    /// Check if address is the accumulator register
+    private func isA(_ address: Int) -> Bool {
+        return address == Register.regA.rawValue
+    }
+    
+    /// Check if address is the L register
+    private func isL(_ address: Int) -> Bool {
+        return address == Register.regL.rawValue
+    }
+    
+    /// Check if address is the Q register 
+    private func isQ(_ address: Int) -> Bool {
+        return address == Register.regQ.rawValue
+    }
+    
+    /// Check if address is the EB register
+    private func isEB(_ address: Int) -> Bool {
+        return address == Register.regEB.rawValue
+    }
+    
+    /// Check if address is the Z register
+    private func isZ(_ address: Int) -> Bool {
+        return address == Register.regZ.rawValue
+    }
+    
+    /// Check if address matches the given register
+    private func isReg(_ address: Int, _ register: Register) -> Bool {
+        return address == register.rawValue
+    }
     
     /// Write a word to a specific register
     private func writeRegister(_ register: Register, _ value: Int) {
         writeMemory(register.rawValue, value)
     }
-    
-    /// Execute one AGC instruction
-    private func executeInstruction(_ instruction: Int) {
-        if state.extraCode {
-            executeExtendedInstruction(instruction)
-            state.extraCode = false
-            return
+
+    /// Write a value to an I/O channel with special handling for certain channels
+    private func cpuWriteIO(address: Int, value: Int) {
+        var modifiedValue = value
+        
+        if address == 0o13 {
+            // Handle HANDRUPT trap settings
+            if (value & 0o4000) != 0 {
+                state.trap31A = true
+            }
+            if (value & 0o10000) != 0 {
+                state.trap31B = true  
+            }
+            if (value & 0o20000) != 0 {
+                state.trap32 = true
+            }
+            
+            modifiedValue &= 0o43777
         }
         
-        let opcode = (instruction >> 12) & 0o7
-        let address = instruction & 0o7777
-        
-        switch opcode {
-        case 0: // TC - Transfer Control
-            state.returnAddress = state.programCounter
-            state.programCounter = address
+        if address == 0o33 {
+            // Reset bits 11-15 to 1 for channel 33
+            state.inputChannels[address] |= 0o76000
             
-        case 1: // CCS - Count, Compare, and Skip
-            let value = readMemory(address)
-            if value > 0 {
-                state.programCounter += 1
-            } else if value < 0 {
-                state.programCounter += 2
-            } else {
-                state.programCounter += 3
+            // Don't allow warning reset if light still on
+            if state.warningFilter > WARNING_FILTER_THRESHOLD {
+                state.inputChannels[address] &= 0o57777
             }
-            state.accumulator = abs(value) - 1
             
-        case 2: // INDEX
-            state.index = readMemory(address)
+            // Use existing channel value
+            modifiedValue = state.inputChannels[address]
+        }
+        else if address == 0o77 {
+            // Reset CH77 alarm codes
+            modifiedValue = 0
             
-        case 3: // RESUME
-            // Implement RESUME logic
-            break
-            
-        // Add other opcodes...
-            
-        default:
-            break
+            // Set night watchman bit if tripped
+            if state.nightWatchmanTripped {
+                modifiedValue |= CH77_NIGHT_WATCHMAN
+            }
+        }
+        else if address == 0o11 && (value & 0o1000) != 0 {
+            // Reset DSKY restart light
+            state.restartLight = false
+        }
+        
+        writeIO(address: address, value: modifiedValue)
+        channelOutput(channel: address, value: modifiedValue & 0o77777)
+
+        // Handle downlink timing
+        if address == 0o34 {
+            state.downlink |= 1
+        }
+        else if address == 0o35 {
+            state.downlink |= 2
+        }
+        
+        if state.downlink == 3 {
+            state.downruptTimeValid = true
+            state.downruptTime = state.cycleCounter + (AGC_PER_SECOND / 50)
+            state.downlink = 0
         }
     }
-    
+        
     /// Execute an extended instruction based on the opcode
-    private func executeExtendedInstruction(_ instruction: Int) {
+    private func executeExtendedInstruction(_ instruction: Int, overflow: Bool) {
         // Track if we took certain branch instructions
         var justTookBZF = false
         var justTookBZMF = false
         var executedTC = false
         var tcTransient = false
         var keepExtraCode = false
+
+        let currentBB = readRegister(.regBB)
+        let currentEB = readRegister(.regEB)
+        let currentFB = readRegister(.regFB)
         
         let opcode = (instruction >> 9) & 0o7
         let address12 = (instruction >> 6) & 0o777
         let address10 = (instruction >> 3) & 0o777
         let address9 = instruction & 0o777
+
+        // Check for TCF0 transient after BZF
+        if state.tookBZF && !(instruction == 0o000 && address12 == 6) {
+            tcTransient = true
+        }
         
         switch opcode {
         case 0...7: // TC instruction (1 MCT)
@@ -659,7 +726,643 @@ public final class AGCEngine {
             }
             
         // Continue implementing other opcodes...
-        
+        case 0o12...0o17: // TCF instruction (1 MCT)
+            state.nextZ = address12
+            executedTC = true
+            
+        case 0o20...0o21: // DAS instruction (3 MCT)
+            var msw: Int
+            var lsw: Int
+            
+            if isL(address10) { // DDOUBL
+                lsw = addSP16(readRegister(.regL) & 0o177777, readRegister(.regL) & 0o177777)
+                msw = addSP16(state.accumulator, state.accumulator)
+                
+                if (0o140000 & lsw) == 0o40000 {
+                    msw = addSP16(msw, AGC_P1)
+                } else if (0o140000 & lsw) == 0o100000 {
+                    msw = addSP16(msw, signExtend(AGC_M1))
+                }
+                lsw = overflowCorrected(lsw)
+                writeRegister(.regA, msw & 0o177777)
+                writeRegister(.regL, signExtend(lsw) & 0o177777)
+                
+            } else {
+                let whereWord = findMemoryWord(address10)
+                
+                if address10 < Register.ramStart {
+                    lsw = addSP16(readRegister(.regL) & 0o177777, readRegister(Register(rawValue: address10)!) & 0o177777)
+                } else {
+                    lsw = addSP16(readRegister(.regL) & 0o177777, signExtend(whereWord))
+                }
+                
+                if address10 < Register.ramStart + 1 {
+                    msw = addSP16(state.accumulator, readRegister(Register(rawValue: address10 - 1)!) & 0o177777)
+                } else {
+                    msw = addSP16(state.accumulator, signExtend(whereWord - 1))
+                }
+                
+                if (0o140000 & lsw) == 0o40000 {
+                    msw = addSP16(msw, AGC_P1)
+                } else if (0o140000 & lsw) == 0o100000 {
+                    msw = addSP16(msw, signExtend(AGC_M1))
+                }
+                lsw = overflowCorrected(lsw)
+                
+                if (0o140000 & msw) == 0o100000 {
+                    writeRegister(.regA, signExtend(AGC_M1))
+                } else if (0o140000 & msw) == 0o40000 {
+                    writeRegister(.regA, AGC_P1)
+                } else {
+                    writeRegister(.regA, AGC_P0)
+                }
+                writeRegister(.regL, AGC_P0)
+                
+                if address10 < Register.ramStart {
+                    writeRegister(Register(rawValue: address10)!, signExtend(lsw))
+                } else {
+                    assignFromPointer(address10, lsw)
+                }
+                
+                if address10 < Register.ramStart + 1 {
+                    writeRegister(Register(rawValue: address10 - 1)!, msw)
+                } else {
+                    assignFromPointer(address10 - 1, overflowCorrected(msw))
+                }
+            }
+            
+        case 0o22...0o23: // LXCH instruction (2 MCT)
+            if isL(address10) {
+                break
+            }
+            
+            if isReg(address10, .regZERO) { // ZL
+                writeRegister(.regL, AGC_P0)
+            } else if address10 < Register.ramStart {
+                let operand16 = readRegister(.regL)
+                writeRegister(.regL, readRegister(Register(rawValue: address10)!))
+                
+                if address10 >= 0o20 && address10 <= 0o23 {
+                    assignFromPointer(address10, overflowCorrected(operand16 & 0o177777))
+                } else {
+                    writeRegister(Register(rawValue: address10)!, operand16)
+                }
+                
+                if address10 == Register.regZ.rawValue {
+                    state.nextZ = readRegister(.regZ)
+                }
+            } else {
+                let whereWord = findMemoryWord(address10)
+                let operand16 = whereWord
+                assignFromPointer(address10, overflowCorrected(readRegister(.regL) & 0o177777))
+                writeRegister(.regL, signExtend(operand16))
+            }
+            
+        case 0o24...0o25: // INCR instruction (2 MCT)
+            let whereWord = findMemoryWord(address10)
+            
+            if address10 < Register.ramStart {
+                writeRegister(Register(rawValue: address10)!, addSP16(AGC_P1, readRegister(Register(rawValue: address10)!) & 0o177777))
+            } else {
+                let sum = addSP16(AGC_P1, signExtend(whereWord))
+                assignFromPointer(address10, overflowCorrected(sum))
+                interruptRequests(address10, sum)
+            }
+            
+        case 0o26...0o27: // ADS instruction (2 MCT)
+            let whereWord = findMemoryWord(address10)
+            
+            if isA(address10) {
+                state.accumulator = addSP16(state.accumulator, state.accumulator)
+            } else if address10 < Register.ramStart {
+                state.accumulator = addSP16(state.accumulator, readRegister(Register(rawValue: address10)!) & 0o177777)
+            } else {
+                state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
+            }
+            
+            writeRegister(.regA, state.accumulator)
+            
+            if !isA(address10) {
+                if address10 < Register.ramStart {
+                    writeRegister(Register(rawValue: address10)!, state.accumulator)
+                } else {
+                    assignFromPointer(address10, overflowCorrected(state.accumulator))
+                }
+            }
+            
+        case 0o30...0o37: // CA instruction
+            if isA(address12) { // NOOP
+                break
+            }
+            
+            if address12 < Register.ramStart {
+                writeRegister(.regA, readRegister(Register(rawValue: address12)!))
+                break
+            }
+            
+            let whereWord = findMemoryWord(address12)
+            writeRegister(.regA, signExtend(whereWord))
+            assignFromPointer(address12, whereWord)
+            
+        case 0o40...0o47: // CS instruction
+            tcTransient = true // CS causes transients on the TC0 line
+            
+            if isA(address12) { // COM
+                writeRegister(.regA, ~state.accumulator)
+                break
+            }
+            
+            if address12 < Register.ramStart {
+                writeRegister(.regA, ~readRegister(Register(rawValue: address12)!))
+                break
+            }
+            
+            let whereWord = findMemoryWord(address12)
+            writeRegister(.regA, signExtend(negateSP(whereWord)))
+            assignFromPointer(address12, whereWord)
+            
+        case 0o50...0o51: // INDEX instruction
+            if address10 == 0o17 {
+                // Handle RESUME case in 0o150...0o157
+                break
+            }
+            
+            if address10 < Register.ramStart {
+                state.indexValue = overflowCorrected(readRegister(Register(rawValue: address10)!))
+            } else {
+                let whereWord = findMemoryWord(address10)
+                state.indexValue = whereWord
+            }
+            
+        case 0o150...0o157: // INDEX (continued)
+            if address12 == 0o17 << 1 { // RESUME
+                if state.inIsr {
+                    // BacktraceAdd(255)
+                } else {
+                    // BacktraceAdd(0)
+                }
+                state.nextZ = readRegister(.regZRUPT) - 1
+                state.inIsr = false
+                state.substituteInstruction = true
+            } else {
+                if address12 < Register.ramStart {
+                    state.indexValue = overflowCorrected(readRegister(Register(rawValue: address12)!))
+                } else {
+                    let whereWord = findMemoryWord(address12)
+                    state.indexValue = whereWord
+                }
+                keepExtraCode = true
+            }
+            
+        case 0o52...0o53: // DXCH instruction
+            tcTransient = true // DXCH causes transients on the TCF0 line
+            
+            if isL(address10) {
+                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+                break
+            }
+            
+            let whereWord = findMemoryWord(address10)
+            
+            // Topmost word
+            if address10 < Register.ramStart {
+                let operand16 = readRegister(Register(rawValue: address10)!)
+                writeRegister(Register(rawValue: address10)!, readRegister(.regL))
+                writeRegister(.regL, operand16)
+                
+                if address10 == Register.regZ.rawValue {
+                    state.nextZ = readRegister(.regZ)
+                }
+            } else {
+                let operand16 = signExtend(whereWord)
+                assignFromPointer(address10, overflowCorrected(readRegister(.regL)))
+                writeRegister(.regL, operand16)
+            }
+            
+            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+            
+            // Bottom word
+            if address10 < Register.ramStart + 1 {
+                let operand16 = readRegister(Register(rawValue: address10 - 1)!)
+                writeRegister(Register(rawValue: address10 - 1)!, readRegister(.regA))
+                writeRegister(.regA, operand16)
+                
+                if address10 == Register.regZ.rawValue + 1 {
+                    state.nextZ = readRegister(.regZ)
+                }
+            } else {
+                let operand16 = signExtend(whereWord - 1)
+                assignFromPointer(address10 - 1, overflowCorrected(readRegister(.regA)))
+                writeRegister(.regA, operand16)
+            }
+            
+        case 0o54...0o55: // TS instruction
+            tcTransient = true // TS causes transients on the TCF0 line
+            
+            if isA(address10) { // OVSK
+                if overflow {
+                    state.nextZ += AGC_P1
+                }
+            } else if isZ(address10) { // TCAA
+                state.nextZ = state.accumulator & 0o77777
+                if overflow {
+                    writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
+                }
+            } else { // Not OVSK or TCAA
+                let whereWord = findMemoryWord(address10)
+                
+                if address10 < Register.ramStart {
+                    writeRegister(Register(rawValue: address10)!, state.accumulator)
+                } else {
+                    assignFromPointer(address10, overflowCorrected(state.accumulator))
+                }
+                
+                if overflow {
+                    writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
+                    state.nextZ += AGC_P1
+                }
+            }
+            
+        case 0o56...0o57: // XCH instruction
+            tcTransient = true // XCH causes transients on the TCF0 line
+            
+            if isA(address10) {
+                break
+            }
+            
+            if address10 < Register.ramStart {
+                writeRegister(.regA, readRegister(Register(rawValue: address10)!))
+                writeRegister(Register(rawValue: address10)!, state.accumulator)
+                
+                if address10 == Register.regZ.rawValue {
+                    state.nextZ = readRegister(.regZ)
+                }
+                break
+            }
+            
+            let whereWord = findMemoryWord(address10)
+            writeRegister(.regA, signExtend(whereWord))
+            assignFromPointer(address10, overflowCorrected(state.accumulator))
+            
+        case 0o60...0o67: // AD instruction
+            if isA(address12) { // DOUBLE
+                state.accumulator = addSP16(state.accumulator, state.accumulator)
+            } else if address12 < Register.ramStart {
+                state.accumulator = addSP16(state.accumulator, readRegister(Register(rawValue: address12)!) & 0o177777)
+            } else {
+                let whereWord = findMemoryWord(address12)
+                state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
+                assignFromPointer(address12, whereWord)
+            }
+            writeRegister(.regA, state.accumulator)
+            
+        case 0o70...0o77: // MASK instruction
+            if address12 < Register.ramStart {
+                writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address12)!))
+            } else {
+                writeRegister(.regA, overflowCorrected(state.accumulator))
+                let whereWord = findMemoryWord(address12)
+                writeRegister(.regA, signExtend(readRegister(.regA) & whereWord))
+            }
+            
+        case 0o100: // READ instruction
+            if isL(address9) || isQ(address9) {
+                writeRegister(.regA, readRegister(Register(rawValue: address9)!))
+            } else {
+                writeRegister(.regA, signExtend(readIO(address: address9)))
+            }
+            
+        case 0o101: // WRITE instruction
+            if isL(address9) || isQ(address9) {
+                writeRegister(Register(rawValue: address9)!, state.accumulator)
+            } else {
+                cpuWriteIO(address: address9, value: overflowCorrected(state.accumulator))
+            }
+            
+        case 0o102: // RAND instruction
+            if isL(address9) || isQ(address9) {
+                writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address9)!))
+            } else {
+                var operand16 = overflowCorrected(state.accumulator)
+                operand16 &= readIO(address: address9)
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+        case 0o103: // WAND instruction
+            if isL(address9) || isQ(address9) {
+                let result = state.accumulator & readRegister(Register(rawValue: address9)!)
+                writeRegister(.regA, result)
+                writeRegister(Register(rawValue: address9)!, result)
+            } else {
+                var operand16 = overflowCorrected(state.accumulator)
+                operand16 &= readIO(address: address9)
+                cpuWriteIO(address: address9, value: operand16)
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+        case 0o104: // ROR instruction
+            if isL(address9) || isQ(address9) {
+                writeRegister(.regA, state.accumulator | readRegister(Register(rawValue: address9)!))
+            } else {
+                var operand16 = overflowCorrected(state.accumulator)
+                operand16 |= readIO(address: address9)
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+        case 0o105: // WOR instruction
+            if isL(address9) || isQ(address9) {
+                let result = state.accumulator | readRegister(Register(rawValue: address9)!)
+                writeRegister(.regA, result)
+                writeRegister(Register(rawValue: address9)!, result)
+            } else {
+                var operand16 = overflowCorrected(state.accumulator)
+                operand16 |= readIO(address: address9)
+                cpuWriteIO(address: address9, value: operand16)
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+        case 0o106: // RXOR instruction
+            if isL(address9) || isQ(address9) {
+                writeRegister(.regA, state.accumulator ^ readRegister(Register(rawValue: address9)!))
+            } else {
+                var operand16 = overflowCorrected(state.accumulator)
+                operand16 ^= readIO(address: address9)
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+        case 0o107: // EDRUPT instruction
+            // Should not be possible to get here since EDRUPT is treated as interrupt
+            break
+            
+        case 0o110...0o111: // DV instruction
+            let dividend = spToDecent(readRegister(.regL))
+            let (msb, lsb) = decentToSp(overflowCorrected(state.accumulator))
+            
+            // Check boundary conditions
+            let absA = absSP(lsb)
+            let absL = absSP(msb)
+            
+            var div16: Int
+            if isA(address10) {
+                // DV modifies A before reading divisor, so divisor is -|A|
+                div16 = readRegister(.regA)
+                if (readRegister(.regA) & 0o100000) == 0 {
+                    div16 = 0o177777 & ~div16
+                }
+            } else if isL(address10) {
+                // DV modifies L before reading divisor. L is first negated if quotient A,L is negative
+                // according to DV sign rules. Then 0o40000 is added.
+                div16 = readRegister(.regL)
+                if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
+                    (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
+                    div16 = 0o177777 & ~div16
+                }
+                // Account for L's built-in overflow correction
+                div16 = signExtend(overflowCorrected(addSP16(div16, 0o40000)))
+            } else if isZ(address10) {
+                // DV modifies Z before reading divisor. If quotient A,L is negative according to DV sign rules,
+                // Z16 is set
+                div16 = readRegister(.regZ)
+                if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
+                    (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
+                    div16 |= 0o100000
+                }
+            } else if address10 < Register.ramStart {
+                div16 = readRegister(Register(rawValue: address10)!)
+            } else {
+                div16 = signExtend(findMemoryWord(address10))
+            }
+            
+            let absK = absSP(overflowCorrected(div16))
+            
+            if absA > absK || (absA == absK && absL != AGC_P0) ||
+               valueOverflowed(div16) != AGC_P0 {
+                // Divisor smaller than dividend or has overflow
+                // Fall back to hardware simulation for "total nonsense" that matches AGC
+                simulateDV(div16)
+            } else if absA == 0 && absL == 0 {
+                // Dividend is 0 but divisor is not. Standard DV sign convention applies to A,
+                // L remains unchanged
+                var operand16: Int
+                if (0o40000 & readRegister(.regL)) == (0o40000 & overflowCorrected(div16)) {
+                    operand16 = absK == 0 ? 0o37777 : AGC_P0 // Max positive or +0
+                } else {
+                    operand16 = absK == 0 ? (0o77777 & ~0o37777) : AGC_M0 // Max negative or -0
+                }
+                writeRegister(.regA, signExtend(operand16))
+            } else if absA == absK && absL == AGC_P0 {
+                // Divisor equals dividend
+                let operand16 = lsb == overflowCorrected(div16) ?
+                    0o37777 : // Max positive if signs agree
+                    (0o77777 & ~0o37777) // Max negative if signs differ
+                writeRegister(.regL, signExtend(lsb)) // TODO: Check if this is correct
+                writeRegister(.regA, signExtend(operand16))
+            } else {
+                // Divisor larger than dividend - safe to divide
+                // Sign conventions match normal division operators
+                let dividendCPU = agc2cpu2(dividend)
+                let divisorCPU = agc2cpu(overflowCorrected(div16))
+                let quotient = dividendCPU / divisorCPU
+                let remainder = dividendCPU % divisorCPU
+                
+                writeRegister(.regA, signExtend(cpu2agc(quotient)))
+                
+                if remainder == 0 {
+                    // Need -0 vs +0 based on dividend sign
+                    writeRegister(.regL, dividendCPU >= 0 ? AGC_P0 : signExtend(AGC_M0))
+                } else {
+                    writeRegister(.regL, signExtend(cpu2agc(remainder)))
+                }
+            }
+        case 0o112...0o117: // BZF instruction
+            if state.accumulator == 0 || state.accumulator == 0o177777 {
+                // BacktraceAdd(0)
+                state.nextZ = address12
+                justTookBZF = true
+            }
+            
+        case 0o120...0o121: // MSU instruction
+            let whereWord = findMemoryWord(address10)
+            let ui: Int
+            let uj: Int
+            
+            if address10 < Register.ramStart {
+                ui = 0o177777 & state.accumulator
+                uj = 0o177777 & ~readRegister(Register(rawValue: address10)!)
+            } else {
+                ui = 0o77777 & overflowCorrected(state.accumulator)
+                uj = 0o77777 & ~whereWord
+            }
+            
+            var diff = ui + uj + 1 // Two's complement subtraction
+            
+            if (diff & 0o40000) != 0 {
+                diff |= 0o100000 // Sign extend A15 to A16
+                diff -= 1 // Subtract one from result
+            }
+            
+            if isQ(address10) {
+                writeRegister(.regA, 0o177777 & diff)
+            } else {
+                let operand16 = 0o77777 & diff
+                writeRegister(.regA, signExtend(operand16))
+            }
+            
+            if address10 >= 0o20 && address10 <= 0o23 {
+                assignFromPointer(address10, whereWord)
+            }
+            
+        case 0o122...0o123: // QXCH instruction
+            if isQ(address10) {
+                break
+            }
+            
+            if isReg(address10, .regZERO) { // ZQ
+                writeRegister(.regQ, AGC_P0)
+            } else if address10 < Register.ramStart {
+                let operand16 = readRegister(.regQ)
+                writeRegister(.regQ, readRegister(Register(rawValue: address10)!))
+                writeRegister(Register(rawValue: address10)!, operand16)
+                
+                if address10 == Register.regZ.rawValue {
+                    state.nextZ = readRegister(.regZ)
+                }
+            } else {
+                let whereWord = findMemoryWord(address10)
+                let operand16 = overflowCorrected(readRegister(.regQ))
+                writeRegister(.regQ, signExtend(whereWord))
+                assignFromPointer(address10, operand16)
+            }
+            
+        case 0o124...0o125: // AUG instruction
+            let whereWord = findMemoryWord(address10)
+            var operand16: Int
+            
+            if address10 < Register.ramStart {
+                operand16 = readRegister(Register(rawValue: address10)!)
+            } else {
+                operand16 = signExtend(whereWord)
+            }
+            
+            operand16 &= 0o177777
+            let increment = (operand16 & 0o100000) == 0 ? AGC_P1 : signExtend(AGC_M1)
+            let sum = addSP16(increment & 0o177777, operand16 & 0o177777)
+            
+            if address10 < Register.ramStart {
+                writeRegister(Register(rawValue: address10)!, sum)
+            } else {
+                assignFromPointer(address10, overflowCorrected(sum))
+                interruptRequests(address10, sum)
+            }
+            
+        case 0o126...0o127: // DIM instruction
+            let whereWord = findMemoryWord(address10)
+            var operand16: Int
+            
+            if address10 < Register.ramStart {
+                operand16 = readRegister(Register(rawValue: address10)!)
+            } else {
+                operand16 = signExtend(whereWord)
+            }
+            
+            operand16 &= 0o177777
+            if operand16 == AGC_P0 || operand16 == signExtend(AGC_M0) {
+                break
+            }
+            
+            let increment = (operand16 & 0o100000) == 0 ? signExtend(AGC_M1) : AGC_P1
+            let sum = addSP16(increment & 0o177777, operand16 & 0o177777)
+            
+            if address10 < Register.ramStart {
+                writeRegister(Register(rawValue: address10)!, sum)
+            } else {
+                assignFromPointer(address10, overflowCorrected(sum))
+            }
+            
+        case 0o130...0o137: // DCA instruction
+            if isL(address12) {
+                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+                break
+            }
+            
+            let whereWord = findMemoryWord(address12)
+            
+            // Do topmost word first
+            if address12 < Register.ramStart {
+                writeRegister(.regL, readRegister(Register(rawValue: address12)!))
+            } else {
+                writeRegister(.regL, signExtend(whereWord))
+            }
+            
+            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+            
+            // Now do bottom word
+            if address12 < Register.ramStart + 1 {
+                writeRegister(.regA, readRegister(Register(rawValue: address12 - 1)!))
+            } else {
+                writeRegister(.regA, signExtend(whereWord - 1))
+            }
+            
+            if address12 >= 0o20 && address12 <= 0o23 {
+                assignFromPointer(address12, whereWord)
+            }
+            
+            if address12 >= 0o20 + 1 && address12 <= 0o23 + 1 {
+                assignFromPointer(address12 - 1, whereWord - 1)
+            }
+            
+        case 0o140...0o147: // DCS instruction
+            if isL(address12) { // DCOM
+                writeRegister(.regA, ~state.accumulator)
+                writeRegister(.regL, ~readRegister(.regL))
+                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+                break
+            }
+            
+            let whereWord = findMemoryWord(address12)
+            
+            // Do topmost word first
+            if address12 < Register.ramStart {
+                writeRegister(.regL, ~readRegister(Register(rawValue: address12)!))
+            } else {
+                writeRegister(.regL, ~signExtend(whereWord))
+            }
+            
+            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+            
+            // Now do bottom word
+            if address12 < Register.ramStart + 1 {
+                writeRegister(.regA, ~readRegister(Register(rawValue: address12 - 1)!))
+            } else {
+                writeRegister(.regA, ~signExtend(whereWord - 1))
+            }
+            
+            if address12 >= 0o20 && address12 <= 0o23 {
+                assignFromPointer(address12, whereWord)
+            }
+            
+            if address12 >= 0o20 + 1 && address12 <= 0o23 + 1 {
+                assignFromPointer(address12 - 1, whereWord - 1)
+            }
+            
+        case 0o160...0o161: // SU instruction
+            if isA(address10) {
+                state.accumulator = signExtend(AGC_M0)
+            } else if address10 < Register.ramStart {
+                state.accumulator = addSP16(state.accumulator, 0o177777 & ~readRegister(Register(rawValue: address10)!))
+            } else {
+                let whereWord = findMemoryWord(address10)
+                state.accumulator = addSP16(state.accumulator, signExtend(negateSP(whereWord)))
+                assignFromPointer(address10, whereWord)
+            }
+            writeRegister(.regA, state.accumulator)
+            
+        case 0o162...0o167: // BZMF instruction
+            if state.accumulator == 0 || (state.accumulator & 0o100000) != 0 {
+                // BacktraceAdd(0)
+                state.nextZ = address12
+                justTookBZMF = true
+            }
         case 0o170...0o177: // MP instruction
             let operand16 = overflowCorrected(state.accumulator)
             let whereWord = findMemoryWord(address12)
@@ -696,10 +1399,6 @@ public final class AGCEngine {
             }
             
             // Values written to EB and FB are automatically mirrored to BB, and vice versa
-            let currentBB = readRegister(.regBB)
-            let currentEB = readRegister(.regEB) 
-            let currentFB = readRegister(.regFB)
-            
             if currentBB != readRegister(.regBB) {
                 writeRegister(.regFB, readRegister(.regBB) & 0o76000)
                 writeRegister(.regEB, (readRegister(.regBB) & 0o7) << 8)
@@ -753,7 +1452,7 @@ public final class AGCEngine {
         let agcProduct = cpu2agc2(product)
         
         // Convert to double precision
-        var wordPair = decentToSp(agcProduct)
+        let wordPair = decentToSp(agcProduct)
         return (wordPair.0, wordPair.1)
     }
     
@@ -780,7 +1479,7 @@ public final class AGCEngine {
     
     /// Execute one simulation cycle
     private func executeCycle() async -> Bool {
-        var tcTransient = false
+        var overflow: Bool = false
 
         // For DOWNRUPT
         if state.downruptTimeValid && state.cycleCounter >= state.downruptTime {
@@ -985,7 +1684,7 @@ public final class AGCEngine {
                     if decrementCounter(register: Register.regTIME6) {
                         state.interruptRequests[1] = 1
                         // Disable T6 by clearing CH13 bit
-                        cpuWriteIO(channel: 0o13, value: state.inputChannels[0o13] & 0o37777)
+                        cpuWriteIO(address: 0o13, value: state.inputChannels[0o13] & 0o37777)
                     }
                 }
             }
@@ -1047,15 +1746,15 @@ public final class AGCEngine {
                 
                 // Clear I/O channels
                 for channel in [0o5, 0o6, 0o10, 0o11, 0o12, 0o13, 0o14] {
-                    cpuWriteIO(channel: channel, value: 0)
+                    cpuWriteIO(address: channel, value: 0)
                 }
                 
                 // Clear UPLINK TOO FAST bit in channel 33
                 state.inputChannels[0o33] |= 0o2000
                 
                 // Clear channels 34 and 35 without generating downrupt
-                cpuWriteIO(channel: 0o34, value: 0)
-                cpuWriteIO(channel: 0o35, value: 0)
+                cpuWriteIO(address: 0o34, value: 0)
+                cpuWriteIO(address: 0o35, value: 0)
                 state.downruptTimeValid = false
                 
                 // Clear internal state
@@ -1098,7 +1797,7 @@ public final class AGCEngine {
 
         // After updating cycle counter:
         if imuTiming.shouldEmitBurst(state: state, currentCycle: state.cycleCounter) {
-            cpuWriteIO(channel: 0o14, value: imuTiming.channel14)
+            cpuWriteIO(address: 0o14, value: imuTiming.channel14)
         }
 
         // Handle optics shaft & trunnion CDUs
@@ -1118,14 +1817,10 @@ public final class AGCEngine {
         }
 
         // Instruction decoding setup
-        // Store current bank register values
-        let currentEB = readRegister(.regEB)
-        let currentFB = readRegister(.regFB)
-        let currentBB = readRegister(.regBB)
 
         // Reform 16-bit accumulator and check for overflow
         let accumulator = readRegister(.regA) & 0o177777
-        let overflow = valueOverflowed(accumulator) != 0
+        overflow = valueOverflowed(accumulator) != 0
 
         // Get program counter from Z register (12 bits)
         let programCounter = readRegister(.regZ) & 0o7777
@@ -1149,9 +1844,6 @@ public final class AGCEngine {
         // Parse instruction components
         let extendedOpcode = (instruction >> 9) | (isExtracode ? 0o100 : 0)
         let quarterCode = instruction & ~MASK10
-        let address12 = instruction & MASK12
-        let address10 = instruction & MASK10
-        let address9 = instruction & MASK9
 
         // Handle interrupts
         let canInterrupt = (!state.inIsr && state.allowInterrupt && 
@@ -1161,7 +1853,6 @@ public final class AGCEngine {
 
         if canInterrupt {
             var interruptRequested = false
-            var interruptType = 0
             
             // Search for next interrupt request in priority order
             for i in 1...10 {  // NUM_INTERRUPT_TYPES
@@ -1172,7 +1863,6 @@ public final class AGCEngine {
                     
                     state.nextZ = 0o4000 + 4 * i
                     
-                    interruptType = i
                     interruptRequested = true
                     break
                 }
@@ -1191,7 +1881,7 @@ public final class AGCEngine {
                 
                 // Clear metadata
                 state.extraCode = false
-                state.indexValue = 0  // AGC_P0
+                state.indexValue = AGC_P0
                 state.substituteInstruction = false
                 
                 // Vector to interrupt
@@ -1229,59 +1919,80 @@ public final class AGCEngine {
         state.nextZ = 1 + readRegister(.regZ)
         writeRegister(.regZ, state.nextZ)
 
-        // Check for TCF0 transient after BZF
-        if state.tookBZF && !(extendedOpcode == 0o000 && address12 == 6) {
-            tcTransient = true
-        }
-
-        // TODO: parse and execute the instruction
+        // Execute the instruction
+        executeExtendedInstruction(extendedOpcode, overflow: overflow)
 
         // Continue with instruction execution
         return true
     }
-    
-    /// Get data from input channels
+
+    /// Get input from peripherals for a channel
     private func channelInput() async -> Bool {
-        // TODO: Implement channel input logic
+        // Get input from delegate
+        if let input = await ioDelegate?.channelInput() {
+            // Process any received input
+            for (channel, value) in input {
+                state.inputChannels[channel] = value
+            }
+            return true
+        }
         return false
     }
-    
+
     /// Start the simulation engine.
+    /// This initializes the AGC state and starts the main execution loop running at 11.7 microsecond intervals
     public func startEngine() {
+        // Initialize state
+        state.cycleCounter = 0
+        state.extraCode = false
+        state.allowInterrupt = false
+        state.pendFlag = false 
+        state.pendDelay = 0
+        state.extraDelay = 0
+        
+        // Set initial program counter to 04000
+        writeRegister(.regZ, 0o4000)
+        
+        // Clear I/O channels
+        for channel in 0..<NUM_CHANNELS {
+            state.inputChannels[channel] = 0
+        }
+        
+        // Set initial values for certain channels
+        state.inputChannels[0o30] = 0o37777
+        state.inputChannels[0o31] = 0o77777 
+        state.inputChannels[0o32] = 0o77777
+        state.inputChannels[0o33] = 0o77777
+        
+        // Clear erasable memory
+        for bank in 0..<8 {
+            for addr in 0..<0o400 {
+                state.erasableMemory[bank][addr] = 0
+            }
+        }
+        
+        // Start main execution loop
         engineTask = Task.detached { [weak self] in
             guard let self = self else { return }
             while !Task.isCancelled {
-                // Only proceed with instruction execution if cycle processing completes
-                if await self.executeCycle() {
-                    let instruction = self.readMemory(self.state.programCounter)
-                    
-                    let extraCycles = self.getInstructionTiming(
-                        instruction: instruction,
-                        isExtracode: self.state.extraCode
-                    )
-                    
-                    self.executeInstruction(instruction)
-                    
-                    if extraCycles > 0 {
-                        try? await Task.sleep(nanoseconds: UInt64(extraCycles) * 11_700)
-                    }
-                }
-                
+                // Run one machine cycle
+                let result = await self.executeCycle()
+                print("Cycle \(self.state.cycleCounter) completed with result: \(result)")
+                // Wait 11.7 microseconds between cycles
                 try? await Task.sleep(nanoseconds: 11_700)
             }
         }
     }
 
+    /// Run the engine for a specified number of cycles
     public func runEngine(for cycles: UInt64) async {
         for _ in 0..<Int(cycles) {
-            if await self.executeCycle() {
-                let instruction = self.readMemory(self.state.programCounter)
-                self.executeInstruction(instruction)
-            }
+            let result = await self.executeCycle()
+            print("Cycle \(self.state.cycleCounter) completed with result: \(result)")
         }
     }
 
-    /// Stop the simulation engine.
+    /// Stop the simulation engine
     public func stopEngine() {
         engineTask?.cancel()
     }
@@ -1370,13 +2081,7 @@ public final class AGCEngine {
         writeRegister(register, newValue)
         return value == 0
     }
-    
-    /// Write to an I/O channel with side effects
-    private func cpuWriteIO(channel: Int, value: Int) {
-        state.inputChannels[channel] = value
-        channelOutput(channel: channel, value: value)
-    }
-    
+
     /// Check if a value has overflowed
     private func valueOverflowed(_ value: Int) -> Int {
         if (value & 0o140000) == 0o040000 {
@@ -1647,6 +2352,218 @@ public final class AGCEngine {
             // For banks 1-7, just store the value with 15-bit mask
             state.erasableMemory[bank][offset] = value & 0o77777
         }
+    }
+
+
+    /// Process channel I/O routines
+    private func channelRoutine() {
+        // Update DSKY display
+        updateDSKY()
+        
+        // Process radar data if needed
+        if state.radarGateCounter == 9 && 
+           (0o36 == (0o37 & state.inputChannels[ChanSCALER1])) {
+            
+            // Reset radar gate counter
+            state.radarGateCounter = 0
+            
+            // Reset radar activity bit
+            state.inputChannels[0o13] &= ~0o10
+            
+            // Request new radar data
+            requestRadarData()
+            
+            // Set RADARUPT pending
+            state.interruptRequests[9] = 1
+        }
+        
+        // TODO: Implement DEDA shift register
+//        // Process DEDA shift register
+//        if let dedaData = state.dedaShiftRegister {
+//            shiftToDeda(dedaData)
+//            state.dedaShiftRegister = nil
+//        }
+    }
+
+    /// Request new radar data from peripherals
+    private func requestRadarData() {
+        ioDelegate?.requestRadarData()
+    }
+
+    /// Shift data to DEDA display
+    private func shiftToDeda(_ data: Int) {
+        ioDelegate?.shiftToDeda(data: data)
+    }
+
+    /// Read a value from an I/O channel or register
+    private func readIO(address: Int) -> Int {
+        // Validate address range
+        guard address >= 0 && address <= 0o777 else {
+            return 0
+        }
+        
+        // Handle special registers that appear in both memory and I/O space
+        if address == Register.regL.rawValue || address == Register.regQ.rawValue {
+            return state.erasableMemory[0][address]
+        }
+        
+        return state.inputChannels[address]
+    }
+
+    /// Write a value to an I/O channel or register with special handling
+    private func writeIO(address: Int, value: Int) {
+        // Validate address range
+        guard address >= 0 && address <= 0o777 else {
+            return
+        }
+        
+        // Mask value to 15 bits
+        let maskedValue = value & 0o77777
+        
+        // Handle special registers that appear in both memory and I/O space
+        if address == Register.regL.rawValue || address == Register.regQ.rawValue {
+            state.erasableMemory[0][address] = maskedValue
+            return
+        }
+        
+        // Handle special cases for certain channels
+        var modifiedValue = maskedValue
+        
+        if address == 0o10 {
+            // Channel 10 is converted externally into up to 16 ports via latching relays
+            state.outputChannel10[(maskedValue >> 11) & 0o17] = maskedValue
+        }
+        else if address == 0o15 || address == 0o16 {
+            // RSET being pressed on either DSKY clears RESTART light directly
+            if maskedValue == 0o22 {
+                state.restartLight = false
+            }
+        }
+        else if address == 0o33 {
+            // Reset bits 11-15 to 1 for channel 33
+            state.inputChannels[address] |= 0o76000
+            
+            // Don't allow warning reset if light still on
+            if state.warningFilter > WARNING_FILTER_THRESHOLD {
+                state.inputChannels[address] &= 0o57777
+            }
+            
+            // Use existing channel value
+            modifiedValue = state.inputChannels[address]
+        }
+        else if address == 0o77 {
+            // Reset CH77 alarm codes
+            modifiedValue = 0
+            
+            // Set night watchman bit if tripped
+            if state.nightWatchmanTripped {
+                modifiedValue |= CH77_NIGHT_WATCHMAN
+            }
+        }
+        else if address == 0o11 && (maskedValue & 0o1000) != 0 {
+            // Reset DSKY restart light when CH11 bit 10 is written with 1
+            state.restartLight = false
+        }
+        
+        // Store final value
+        state.inputChannels[address] = modifiedValue
+        
+        // Notify I/O delegate
+        channelOutput(channel: address, value: modifiedValue & 0o77777)
+        
+        // Handle downlink timing
+        if address == 0o34 {
+            state.downlink |= 1
+        }
+        else if address == 0o35 {
+            state.downlink |= 2
+        }
+        
+        if state.downlink == 3 {
+            state.downruptTimeValid = true
+            state.downruptTime = state.cycleCounter + (AGC_PER_SECOND / 50)
+            state.downlink = 0
+        }
+    }
+
+    // Add these helper functions:
+    /// Convert SP value to negative
+    private func negateSP(_ value: Int) -> Int {
+        return 0o77777 & ~value
+    }
+
+    /// Get absolute value in SP format
+    private func absSP(_ value: Int) -> Int {
+        if (value & 0o40000) != 0 {
+            return 0o37777 & ~value
+        }
+        return value & 0o37777
+    }
+
+    /// Convert SP value pair to decent format
+    /// - Parameter lsbSP: Pointer to least significant word of SP pair
+    /// - Returns: Value in decent format (29-bit 1's complement)
+    private func spToDecent(_ lsbSP: Int) -> Int {
+        let msb = readMemory(lsbSP - 1)
+        let lsb = readMemory(lsbSP)
+        
+        // Handle case where MSB is zero
+        if msb == AGC_P0 || msb == AGC_M0 {
+            // Follow DV instruction convention - overall sign is LSB sign
+            var value = signExtend(lsb)
+            if (value & 0o100000) != 0 {
+                value |= ~0o177777
+            }
+            return value & 0o7777777777 // Remove extra sign extension bits
+        }
+        
+        var msw = msb
+        var lsw = lsb
+        
+        // If signs don't match, make them match
+        if (0o40000 & lsw) != (0o40000 & msw) {
+            if lsw == AGC_P0 || lsw == AGC_M0 {
+                // Adjust LSB sign to match MSB
+                lsw = (0o40000 & msw) == 0 ? AGC_P0 : AGC_M0
+            } else {
+                // Make MSB positive for easier logic
+                let complement = (0o40000 & msw) != 0
+                if complement {
+                    msw = 0o77777 & ~msw
+                    lsw = 0o77777 & ~lsw
+                }
+                
+                // Subtract 1 from MSB and add 2^14 + 1 to LSB
+                msw -= 1
+                lsw = (lsw + 0o40000 + AGC_P1) & 0o77777
+                
+                // Restore signs if needed
+                if complement {
+                    msw = 0o77777 & ~msw
+                    lsw = 0o77777 & ~lsw
+                }
+            }
+        }
+        
+        // Combine MSB and LSB, discarding LSB sign bit
+        var value = (0o3777740000 & (msw << 14)) | (0o37777 & lsw)
+        
+        // Sign extend for further arithmetic
+        if (value & 0o2000000000) != 0 {
+            value |= 0o4000000000
+        }
+        
+        return value
+    }
+
+    /// Simulate DV hardware behavior
+    private func simulateDV(_ divisor: Int) {
+        // TODO: Implement DV hardware simulation
+    }
+
+    /// Handle interrupt requests
+    private func interruptRequests(_ address: Int, _ value: Int) {
+        // TODO: Implement interrupt request handling
     }
 }
 

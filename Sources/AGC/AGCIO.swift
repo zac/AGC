@@ -1,44 +1,45 @@
 import Foundation
 
-/// A protocol defining the I/O methods that the AGC engine will call.
+/// Protocol for AGC I/O communication with peripherals
 public protocol AGCIOProtocol {
-    /// Called when a channel output is produced.
+    /// Output a value to a channel
     func channelOutput(channel: Int, value: Int)
     
-    /// Called when a channel input is requested.
-    func channelInput(channel: Int) async -> Int
+    /// Get input from peripherals
+    func channelInput() async -> [Int:Int]?
     
-    /// Called periodically for routine I/O processing.
+    /// Request new radar data
+    func requestRadarData()
+    
+    /// Shift data to DEDA display
+    func shiftToDeda(data: Int)
+
+    /// Channel routine
     func channelRoutine() async
 }
 
-/// A simple I/O implementation that uses closures to allow the embedder to supply I/O behavior.
-public final class AGCIO: AGCIOProtocol {
-    /// Closure to be invoked on channel output.
-    public var onChannelOutput: ((Int, Int) -> Void)?
-    
-    /// Closure to be invoked to get channel input.
-    public var onChannelInput: ((Int) async -> Int)?
-    
-    /// Closure to be invoked for routine channel tasks.
-    public var onChannelRoutine: (() async -> Void)?
-    
-    public init() { }
+/// Default implementation of AGC I/O
+public class AGCIO: AGCIOProtocol {
+    public init() {}
     
     public func channelOutput(channel: Int, value: Int) {
-        onChannelOutput?(channel, value)
+        // Default implementation - can be overridden by clients
     }
     
-    public func channelInput(channel: Int) async -> Int {
-        if let handler = onChannelInput {
-            return await handler(channel)
-        }
-        return 0 // Default value (if no input handler is provided)
+    public func channelInput() async -> [Int:Int]? {
+        // Default implementation returns no input
+        return nil
     }
     
+    public func requestRadarData() {
+        // Default implementation - can be overridden by clients
+    }
+    
+    public func shiftToDeda(data: Int) {
+        // Default implementation - can be overridden by clients
+    }
+
     public func channelRoutine() async {
-        if let routine = onChannelRoutine {
-            await routine()
-        }
+        // Default implementation - can be overridden by clients
     }
 } 

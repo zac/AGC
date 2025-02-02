@@ -3,21 +3,24 @@ import Foundation
 
 @testable import AGC
 
-@Test func engineCreation() async throws {
-    // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-    let url = Bundle.module.url(forResource: "Luminary099", withExtension: "bin")
-    let library = try AGC(binFile: url!)
-    #expect(library != nil)
-}
+@Suite("AGC Tests")
+class AGCTests {
 
-@Test func engineRunning() async throws {
-    // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-    let url = Bundle.module.url(forResource: "Luminary099", withExtension: "bin")
-    let library = try AGC(binFile: url!)
-    library.start()
+    private var library: AGC = {
+        let url = Bundle.module.url(forResource: "Luminary099", withExtension: "bin")
+        return try! AGC(binFile: url!)
+    }()
 
-    try! await Task.sleep(for: .seconds(1))
+    @Test func engineCreation() async throws {
+        try library.reset()
 
-    library.stop()
-    #expect(library != nil)
+        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
+        #expect(library != nil)
+    }
+
+    @Test func runEngineFor1000Cycles() async throws {
+        try library.reset()
+        await library.run(for: 1000)
+        #expect(library.state.cycleCounter == 1000)
+    }
 }
