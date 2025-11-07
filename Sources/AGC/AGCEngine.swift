@@ -778,28 +778,10 @@ public final class AGCEngine {
             performCS(address12: address12)
             
         case 0o50...0o51: // INDEX instruction
-            if address10 == 0o17 {
-                performResume()
-                break
-            }
-
-            if address10 < Register.ramStart {
-                state.indexValue = overflowCorrected(readRegister(Register(rawValue: address10)!))
-            } else {
-                let whereWord = findMemoryWord(address10)
-                state.indexValue = whereWord
-            }
+            performIndex(address10: address10)
             
         case 0o150...0o157: // INDEX (continued)
-            if address12 == 0o17 << 1 { // RESUME
-                performResume()
-            } else {
-                if address12 < Register.ramStart {
-                    state.indexValue = overflowCorrected(readRegister(Register(rawValue: address12)!))
-                } else {
-                    let whereWord = findMemoryWord(address12)
-                    state.indexValue = whereWord
-                }
+            if performExtracodeIndex(address12: address12) {
                 keepExtraCode = true
             }
             
@@ -2463,6 +2445,31 @@ public final class AGCEngine {
         if overflow {
             writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
             state.nextZ += AGC_P1
+        }
+    }
+
+    func performIndex(address10: Int) {
+        if address10 == 0o17 {
+            performResume()
+            return
+        }
+        loadIndexValue(address: address10)
+    }
+
+    func performExtracodeIndex(address12: Int) -> Bool {
+        if address12 == (0o17 << 1) {
+            performResume()
+            return false
+        }
+        loadIndexValue(address: address12)
+        return true
+    }
+
+    private func loadIndexValue(address: Int) {
+        if address < Register.ramStart {
+            state.indexValue = overflowCorrected(readRegister(Register(rawValue: address)!) & 0o177777)
+        } else {
+            state.indexValue = findMemoryWord(address)
         }
     }
 

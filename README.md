@@ -42,7 +42,7 @@ Current parity with yaAGC by instruction group (octal opcodes):
 | `026-027` | `ADS` | ✅ `adsAddsAndStoresResult` |
 | `030-037` | `CA` | ✅ `caLoadsRegisterIntoAccumulator` |
 | `040-047` | `CS` | ✅ `csComplementsRegisterValue` |
-| `050-051`, `150-157` | `INDEX`, `RESUME` | ⚠️ Resume path tested; other index cases pending |
+| `050-051`, `150-157` | `INDEX`, `RESUME` | ✅ `indexInstructionLoads…`, `extracodeIndex…`, resume |
 | `052-053` | `DXCH` | ✅ `dxchSwapsDoublePrecisionWords` |
 | `054-055` | `TS` (`OVSK`, `TCAA`) | ✅ `tsOvsk…` / `tsTCAA…` |
 | `056-057` | `XCH` | ✅ `xchSwapsWithMemory…` |

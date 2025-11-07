@@ -585,6 +585,49 @@ class AGCTests {
         #expect(!state.inIsr)
     }
 
+    @Test func indexInstructionLoadsRegisterValue() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regL, 0o12345)
+
+        engine.performIndex(address10: Register.regL.rawValue)
+
+        #expect(state.indexValue == 0o12345)
+    }
+
+    @Test func indexInstructionLoadsMemoryValue() throws {
+        let (engine, state) = try makeEngine()
+        let address = 0o400
+        state.erasableMemory[1][0] = 0o54321
+
+        engine.performIndex(address10: address)
+
+        #expect(state.indexValue == 0o54321)
+    }
+
+    @Test func extracodeIndexKeepsExtraCodeFlag() throws {
+        let (engine, state) = try makeEngine()
+        state.extraCode = true
+        state.erasableMemory[1][0] = 0o11111
+
+        let keep = engine.performExtracodeIndex(address12: 0o400)
+
+        #expect(keep)
+        #expect(state.extraCode)
+        #expect(state.indexValue == 0o11111)
+    }
+
+    @Test func extracodeIndexResumeInvokesResume() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regZRUPT, 0o2000)
+        state.inIsr = true
+
+        let keep = engine.performExtracodeIndex(address12: 0o17 << 1)
+
+        #expect(!keep)
+        #expect(state.substituteInstruction)
+        #expect(!state.inIsr)
+    }
+
     @Test func tcfAddsBacktraceEntry() throws {
         let (engine, state) = try makeEngine()
         state.backtrace.removeAll()
