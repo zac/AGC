@@ -1485,13 +1485,13 @@ public final class AGCEngine {
                     state.extraDelay += 1
                     
                     // Update TIME1 and TIME2
-                    if incrementCounter(register: Register.regTIME1) {
+                    if counterPINC(register: .regTIME1) {
                         state.extraDelay += 1
-                        _ = incrementCounter(register: Register.regTIME2)
+                        _ = counterPINC(register: .regTIME2)
                     }
                     
                     state.extraDelay += 1
-                    if incrementCounter(register: Register.regTIME3) {
+                    if counterPINC(register: .regTIME3) {
                         state.interruptRequests[3] = 1
                     }
                 }
@@ -1499,7 +1499,7 @@ public final class AGCEngine {
                 // TIME5 (5ms out of phase with TIME3)
                 if 0o000 == (0o037 & state.inputChannels[ChanSCALER1]) {
                     state.extraDelay += 1
-                    if incrementCounter(register: Register.regTIME5) {
+                    if counterPINC(register: .regTIME5) {
                         state.interruptRequests[2] = 1
                     }
                     
@@ -1512,7 +1512,7 @@ public final class AGCEngine {
                 // TIME4 (7.5ms out of phase with TIME3)
                 if 0o010 == (0o037 & state.inputChannels[ChanSCALER1]) {
                     state.extraDelay += 1
-                    if incrementCounter(register: Register.regTIME4) {
+                    if counterPINC(register: .regTIME4) {
                         state.interruptRequests[4] = 1
                     }
                 }
@@ -1521,7 +1521,7 @@ public final class AGCEngine {
                 if (state.inputChannels[0o13] & 0o40000) != 0 && 
                    (state.inputChannels[ChanSCALER1] & 0o1) == 0o1 {
                     state.extraDelay += 1
-                    if decrementCounter(register: Register.regTIME6) {
+                    if counterDINC(register: .regTIME6, counterNumber: 0) {
                         state.interruptRequests[1] = 1
                         // Disable T6 by clearing CH13 bit
                         cpuWriteIO(address: 0o13, value: state.inputChannels[0o13] & 0o37777)
@@ -1769,15 +1769,62 @@ public final class AGCEngine {
 
     /// Get input from peripherals for a channel
     private func channelInput() async -> Bool {
-        // Get input from delegate
-        if let input = await ioDelegate?.channelInput() {
-            // Process any received input
-            for (channel, value) in input {
-                state.inputChannels[channel] = value
-            }
-            return true
+        guard let input = await ioDelegate?.channelInput() else {
+            return false
         }
-        return false
+
+        var servicedCounter = false
+
+        for (channel, value) in input {
+            if (channel & 0o200) != 0 {
+                if handleUnprogrammedIncrement(counterChannel: channel, incrementType: value) {
+                    servicedCounter = true
+                }
+            } else {
+                let normalizedChannel = channel & 0o777
+                state.inputChannels[normalizedChannel] = value & 0o77777
+            }
+        }
+
+        return servicedCounter
+    }
+
+    private func handleUnprogrammedIncrement(counterChannel: Int, incrementType: Int) -> Bool {
+        guard (counterChannel & 0o200) != 0 else {
+            return false
+        }
+
+        let counter = counterChannel & 0o177
+        guard counter >= 0 && counter < state.erasableMemory[0].count else {
+            return false
+        }
+
+        let type = incrementType & 0o77
+        switch type {
+        case 0:
+            _ = counterPINC(at: counter)
+            return true
+        case 1, 0o21:
+            _ = counterPCDU(at: counter)
+            return true
+        case 2:
+            _ = counterMINC(at: counter)
+            return true
+        case 3, 0o23:
+            _ = counterMCDU(at: counter)
+            return true
+        case 4:
+            _ = counterDINC(at: counter, counterNumber: counter)
+            return true
+        case 5:
+            _ = counterSHINC(at: counter)
+            return true
+        case 6:
+            _ = counterSHANC(at: counter)
+            return true
+        default:
+            return false
+        }
     }
 
     /// Start the simulation engine.
@@ -1905,21 +1952,119 @@ public final class AGCEngine {
         state.outputChannels[channel] = value
         ioDelegate?.channelOutput(channel: channel, value: value)
     }
-    
-    /// Increment a counter register
-    private func incrementCounter(register: Register) -> Bool {
-        let value = readRegister(register)
-        let newValue = (value + 1) & 0o37777
-        writeRegister(register, newValue)
-        return newValue == 0
+
+    private func readCounter(at offset: Int) -> Int? {
+        guard offset >= 0 && offset < state.erasableMemory[0].count else {
+            return nil
+        }
+        return state.erasableMemory[0][offset] & 0o77777
     }
-    
-    /// Decrement a counter register
-    private func decrementCounter(register: Register) -> Bool {
-        let value = readRegister(register)
-        let newValue = (value - 1) & 0o37777
-        writeRegister(register, newValue)
-        return value == 0
+
+    private func writeCounter(at offset: Int, _ value: Int) {
+        guard offset >= 0 && offset < state.erasableMemory[0].count else {
+            return
+        }
+        state.erasableMemory[0][offset] = value & 0o77777
+    }
+
+    @discardableResult
+    func counterPINC(register: Register) -> Bool {
+        return counterPINC(at: register.rawValue)
+    }
+
+    @discardableResult
+    func counterMINC(register: Register) -> Bool {
+        return counterMINC(at: register.rawValue)
+    }
+
+    @discardableResult
+    func counterDINC(register: Register, counterNumber: Int = 0) -> Bool {
+        return counterDINC(at: register.rawValue, counterNumber: counterNumber)
+    }
+
+    private func counterPINC(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        if value == 0o37777 {
+            writeCounter(at: offset, AGC_P0)
+            return true
+        }
+        value = (value + 1) & 0o77777
+        if value == AGC_P0 {
+            value = (value + 1) & 0o77777
+        }
+        writeCounter(at: offset, value)
+        return false
+    }
+
+    private func counterMINC(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        if value == 0o40000 {
+            writeCounter(at: offset, AGC_M0)
+            return true
+        }
+        value = (value &- 1) & 0o77777
+        if value == AGC_M0 {
+            value = (value &- 1) & 0o77777
+        }
+        writeCounter(at: offset, value)
+        return false
+    }
+
+    private func counterPCDU(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        let overflow = value == 0o77777
+        value = (value + 1) & 0o77777
+        writeCounter(at: offset, value)
+        return overflow
+    }
+
+    private func counterMCDU(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        let overflow = value == 0
+        value = (value &- 1) & 0o77777
+        writeCounter(at: offset, value)
+        return overflow
+    }
+
+    private func counterSHINC(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        let overflow = (value & 0o20000) != 0
+        value = (value << 1) & 0o37777
+        writeCounter(at: offset, value)
+        return overflow
+    }
+
+    private func counterSHANC(at offset: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        let overflow = (value & 0o20000) != 0
+        value = ((value << 1) + 1) & 0o37777
+        writeCounter(at: offset, value)
+        return overflow
+    }
+
+    private func counterDINC(at offset: Int, counterNumber: Int) -> Bool {
+        guard var value = readCounter(at: offset) else { return false }
+        var overflow = false
+
+        if value == AGC_P0 || value == AGC_M0 {
+            overflow = true
+            emitCounterPulse(counterNumber: counterNumber, code: 0o17)
+        } else if (value & 0o40000) != 0 {
+            value = addSP16(signExtend(value), signExtend(AGC_P1)) & 0o77777
+            emitCounterPulse(counterNumber: counterNumber, code: 0o16)
+        } else {
+            value = addSP16(signExtend(value), signExtend(AGC_M1)) & 0o77777
+            emitCounterPulse(counterNumber: counterNumber, code: 0o15)
+        }
+
+        writeCounter(at: offset, value)
+        return overflow
+    }
+
+    private func emitCounterPulse(counterNumber: Int, code: Int) {
+        guard counterNumber != 0 else { return }
+        let channel = 0o200 | (counterNumber & 0o177)
+        channelOutput(channel: channel, value: code & 0o17)
     }
 
     /// Check if a value has overflowed
@@ -2722,7 +2867,7 @@ public final class AGCEngine {
         switch address {
         case Register.regTIME1.rawValue:
             // Overflowing TIME1 increments TIME2 via PINC
-            _ = incrementCounter(register: .regTIME2)
+            _ = counterPINC(register: .regTIME2)
         case Register.regTIME5.rawValue:
             state.interruptRequests[2] = 1
         case Register.regTIME3.rawValue:

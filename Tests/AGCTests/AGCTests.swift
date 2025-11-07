@@ -36,6 +36,24 @@ class AGCTests {
         }
     }
 
+    private final class TestIO: AGCIOProtocol {
+        var pendingInputs: [[Int:Int]] = []
+        var outputs: [(Int, Int)] = []
+
+        func channelOutput(channel: Int, value: Int) {
+            outputs.append((channel, value))
+        }
+
+        func channelInput() async -> [Int:Int]? {
+            guard !pendingInputs.isEmpty else { return nil }
+            return pendingInputs.removeFirst()
+        }
+
+        func requestRadarData() {}
+        func shiftToDeda(data: Int) {}
+        func channelRoutine() async {}
+    }
+
     @Test func engineCreation() async throws {
         let library = try #require(self.library)
         try library.reset()
@@ -92,6 +110,26 @@ class AGCTests {
 
         engine.interruptRequests(Register.regTIME5.rawValue, 0o40000)
         #expect(state.interruptRequests[2] == 1)
+    }
+
+    @Test func counterPINCHandlesPositiveOverflow() throws {
+        let (engine, state) = try makeEngine()
+        state.erasableMemory[0][Register.regTIME1.rawValue] = 0o37777
+
+        let overflowed = engine.counterPINC(register: .regTIME1)
+
+        #expect(overflowed)
+        #expect(state.erasableMemory[0][Register.regTIME1.rawValue] == 0)
+    }
+
+    @Test func counterMINCHandlesNegativeOverflow() throws {
+        let (engine, state) = try makeEngine()
+        state.erasableMemory[0][Register.regTIME1.rawValue] = 0o40000
+
+        let overflowed = engine.counterMINC(register: .regTIME1)
+
+        #expect(overflowed)
+        #expect(state.erasableMemory[0][Register.regTIME1.rawValue] == 0o77777)
     }
 
     @Test func dxchSwapsDoublePrecisionWords() async throws {
@@ -168,6 +206,22 @@ class AGCTests {
         #expect(state.inputChannels[0o45] == 0o12345)
     }
 
+    @Test func unprogrammedDincEmitsZoutPulse() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+
+        let counterAddress = 0o37
+        state.erasableMemory[0][counterAddress] = 0
+        io.pendingInputs = [[0o200 | counterAddress: 4]]
+
+        await engine.runEngine(for: 1)
+
+        let expectedChannel = 0o200 | counterAddress
+        #expect(io.outputs.contains { $0.0 == expectedChannel && $0.1 == 0o17 })
+        #expect(state.erasableMemory[0][counterAddress] == 0)
+    }
+
     @Test func randAndWandCombineAccumulatorWithRegisters() throws {
         let (engine, state) = try makeEngine()
 
@@ -191,7 +245,7 @@ class AGCTests {
 
         engine.performRor(address9: Register.regL.rawValue)
 
-        #expect(state.erasableMemory[0][Register.regA.rawValue] == (0o12345 | 0o70000))
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o72345)
     }
 
     @Test func worWritesBackToRegister() throws {
@@ -201,9 +255,30 @@ class AGCTests {
 
         engine.performWor(address9: Register.regL.rawValue)
 
-        let expected = 0o60000
-        #expect(state.erasableMemory[0][Register.regA.rawValue] == expected)
-        #expect(state.erasableMemory[0][Register.regL.rawValue] == expected)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o60000)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o60000)
+    }
+
+    @Test func edruptVectorsToAddressZero() async throws {
+        let (engine, state) = try makeEngine()
+        engine.ioDelegate = nil
+        engine.writeRegister(.regZ, 0)
+        let instruction = 0o7000
+        state.erasableMemory[0][0] = instruction
+        state.allowInterrupt = true
+        state.extraCode = true
+        state.inIsr = false
+        state.downruptTimeValid = false
+        for i in 0..<state.interruptRequests.count {
+            state.interruptRequests[i] = 0
+        }
+
+        await engine.runEngine(for: 1)
+
+        #expect(state.inIsr)
+        #expect(state.nextZ == 0)
+        #expect(state.erasableMemory[0][Register.regZRUPT.rawValue] == 0o1)
+        #expect(state.erasableMemory[0][Register.regBRUPT.rawValue] == instruction)
     }
 
     @Test func rxorCombinesWithIoChannel() throws {
