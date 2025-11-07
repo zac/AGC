@@ -25,22 +25,6 @@ class AGCTests {
         engine.writeRegister(.regA, engine.state.accumulator)
     }
 
-    private func runInstruction(opcode: Int,
-                                address12: Int = 0,
-                                address10: Int = 0,
-                                address9: Int = 0,
-                                extraCode: Bool = false,
-                                engine: AGCEngine) {
-        var instruction = 0
-        instruction |= ((opcode & 0o77) << 9)
-        instruction |= (address12 & 0o777) << 6
-        instruction |= (address10 & 0o777) << 3
-        instruction |= (address9 & 0o777)
-        engine.state.extraCode = extraCode
-        let extendedOpcode = (opcode & 0o77) | (extraCode ? 0o100 : 0)
-        engine.executeExtendedInstruction(instruction, opcode: extendedOpcode, overflow: false)
-    }
-
     private func erasableLocation(for address: Int) -> (bank: Int, offset: Int) {
         precondition(address >= 0 && address < 0o1400, "Address out of unswitched range")
         if address < 0o400 {
