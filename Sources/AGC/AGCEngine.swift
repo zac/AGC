@@ -2545,6 +2545,39 @@ public final class AGCEngine {
         }
     }
 
+    func performRor(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            writeRegister(.regA, state.accumulator | readRegister(Register(rawValue: address9)!))
+        } else {
+            var operand16 = overflowCorrected(state.accumulator)
+            operand16 |= readIO(address: address9)
+            writeRegister(.regA, signExtend(operand16))
+        }
+    }
+
+    func performWor(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            let result = state.accumulator | readRegister(Register(rawValue: address9)!)
+            writeRegister(.regA, result)
+            writeRegister(Register(rawValue: address9)!, result)
+        } else {
+            var operand16 = overflowCorrected(state.accumulator)
+            operand16 |= readIO(address: address9)
+            cpuWriteIO(address: address9, value: operand16)
+            writeRegister(.regA, signExtend(operand16))
+        }
+    }
+
+    func performRxor(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            writeRegister(.regA, state.accumulator ^ readRegister(Register(rawValue: address9)!))
+        } else {
+            var operand16 = overflowCorrected(state.accumulator)
+            operand16 ^= readIO(address: address9)
+            writeRegister(.regA, signExtend(operand16))
+        }
+    }
+
     // Add these helper functions:
     /// Convert SP value to negative
     private func negateSP(_ value: Int) -> Int {

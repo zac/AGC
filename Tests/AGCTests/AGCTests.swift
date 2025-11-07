@@ -184,6 +184,39 @@ class AGCTests {
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o40000)
     }
 
+    @Test func rorCombinesAccumulatorWithRegister() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o12345, engine: engine)
+        engine.writeRegister(.regL, 0o70000)
+
+        engine.performRor(address9: Register.regL.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == (0o12345 | 0o70000))
+    }
+
+    @Test func worWritesBackToRegister() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o40000, engine: engine)
+        engine.writeRegister(.regL, 0o20000)
+
+        engine.performWor(address9: Register.regL.rawValue)
+
+        let expected = 0o60000
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == expected)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == expected)
+    }
+
+    @Test func rxorCombinesWithIoChannel() throws {
+        let (engine, state) = try makeEngine()
+        state.inputChannels[0o47] = 0o77777
+        setAccumulator(0o12345, engine: engine)
+
+        engine.performRxor(address9: 0o47)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o165432)
+        #expect(state.inputChannels[0o47] == 0o77777)
+    }
+
     @Test func bzfBranchesWhenAccumulatorZero() throws {
         let (engine, state) = try makeEngine()
         setAccumulator(0, engine: engine)
