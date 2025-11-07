@@ -708,7 +708,7 @@ public final class AGCEngine {
             
         // Continue implementing other opcodes...
         case 0o12...0o17: // TCF instruction (1 MCT)
-            state.nextZ = address12
+            performTCF(address12: address12)
             executedTC = true
             
         case 0o20...0o21: // DAS instruction (3 MCT)
@@ -1372,10 +1372,7 @@ public final class AGCEngine {
         } else {
             // Handle indexed instructions using full AGC bank mapping
             let baseInstruction = fetchInstructionWord(at: programCounter)
-            instruction = overflowCorrected(
-                addSP16(signExtend(state.indexValue), 
-                        signExtend(baseInstruction))
-            )
+            instruction = applyIndex(to: baseInstruction)
         }
         instruction &= 0o77777
 
@@ -2292,6 +2289,18 @@ public final class AGCEngine {
             let whereWord = findMemoryWord(address12)
             writeRegister(.regA, signExtend(readRegister(.regA) & whereWord))
         }
+    }
+
+    func performTCF(address12: Int) {
+        backtraceAdd(tag: 0, target: address12)
+        state.nextZ = address12
+    }
+
+    func applyIndex(to baseInstruction: Int) -> Int {
+        return overflowCorrected(
+            addSP16(signExtend(state.indexValue),
+                    signExtend(baseInstruction))
+        )
     }
 
     func performRead(address9: Int) {

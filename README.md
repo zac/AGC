@@ -35,7 +35,7 @@ Current parity with yaAGC by instruction group (octal opcodes):
 |-----------|-------------|--------|-------|
 | `00kk` | `TC`, `RELINT`, `INHINT`, `EXTEND` | ✅ Core TC path logs backtraces and covered via unit tests |
 | `010-011` | `CCS` | ✅ Tested via `ccsAdjustsNextZ…` |
-| `012-017` | `TCF` | ⚠️ Control flow works, lacks dedicated tests/backtrace |
+| `012-017` | `TCF` | ✅ `tcfAddsBacktraceEntry`, backtrace parity |
 | `020-021` | `DAS` / `DDOUBL` | ✅ Covered by `dasDouble…` |
 | `022-023` | `LXCH` | ✅ `lxchZeroClearsL`/`lxchSwapsWithErasable…` |
 | `024-025` | `INCR` | ✅ `incrAddsOneToRegister` |

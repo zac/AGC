@@ -585,6 +585,36 @@ class AGCTests {
         #expect(!state.inIsr)
     }
 
+    @Test func tcfAddsBacktraceEntry() throws {
+        let (engine, state) = try makeEngine()
+        state.backtrace.removeAll()
+
+        engine.performTCF(address12: 0o4567)
+
+        #expect(state.backtrace.last?.target == 0o4567)
+    }
+
+    @Test func indexAppliesPositiveOffset() throws {
+        let (engine, state) = try makeEngine()
+        let base = 0o30000
+        state.indexValue = 0o5
+
+        let result = engine.applyIndex(to: base) & 0o77777
+
+        #expect(result == addSP(base, 0o5))
+    }
+
+    @Test func indexAppliesNegativeOffset() throws {
+        let (engine, state) = try makeEngine()
+        let base = 0o30000
+        state.indexValue = 0o77776
+
+        let result = engine.applyIndex(to: base) & 0o77777
+
+        let expected = (base & 0o77777 &- 1) & 0o77777
+        #expect(result == expected)
+    }
+
     @Test func msuWithMatchingValuesClearsAccumulator() throws {
         let (engine, state) = try makeEngine()
         let register = Register.regOPTX.rawValue
