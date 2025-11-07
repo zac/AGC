@@ -55,7 +55,7 @@ Current parity with yaAGC by instruction group (octal opcodes):
 | `104` | `ROR` | ✅ `rorCombinesAccumulator…` |
 | `105` | `WOR` | ✅ `worWritesBackToRegister` |
 | `106` | `RXOR` | ✅ `rxorCombinesWithIoChannel` |
-| `107` | `EDRUPT` | ⚠️ Interrupt vectoring tested; still missing backtrace hooks |
+| `107` | `EDRUPT` | ✅ `edruptVectorsToAddressZero` (includes backtrace) |
 | `110-111` | `DV` | ✅ Hardware fallback plus edge cases covered in tests |
 | `112-117` | `BZF` | ✅ Branch logic tested, emits backtrace entries |
 | `120-121` | `MSU` | ✅ `msuWith…` tests |

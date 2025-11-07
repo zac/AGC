@@ -532,6 +532,7 @@ class AGCTests {
         state.extraCode = true
         state.inIsr = false
         state.downruptTimeValid = false
+        state.backtrace.removeAll()
         for i in 0..<state.interruptRequests.count {
             state.interruptRequests[i] = 0
         }
@@ -542,6 +543,7 @@ class AGCTests {
         #expect(state.nextZ == 0)
         #expect(state.erasableMemory[0][Register.regZRUPT.rawValue] == 0o1)
         #expect(state.erasableMemory[0][Register.regBRUPT.rawValue] == instruction)
+        #expect(state.backtrace.last?.target == 0)
     }
 
     @Test func rxorCombinesWithIoChannel() throws {
