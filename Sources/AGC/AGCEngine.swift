@@ -662,7 +662,7 @@ public final class AGCEngine {
         let currentBB = readRegister(.regBB)
         let currentEB = readRegister(.regEB)
         let currentFB = readRegister(.regFB)
-        
+        let opCode = opcode & 0o177
         let address12 = (instruction >> 6) & 0o777
         let address10 = (instruction >> 3) & 0o777
         let address9 = instruction & 0o777
@@ -672,7 +672,7 @@ public final class AGCEngine {
             tcTransient = true
         }
         
-        switch opcode {
+        switch opCode {
         case 0...7: // TC instruction (1 MCT)
             let valueK = address12
             
@@ -851,10 +851,10 @@ public final class AGCEngine {
             
         case 0o50...0o51: // INDEX instruction
             if address10 == 0o17 {
-                // Handle RESUME case in 0o150...0o157
+                performResume()
                 break
             }
-            
+
             if address10 < Register.ramStart {
                 state.indexValue = overflowCorrected(readRegister(Register(rawValue: address10)!))
             } else {
@@ -864,14 +864,7 @@ public final class AGCEngine {
             
         case 0o150...0o157: // INDEX (continued)
             if address12 == 0o17 << 1 { // RESUME
-                if state.inIsr {
-                    // BacktraceAdd(255)
-                } else {
-                    // BacktraceAdd(0)
-                }
-                state.nextZ = readRegister(.regZRUPT) - 1
-                state.inIsr = false
-                state.substituteInstruction = true
+                performResume()
             } else {
                 if address12 < Register.ramStart {
                     state.indexValue = overflowCorrected(readRegister(Register(rawValue: address12)!))
@@ -948,18 +941,23 @@ public final class AGCEngine {
             
         case 0o70...0o77: // MASK instruction
             performMask(address12: address12)
+            break
             
         case 0o100: // READ instruction
             performRead(address9: address9)
+            break
             
         case 0o101: // WRITE instruction
             performWrite(address9: address9)
+            break
             
         case 0o102: // RAND instruction
             performRand(address9: address9)
+            break
             
         case 0o103: // WAND instruction
             performWand(address9: address9)
+            break
             
         case 0o104: // ROR instruction
             if isL(address9) || isQ(address9) {
@@ -1076,11 +1074,10 @@ public final class AGCEngine {
                 }
             }
         case 0o112...0o117: // BZF instruction
-            if state.accumulator == 0 || state.accumulator == 0o177777 {
-                // BacktraceAdd(0)
-                state.nextZ = address12
+            if performBZF(address12: address12) {
                 justTookBZF = true
             }
+            break
             
         case 0o120...0o121: // MSU instruction
             let whereWord = findMemoryWord(address10)
@@ -1259,11 +1256,10 @@ public final class AGCEngine {
             writeRegister(.regA, state.accumulator)
             
         case 0o162...0o167: // BZMF instruction
-            if state.accumulator == 0 || (state.accumulator & 0o100000) != 0 {
-                // BacktraceAdd(0)
-                state.nextZ = address12
+            if performBZMF(address12: address12) {
                 justTookBZMF = true
             }
+            break
         case 0o170...0o177: // MP instruction
             let operand16 = overflowCorrected(state.accumulator)
             let whereWord = findMemoryWord(address12)
@@ -2479,6 +2475,12 @@ public final class AGCEngine {
         }
     }
 
+    func performResume() {
+        state.nextZ = (readRegister(.regZRUPT) - 1) & 0o177777
+        state.inIsr = false
+        state.substituteInstruction = true
+    }
+
     func performMask(address12: Int) {
         if address12 < Register.ramStart {
             writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address12)!))
@@ -2526,6 +2528,24 @@ public final class AGCEngine {
             cpuWriteIO(address: address9, value: operand16)
             writeRegister(.regA, signExtend(operand16))
         }
+    }
+
+    func performBZF(address12: Int) -> Bool {
+        if state.accumulator == 0 || state.accumulator == 0o177777 {
+            state.nextZ = address12
+            state.extraDelay += 1
+            return true
+        }
+        return false
+    }
+
+    func performBZMF(address12: Int) -> Bool {
+        if state.accumulator == 0 || (state.accumulator & 0o100000) != 0 {
+            state.nextZ = address12
+            state.extraDelay += 1
+            return true
+        }
+        return false
     }
 
     // Add these helper functions:

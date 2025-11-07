@@ -25,6 +25,22 @@ class AGCTests {
         engine.writeRegister(.regA, engine.state.accumulator)
     }
 
+    private func runInstruction(opcode: Int,
+                                address12: Int = 0,
+                                address10: Int = 0,
+                                address9: Int = 0,
+                                extraCode: Bool = false,
+                                engine: AGCEngine) {
+        var instruction = 0
+        instruction |= ((opcode & 0o77) << 9)
+        instruction |= (address12 & 0o777) << 6
+        instruction |= (address10 & 0o777) << 3
+        instruction |= (address9 & 0o777)
+        engine.state.extraCode = extraCode
+        let extendedOpcode = (opcode & 0o77) | (extraCode ? 0o100 : 0)
+        engine.executeExtendedInstruction(instruction, opcode: extendedOpcode, overflow: false)
+    }
+
     private func erasableLocation(for address: Int) -> (bank: Int, offset: Int) {
         precondition(address >= 0 && address < 0o1400, "Address out of unswitched range")
         if address < 0o400 {
@@ -168,4 +184,47 @@ class AGCTests {
         #expect(state.inputChannels[0o45] == 0o12345)
     }
 
+    @Test func randAndWandCombineAccumulatorWithIo() throws {
+        let (engine, state) = try makeEngine()
+        state.inputChannels[0o46] = 0o77777
+
+        setAccumulator(0o12345, engine: engine)
+        engine.performRand(address9: 0o46)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == (0o12345 & 0o77777))
+
+        setAccumulator(0o70000, engine: engine)
+        engine.performWand(address9: 0o46)
+        #expect(state.inputChannels[0o46] == 0o30000)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o30000)
+    }
+
+    @Test func bzfBranchesWhenAccumulatorZero() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0, engine: engine)
+
+        #expect(engine.performBZF(address12: 0o321))
+        #expect(state.nextZ == 0o321)
+        #expect(state.extraDelay > 0)
+    }
+
+    @Test func bzmfBranchesOnNegativeAccumulator() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o100000, engine: engine)
+
+        #expect(engine.performBZMF(address12: 0o654))
+        #expect(state.nextZ == 0o654)
+    }
+
+    @Test func indexResumeRestoresZrupt() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regZRUPT, 0o1234)
+        state.inIsr = true
+        state.substituteInstruction = false
+
+        engine.performResume()
+
+        #expect(state.nextZ == 0o1233)
+        #expect(state.substituteInstruction)
+        #expect(!state.inIsr)
+    }
 }
