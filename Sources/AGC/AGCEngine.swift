@@ -651,7 +651,7 @@ public final class AGCEngine {
     }
         
     /// Execute an extended instruction based on the opcode
-    func executeExtendedInstruction(_ instruction: Int, overflow: Bool) {
+    func executeExtendedInstruction(_ instruction: Int, opcode: Int, overflow: Bool) {
         // Track if we took certain branch instructions
         var justTookBZF = false
         var justTookBZMF = false
@@ -663,7 +663,6 @@ public final class AGCEngine {
         let currentEB = readRegister(.regEB)
         let currentFB = readRegister(.regFB)
         
-        let opcode = (instruction >> 9) & 0o7
         let address12 = (instruction >> 6) & 0o777
         let address10 = (instruction >> 3) & 0o777
         let address9 = instruction & 0o777
@@ -948,48 +947,19 @@ public final class AGCEngine {
             writeRegister(.regA, state.accumulator)
             
         case 0o70...0o77: // MASK instruction
-            if address12 < Register.ramStart {
-                writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address12)!))
-            } else {
-                writeRegister(.regA, overflowCorrected(state.accumulator))
-                let whereWord = findMemoryWord(address12)
-                writeRegister(.regA, signExtend(readRegister(.regA) & whereWord))
-            }
+            performMask(address12: address12)
             
         case 0o100: // READ instruction
-            if isL(address9) || isQ(address9) {
-                writeRegister(.regA, readRegister(Register(rawValue: address9)!))
-            } else {
-                writeRegister(.regA, signExtend(readIO(address: address9)))
-            }
+            performRead(address9: address9)
             
         case 0o101: // WRITE instruction
-            if isL(address9) || isQ(address9) {
-                writeRegister(Register(rawValue: address9)!, state.accumulator)
-            } else {
-                cpuWriteIO(address: address9, value: overflowCorrected(state.accumulator))
-            }
+            performWrite(address9: address9)
             
         case 0o102: // RAND instruction
-            if isL(address9) || isQ(address9) {
-                writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address9)!))
-            } else {
-                var operand16 = overflowCorrected(state.accumulator)
-                operand16 &= readIO(address: address9)
-                writeRegister(.regA, signExtend(operand16))
-            }
+            performRand(address9: address9)
             
         case 0o103: // WAND instruction
-            if isL(address9) || isQ(address9) {
-                let result = state.accumulator & readRegister(Register(rawValue: address9)!)
-                writeRegister(.regA, result)
-                writeRegister(Register(rawValue: address9)!, result)
-            } else {
-                var operand16 = overflowCorrected(state.accumulator)
-                operand16 &= readIO(address: address9)
-                cpuWriteIO(address: address9, value: operand16)
-                writeRegister(.regA, signExtend(operand16))
-            }
+            performWand(address9: address9)
             
         case 0o104: // ROR instruction
             if isL(address9) || isQ(address9) {
@@ -1762,6 +1732,7 @@ public final class AGCEngine {
 
         // Reform 16-bit accumulator and check for overflow
         let accumulator = readRegister(.regA) & 0o177777
+        state.accumulator = accumulator
         overflow = valueOverflowed(accumulator) != 0
 
         // Get program counter from Z register (12 bits)
@@ -1862,7 +1833,7 @@ public final class AGCEngine {
         writeRegister(.regZ, state.nextZ)
 
         // Execute the instruction
-        executeExtendedInstruction(extendedOpcode, overflow: overflow)
+        executeExtendedInstruction(instruction, opcode: extendedOpcode, overflow: overflow)
 
         // Continue with instruction execution
         return true
@@ -2505,6 +2476,55 @@ public final class AGCEngine {
             let operand16 = signExtend(lowerWord)
             assignFromPointer(bottomAddress, overflowCorrected(readRegister(.regA)))
             writeRegister(.regA, operand16)
+        }
+    }
+
+    func performMask(address12: Int) {
+        if address12 < Register.ramStart {
+            writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address12)!))
+        } else {
+            writeRegister(.regA, overflowCorrected(state.accumulator))
+            let whereWord = findMemoryWord(address12)
+            writeRegister(.regA, signExtend(readRegister(.regA) & whereWord))
+        }
+    }
+
+    func performRead(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            writeRegister(.regA, readRegister(Register(rawValue: address9)!))
+        } else {
+            writeRegister(.regA, signExtend(readIO(address: address9)))
+        }
+    }
+
+    func performWrite(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            writeRegister(Register(rawValue: address9)!, state.accumulator)
+        } else {
+            cpuWriteIO(address: address9, value: overflowCorrected(state.accumulator))
+        }
+    }
+
+    func performRand(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            writeRegister(.regA, state.accumulator & readRegister(Register(rawValue: address9)!))
+        } else {
+            var operand16 = overflowCorrected(state.accumulator)
+            operand16 &= readIO(address: address9)
+            writeRegister(.regA, signExtend(operand16))
+        }
+    }
+
+    func performWand(address9: Int) {
+        if isL(address9) || isQ(address9) {
+            let result = state.accumulator & readRegister(Register(rawValue: address9)!)
+            writeRegister(.regA, result)
+            writeRegister(Register(rawValue: address9)!, result)
+        } else {
+            var operand16 = overflowCorrected(state.accumulator)
+            operand16 &= readIO(address: address9)
+            cpuWriteIO(address: address9, value: operand16)
+            writeRegister(.regA, signExtend(operand16))
         }
     }
 

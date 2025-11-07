@@ -20,6 +20,11 @@ class AGCTests {
         return (engine, state)
     }
 
+    private func setAccumulator(_ value: Int, engine: AGCEngine) {
+        engine.state.accumulator = value & 0o177777
+        engine.writeRegister(.regA, engine.state.accumulator)
+    }
+
     private func erasableLocation(for address: Int) -> (bank: Int, offset: Int) {
         precondition(address >= 0 && address < 0o1400, "Address out of unswitched range")
         if address < 0o400 {
@@ -138,4 +143,29 @@ class AGCTests {
         #expect(state.nextZ == 3)
         #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o77776)
     }
+
+    @Test func maskInstructionUsesErasableMemory() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o76543, engine: engine)
+        state.erasableMemory[0][0o60] = 0o12345
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o76543)
+
+        engine.performMask(address12: 0o60)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o12141)
+    }
+
+    @Test func readAndWriteIoChannels() throws {
+        let (engine, state) = try makeEngine()
+
+        state.inputChannels[0o45] = 0o23456
+        setAccumulator(0, engine: engine)
+        engine.performRead(address9: 0o45)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o23456)
+
+        setAccumulator(0o12345, engine: engine)
+        engine.performWrite(address9: 0o45)
+        #expect(state.inputChannels[0o45] == 0o12345)
+    }
+
 }
