@@ -318,6 +318,7 @@ public final class AGCEngine {
     }
     
     private let WARNING_FILTER_THRESHOLD = 125   // Warning threshold
+    private let BACKTRACE_LIMIT = 256            // Max stored entries
 
     // Channel 77 alarm bits
     private let CH77_PARITY_FAIL    = 0o000001  // Parity alarm
@@ -697,6 +698,7 @@ public final class AGCEngine {
                 if valueK != Register.regQ.rawValue { // If not RETURN
                     writeRegister(.regQ, state.nextZ & 0o177777)
                 }
+                backtraceAdd(tag: 0, target: address12)
                 state.nextZ = address12
                 executedTC = true
             }
@@ -994,85 +996,7 @@ public final class AGCEngine {
             break
             
         case 0o110...0o111: // DV instruction
-            let dividend = spToDecent(readRegister(.regL))
-            let (msb, lsb) = decentToSp(overflowCorrected(state.accumulator))
-            
-            // Check boundary conditions
-            let absA = absSP(lsb)
-            let absL = absSP(msb)
-            
-            var div16: Int
-            if isA(address10) {
-                // DV modifies A before reading divisor, so divisor is -|A|
-                div16 = readRegister(.regA)
-                if (readRegister(.regA) & 0o100000) == 0 {
-                    div16 = 0o177777 & ~div16
-                }
-            } else if isL(address10) {
-                // DV modifies L before reading divisor. L is first negated if quotient A,L is negative
-                // according to DV sign rules. Then 0o40000 is added.
-                div16 = readRegister(.regL)
-                if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
-                    (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
-                    div16 = 0o177777 & ~div16
-                }
-                // Account for L's built-in overflow correction
-                div16 = signExtend(overflowCorrected(addSP16(div16, 0o40000)))
-            } else if isZ(address10) {
-                // DV modifies Z before reading divisor. If quotient A,L is negative according to DV sign rules,
-                // Z16 is set
-                div16 = readRegister(.regZ)
-                if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
-                    (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
-                    div16 |= 0o100000
-                }
-            } else if address10 < Register.ramStart {
-                div16 = readRegister(Register(rawValue: address10)!)
-            } else {
-                div16 = signExtend(findMemoryWord(address10))
-            }
-            
-            let absK = absSP(overflowCorrected(div16))
-            
-            if absA > absK || (absA == absK && absL != AGC_P0) ||
-               valueOverflowed(div16) != AGC_P0 {
-                // Divisor smaller than dividend or has overflow
-                // Fall back to hardware simulation for "total nonsense" that matches AGC
-                simulateDV(div16)
-            } else if absA == 0 && absL == 0 {
-                // Dividend is 0 but divisor is not. Standard DV sign convention applies to A,
-                // L remains unchanged
-                var operand16: Int
-                if (0o40000 & readRegister(.regL)) == (0o40000 & overflowCorrected(div16)) {
-                    operand16 = absK == 0 ? 0o37777 : AGC_P0 // Max positive or +0
-                } else {
-                    operand16 = absK == 0 ? (0o77777 & ~0o37777) : AGC_M0 // Max negative or -0
-                }
-                writeRegister(.regA, signExtend(operand16))
-            } else if absA == absK && absL == AGC_P0 {
-                // Divisor equals dividend
-                let operand16 = lsb == overflowCorrected(div16) ?
-                    0o37777 : // Max positive if signs agree
-                    (0o77777 & ~0o37777) // Max negative if signs differ
-                writeRegister(.regL, signExtend(lsb)) // TODO: Check if this is correct
-                writeRegister(.regA, signExtend(operand16))
-            } else {
-                // Divisor larger than dividend - safe to divide
-                // Sign conventions match normal division operators
-                let dividendCPU = agc2cpu2(dividend)
-                let divisorCPU = agc2cpu(overflowCorrected(div16))
-                let quotient = dividendCPU / divisorCPU
-                let remainder = dividendCPU % divisorCPU
-                
-                writeRegister(.regA, signExtend(cpu2agc(quotient)))
-                
-                if remainder == 0 {
-                    // Need -0 vs +0 based on dividend sign
-                    writeRegister(.regL, dividendCPU >= 0 ? AGC_P0 : signExtend(AGC_M0))
-                } else {
-                    writeRegister(.regL, signExtend(cpu2agc(remainder)))
-                }
-            }
+            performDV(address10: address10)
         case 0o112...0o117: // BZF instruction
             if performBZF(address12: address12) {
                 justTookBZF = true
@@ -1082,27 +1006,7 @@ public final class AGCEngine {
         case 0o120...0o121: // MSU instruction
             performMSU(address10: address10)
         case 0o122...0o123: // QXCH instruction
-            if isQ(address10) {
-                break
-            }
-            
-            if isReg(address10, .regZERO) { // ZQ
-                writeRegister(.regQ, AGC_P0)
-            } else if address10 < Register.ramStart {
-                let operand16 = readRegister(.regQ)
-                writeRegister(.regQ, readRegister(Register(rawValue: address10)!))
-                writeRegister(Register(rawValue: address10)!, operand16)
-                
-                if address10 == Register.regZ.rawValue {
-                    state.nextZ = readRegister(.regZ)
-                }
-            } else {
-                let whereWord = findMemoryWord(address10)
-                let operand16 = overflowCorrected(readRegister(.regQ))
-                writeRegister(.regQ, signExtend(whereWord))
-                assignFromPointer(address10, operand16)
-            }
-            
+            performQXCH(address10: address10)
         case 0o124...0o125: // AUG instruction
             performAUG(address10: address10)
             
@@ -1694,6 +1598,7 @@ public final class AGCEngine {
 
         if canInterrupt {
             var interruptRequested = false
+            var interruptVector = 0
             
             // Search for next interrupt request in priority order
             for i in 1...10 {  // NUM_INTERRUPT_TYPES
@@ -1705,6 +1610,7 @@ public final class AGCEngine {
                     state.nextZ = 0o4000 + 4 * i
                     
                     interruptRequested = true
+                    interruptVector = i
                     break
                 }
             }
@@ -1713,9 +1619,11 @@ public final class AGCEngine {
             if !interruptRequested && extendedOpcode == 0o107 {
                 state.nextZ = 0
                 interruptRequested = true
+                interruptVector = 0
             }
             
             if interruptRequested {
+                backtraceAdd(tag: interruptVector, target: state.nextZ)
                 // Set up return state
                 writeRegister(.regZRUPT, programCounter + 1)
                 writeRegister(.regBRUPT, instruction)
@@ -1951,6 +1859,20 @@ public final class AGCEngine {
     private func channelOutput(channel: Int, value: Int) {
         state.outputChannels[channel] = value
         ioDelegate?.channelOutput(channel: channel, value: value)
+    }
+
+    private func backtraceAdd(tag: Int, target: Int) {
+        let source = readRegister(.regZ) & 0o177777
+        let entry = AGCBacktraceEntry(
+            cycle: state.cycleCounter,
+            source: source,
+            target: target & 0o177777,
+            tag: tag & 0o777
+        )
+        state.backtrace.append(entry)
+        if state.backtrace.count > BACKTRACE_LIMIT {
+            state.backtrace.removeFirst(state.backtrace.count - BACKTRACE_LIMIT)
+        }
     }
 
     private func readCounter(at offset: Int) -> Int? {
@@ -2554,6 +2476,8 @@ public final class AGCEngine {
 
     func performResume() {
         state.nextZ = (readRegister(.regZRUPT) - 1) & 0o177777
+        let tag = state.inIsr ? 255 : 0
+        backtraceAdd(tag: tag, target: state.nextZ)
         state.inIsr = false
         state.substituteInstruction = true
     }
@@ -2611,6 +2535,7 @@ public final class AGCEngine {
         if state.accumulator == 0 || state.accumulator == 0o177777 {
             state.nextZ = address12
             state.extraDelay += 1
+            backtraceAdd(tag: 0, target: address12)
             return true
         }
         return false
@@ -2620,9 +2545,100 @@ public final class AGCEngine {
         if state.accumulator == 0 || (state.accumulator & 0o100000) != 0 {
             state.nextZ = address12
             state.extraDelay += 1
+            backtraceAdd(tag: 0, target: address12)
             return true
         }
         return false
+    }
+
+    func performDV(address10: Int) {
+        let accMSW = overflowCorrected(state.accumulator)
+        let accLSW = readRegister(.regL) & 0o177777
+        let dividend = spToDecent(msw: accMSW, lsw: accLSW)
+
+        let absA = absSP(accMSW)
+        let absL = absSP(accLSW)
+
+        var div16: Int
+        if isA(address10) {
+            div16 = readRegister(.regA)
+            if (readRegister(.regA) & 0o100000) == 0 {
+                div16 = 0o177777 & ~div16
+            }
+        } else if isL(address10) {
+            div16 = readRegister(.regL)
+            if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
+                (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
+                div16 = 0o177777 & ~div16
+            }
+            div16 = signExtend(overflowCorrected(addSP16(div16, 0o40000)))
+        } else if isZ(address10) {
+            div16 = readRegister(.regZ)
+            if ((absA == 0 && (0o100000 & readRegister(.regL)) != 0) ||
+                (absA != 0 && (0o100000 & readRegister(.regA)) != 0)) {
+                div16 |= 0o100000
+            }
+        } else if address10 < Register.ramStart {
+            div16 = readRegister(Register(rawValue: address10)!)
+        } else {
+            div16 = signExtend(findMemoryWord(address10))
+        }
+
+        let absK = absSP(overflowCorrected(div16))
+
+        if absA > absK || (absA == absK && absL != AGC_P0) ||
+            valueOverflowed(div16) != AGC_P0 {
+            simulateDV(div16)
+        } else if absA == 0 && absL == 0 {
+            let operand16: Int
+            if (0o40000 & accLSW) == (0o40000 & overflowCorrected(div16)) {
+                operand16 = absK == 0 ? 0o37777 : AGC_P0
+            } else {
+                operand16 = absK == 0 ? (0o77777 & ~0o37777) : AGC_M0
+            }
+            writeRegister(.regA, signExtend(operand16))
+        } else if absA == absK && absL == AGC_P0 {
+            let operand16 = accMSW == overflowCorrected(div16) ?
+                0o37777 : (0o77777 & ~0o37777)
+            writeRegister(.regL, signExtend(accMSW))
+            writeRegister(.regA, signExtend(operand16))
+        } else {
+            let dividendCPU = agc2cpu2(dividend)
+            let divisorCPU = agc2cpu(overflowCorrected(div16))
+            let quotient = dividendCPU / divisorCPU
+            let remainder = dividendCPU % divisorCPU
+
+            writeRegister(.regA, signExtend(cpu2agc(quotient)))
+
+            if remainder == 0 {
+                writeRegister(.regL, dividendCPU >= 0 ? AGC_P0 : signExtend(AGC_M0))
+            } else {
+                writeRegister(.regL, signExtend(cpu2agc(remainder)))
+            }
+        }
+    }
+
+    func performQXCH(address10: Int) {
+        if isQ(address10) {
+            return
+        }
+
+        if isReg(address10, .regZERO) {
+            writeRegister(.regQ, AGC_P0)
+        } else if address10 < Register.ramStart {
+            let operand16 = readRegister(.regQ)
+            writeRegister(.regQ, readRegister(Register(rawValue: address10)!))
+            writeRegister(Register(rawValue: address10)!, operand16)
+
+            if address10 == Register.regZ.rawValue {
+                state.nextZ = readRegister(.regZ)
+            }
+        } else {
+            let whereWord = findMemoryWord(address10)
+            let operand16 = overflowCorrected(readRegister(.regQ))
+            writeRegister(.regQ, signExtend(whereWord))
+            assignFromPointer(address10, operand16)
+        }
     }
 
     func performMSU(address10: Int) {
@@ -2737,59 +2753,41 @@ public final class AGCEngine {
         return value & 0o37777
     }
 
-    /// Convert SP value pair to decent format
-    /// - Parameter lsbSP: Pointer to least significant word of SP pair
-    /// - Returns: Value in decent format (29-bit 1's complement)
-    private func spToDecent(_ lsbSP: Int) -> Int {
-        let msb = readMemory(lsbSP - 1)
-        let lsb = readMemory(lsbSP)
-        
-        // Handle case where MSB is zero
-        if msb == AGC_P0 || msb == AGC_M0 {
-            // Follow DV instruction convention - overall sign is LSB sign
-            var value = signExtend(lsb)
+    /// Convert SP value pair to decent format (29-bit 1's complement)
+    private func spToDecent(msw: Int, lsw: Int) -> Int {
+        var msw = msw & 0o177777
+        var lsw = lsw & 0o177777
+
+        if msw == AGC_P0 || msw == AGC_M0 {
+            var value = signExtend(lsw)
             if (value & 0o100000) != 0 {
                 value |= ~0o177777
             }
-            return value & 0o7777777777 // Remove extra sign extension bits
+            return value & 0o7777777777
         }
-        
-        var msw = msb
-        var lsw = lsb
-        
-        // If signs don't match, make them match
+
         if (0o40000 & lsw) != (0o40000 & msw) {
             if lsw == AGC_P0 || lsw == AGC_M0 {
-                // Adjust LSB sign to match MSB
                 lsw = (0o40000 & msw) == 0 ? AGC_P0 : AGC_M0
             } else {
-                // Make MSB positive for easier logic
                 let complement = (0o40000 & msw) != 0
                 if complement {
                     msw = 0o77777 & ~msw
                     lsw = 0o77777 & ~lsw
                 }
-                
-                // Subtract 1 from MSB and add 2^14 + 1 to LSB
                 msw -= 1
                 lsw = (lsw + 0o40000 + AGC_P1) & 0o77777
-                
-                // Restore signs if needed
                 if complement {
                     msw = 0o77777 & ~msw
                     lsw = 0o77777 & ~lsw
                 }
             }
         }
-        
-        // Combine MSB and LSB, discarding LSB sign bit
+
         var value = (0o3777740000 & (msw << 14)) | (0o37777 & lsw)
-        
-        // Sign extend for further arithmetic
         if (value & 0o2000000000) != 0 {
             value |= 0o4000000000
         }
-        
         return value
     }
 

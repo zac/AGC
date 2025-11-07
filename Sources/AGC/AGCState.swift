@@ -1,5 +1,12 @@
 import Foundation
 
+public struct AGCBacktraceEntry: Equatable {
+    public let cycle: UInt64
+    public let source: Int
+    public let target: Int
+    public let tag: Int
+}
+
 /// AGC simulation state
 public final class AGCState {
     // Memory banks
@@ -61,6 +68,7 @@ public final class AGCState {
     public var standby: Bool = false
     public var sbyPressed: Bool = false
     public var sbyStillPressed: Bool = false
+    public var backtrace: [AGCBacktraceEntry] = []
     
     // Misc state
     public var nextZ: Int = 0
@@ -157,5 +165,6 @@ public final class AGCState {
         trap31B = false
         trap32 = false
         radarGateCounter = 0
+        backtrace = []
     }
-} 
+}

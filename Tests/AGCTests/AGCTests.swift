@@ -259,6 +259,75 @@ class AGCTests {
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o60000)
     }
 
+    @Test func qxchZeroClearsQRegister() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regQ, 0o12345)
+
+        engine.performQXCH(address10: Register.regZERO.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regQ.rawValue] == 0)
+    }
+
+    @Test func qxchWithZSwapsAndUpdatesNextZ() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regQ, 0o11111)
+        engine.writeRegister(.regZ, 0o22222)
+        state.nextZ = 0o33333
+
+        engine.performQXCH(address10: Register.regZ.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regQ.rawValue] == 0o22222)
+        #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o11111)
+        #expect(state.nextZ == 0o11111)
+    }
+
+    @Test func dvEqualDividendAndDivisorProducesSaturatedQuotient() throws {
+        let (engine, state) = try makeEngine()
+        let value = 0o37777
+        setAccumulator(value, engine: engine)
+        engine.writeRegister(.regL, 0)
+        let address = 0o60
+        state.erasableMemory[0][address] = value
+
+        engine.performDV(address10: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o37777)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == value)
+    }
+
+    @Test func dvZeroDividendProducesSignedZero() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regA, 0)
+        engine.writeRegister(.regL, 0)
+        let address = 0o61
+        state.erasableMemory[0][address] = 0o12345
+
+        engine.performDV(address10: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0)
+    }
+
+    @Test func backtraceCapturesTcAndBranches() throws {
+        let (engine, state) = try makeEngine()
+        state.backtrace.removeAll()
+
+        let tcTarget = 0o200
+        let tcInstruction = tcTarget << 6
+        engine.executeExtendedInstruction(tcInstruction, opcode: 0, overflow: false)
+
+        #expect(state.backtrace.last?.target == tcTarget)
+
+        setAccumulator(0, engine: engine)
+        _ = engine.performBZF(address12: 0o377)
+
+        #expect(state.backtrace.last?.target == 0o377)
+
+        setAccumulator(0o100000, engine: engine)
+        _ = engine.performBZMF(address12: 0o444)
+        #expect(state.backtrace.last?.target == 0o444)
+    }
+
     @Test func edruptVectorsToAddressZero() async throws {
         let (engine, state) = try makeEngine()
         engine.ioDelegate = nil
