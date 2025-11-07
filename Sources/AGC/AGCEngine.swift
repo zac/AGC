@@ -326,7 +326,7 @@ public final class AGCEngine {
     private let CH77_NIGHT_WATCHMAN = 0o000020  // Night Watchman alarm
 
     // Add these constants to the class:
-    private let SCALER_OVERFLOW = 160   // 1/3200 second in machine cycles
+    private let SCALER_OVERFLOW = 80   // 1/3200 second in machine cycles
     private let ChanSCALER1 = 0o24     // Channel 024
     private let ChanSCALER2 = 0o25     // Channel 025
     private let WARNING_FILTER_INCREMENT = 25
@@ -1497,7 +1497,7 @@ public final class AGCEngine {
         // Update the timer that determines when 1/1600 second has passed.
         // 1/1600 is the basic timing used to drive timer registers.
         // 1/1600 second is 160/3 machine cycles.
-        let SCALER_DIVIDER = 160/3
+        let SCALER_DIVIDER = 3
         state.scalerCounter += SCALER_DIVIDER
         state.dskyTimer += SCALER_DIVIDER
         
@@ -1531,6 +1531,17 @@ public final class AGCEngine {
             state.pendDelay -= 1
             return false
         }
+
+        /*
+        //----------------------------------------------------------------------
+  // Take care of any PCDU or MCDU operations that are lingering in CDU
+  // FIFOs.
+  if (ServiceCduFifo(State)) {
+    // A CDU counter was serviced, so a cycle was used up, and we must
+    // return.
+    return (0);
+  }
+        */
         
         // Handle standby button state
         if (state.inputChannels[0o32] & 0o20000) != 0 {
