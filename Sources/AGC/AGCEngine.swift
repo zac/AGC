@@ -1080,36 +1080,7 @@ public final class AGCEngine {
             break
             
         case 0o120...0o121: // MSU instruction
-            let whereWord = findMemoryWord(address10)
-            let ui: Int
-            let uj: Int
-            
-            if address10 < Register.ramStart {
-                ui = 0o177777 & state.accumulator
-                uj = 0o177777 & ~readRegister(Register(rawValue: address10)!)
-            } else {
-                ui = 0o77777 & overflowCorrected(state.accumulator)
-                uj = 0o77777 & ~whereWord
-            }
-            
-            var diff = ui + uj + 1 // Two's complement subtraction
-            
-            if (diff & 0o40000) != 0 {
-                diff |= 0o100000 // Sign extend A15 to A16
-                diff -= 1 // Subtract one from result
-            }
-            
-            if isQ(address10) {
-                writeRegister(.regA, 0o177777 & diff)
-            } else {
-                let operand16 = 0o77777 & diff
-                writeRegister(.regA, signExtend(operand16))
-            }
-            
-            if address10 >= 0o20 && address10 <= 0o23 {
-                assignFromPointer(address10, whereWord)
-            }
-            
+            performMSU(address10: address10)
         case 0o122...0o123: // QXCH instruction
             if isQ(address10) {
                 break
@@ -1133,49 +1104,10 @@ public final class AGCEngine {
             }
             
         case 0o124...0o125: // AUG instruction
-            let whereWord = findMemoryWord(address10)
-            var operand16: Int
-            
-            if address10 < Register.ramStart {
-                operand16 = readRegister(Register(rawValue: address10)!)
-            } else {
-                operand16 = signExtend(whereWord)
-            }
-            
-            operand16 &= 0o177777
-            let increment = (operand16 & 0o100000) == 0 ? AGC_P1 : signExtend(AGC_M1)
-            let sum = addSP16(increment & 0o177777, operand16 & 0o177777)
-            
-            if address10 < Register.ramStart {
-                writeRegister(Register(rawValue: address10)!, sum)
-            } else {
-                assignFromPointer(address10, overflowCorrected(sum))
-                interruptRequests(address10, sum)
-            }
+            performAUG(address10: address10)
             
         case 0o126...0o127: // DIM instruction
-            let whereWord = findMemoryWord(address10)
-            var operand16: Int
-            
-            if address10 < Register.ramStart {
-                operand16 = readRegister(Register(rawValue: address10)!)
-            } else {
-                operand16 = signExtend(whereWord)
-            }
-            
-            operand16 &= 0o177777
-            if operand16 == AGC_P0 || operand16 == signExtend(AGC_M0) {
-                break
-            }
-            
-            let increment = (operand16 & 0o100000) == 0 ? signExtend(AGC_M1) : AGC_P1
-            let sum = addSP16(increment & 0o177777, operand16 & 0o177777)
-            
-            if address10 < Register.ramStart {
-                writeRegister(Register(rawValue: address10)!, sum)
-            } else {
-                assignFromPointer(address10, overflowCorrected(sum))
-            }
+            performDIM(address10: address10)
             
         case 0o130...0o137: // DCA instruction
             if isL(address12) {
@@ -2546,6 +2478,71 @@ public final class AGCEngine {
             return true
         }
         return false
+    }
+
+    func performMSU(address10: Int) {
+        let whereWord = findMemoryWord(address10)
+        let operand = address10 < Register.ramStart ?
+            readRegister(Register(rawValue: address10)!) :
+            signExtend(whereWord)
+
+        let ui = 0o177777 & state.accumulator
+        let uj = 0o177777 & ~operand
+        var diff = ui + uj + 1
+
+        if (diff & 0o40000) != 0 {
+            diff |= 0o100000
+            diff -= 1
+        }
+
+        if isQ(address10) {
+            writeRegister(.regA, diff & 0o177777)
+        } else {
+            writeRegister(.regA, signExtend(diff & 0o177777))
+        }
+
+        if address10 >= 0o20 && address10 <= 0o23 {
+            assignFromPointer(address10, whereWord)
+        }
+    }
+
+    func performAUG(address10: Int) {
+        let whereWord = findMemoryWord(address10)
+        var operand = address10 < Register.ramStart ?
+            readRegister(Register(rawValue: address10)!) :
+            signExtend(whereWord)
+
+        operand &= 0o177777
+        let increment = (operand & 0o100000) == 0 ? AGC_P1 : signExtend(AGC_M1)
+        let sum = addSP16(increment & 0o177777, operand)
+
+        if address10 < Register.ramStart {
+            writeRegister(Register(rawValue: address10)!, sum)
+        } else {
+            assignFromPointer(address10, overflowCorrected(sum))
+            interruptRequests(address10, sum)
+        }
+    }
+
+    func performDIM(address10: Int) {
+        let whereWord = findMemoryWord(address10)
+        var operand = address10 < Register.ramStart ?
+            readRegister(Register(rawValue: address10)!) :
+            signExtend(whereWord)
+
+        operand &= 0o177777
+        if operand == AGC_P0 || operand == signExtend(AGC_M0) {
+            return
+        }
+
+        let increment = (operand & 0o100000) == 0 ? signExtend(AGC_M1) : AGC_P1
+        let sum = addSP16(increment & 0o177777, operand)
+
+        if address10 < Register.ramStart {
+            writeRegister(Register(rawValue: address10)!, sum)
+        } else {
+            assignFromPointer(address10, overflowCorrected(sum))
+        }
     }
 
     // Add these helper functions:

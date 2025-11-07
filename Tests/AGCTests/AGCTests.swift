@@ -184,18 +184,20 @@ class AGCTests {
         #expect(state.inputChannels[0o45] == 0o12345)
     }
 
-    @Test func randAndWandCombineAccumulatorWithIo() throws {
+    @Test func randAndWandCombineAccumulatorWithRegisters() throws {
         let (engine, state) = try makeEngine()
-        state.inputChannels[0o46] = 0o77777
 
+        engine.writeRegister(.regL, 0o77777)
         setAccumulator(0o12345, engine: engine)
-        engine.performRand(address9: 0o46)
-        #expect(state.erasableMemory[0][Register.regA.rawValue] == (0o12345 & 0o77777))
+        engine.performRand(address9: Register.regL.rawValue)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o12345)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o77777)
 
-        setAccumulator(0o70000, engine: engine)
-        engine.performWand(address9: 0o46)
-        #expect(state.inputChannels[0o46] == 0o30000)
-        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o30000)
+        engine.writeRegister(.regL, 0o70000)
+        setAccumulator(0o40000, engine: engine)
+        engine.performWand(address9: Register.regL.rawValue)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o40000)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o40000)
     }
 
     @Test func bzfBranchesWhenAccumulatorZero() throws {
@@ -226,5 +228,50 @@ class AGCTests {
         #expect(state.nextZ == 0o1233)
         #expect(state.substituteInstruction)
         #expect(!state.inIsr)
+    }
+
+    @Test func msuWithMatchingValuesClearsAccumulator() throws {
+        let (engine, state) = try makeEngine()
+        let register = Register.regOPTX.rawValue
+        engine.writeRegister(Register(rawValue: register)!, 0o12345)
+        setAccumulator(0o12345, engine: engine)
+
+        engine.performMSU(address10: register)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+    }
+
+    @Test func msuWithMemoryOperandSubtractsZero() throws {
+        let (engine, state) = try makeEngine()
+        let address = 0o400
+        state.erasableMemory[1][0] = 0
+        setAccumulator(0, engine: engine)
+
+        engine.performMSU(address10: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+    }
+
+    @Test func augIncrementsPositiveValues() throws {
+        let (engine, state) = try makeEngine()
+        let reg = Register.regOPTY.rawValue
+        engine.writeRegister(Register(rawValue: reg)!, 0o5)
+
+        engine.performAUG(address10: reg)
+
+        #expect(state.erasableMemory[0][reg] == 0o6)
+    }
+
+    @Test func dimDecrementsUntilZero() throws {
+        let (engine, state) = try makeEngine()
+        let reg = Register.regOPTY.rawValue
+        engine.writeRegister(Register(rawValue: reg)!, 0o3)
+
+        engine.performDIM(address10: reg)
+        #expect(state.erasableMemory[0][reg] == 0o2)
+
+        engine.writeRegister(Register(rawValue: reg)!, 0)
+        engine.performDIM(address10: reg)
+        #expect(state.erasableMemory[0][reg] == 0)
     }
 }
