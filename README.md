@@ -37,16 +37,16 @@ Current parity with yaAGC by instruction group (octal opcodes):
 | `010-011` | `CCS` | ✅ Tested via `ccsAdjustsNextZ…` |
 | `012-017` | `TCF` | ⚠️ Control flow works, lacks dedicated tests/backtrace |
 | `020-021` | `DAS` / `DDOUBL` | ✅ Covered by `dasDouble…` |
-| `022-023` | `LXCH` | ⚠️ Implemented, no direct tests yet |
-| `024-025` | `INCR` | ⚠️ Functional, parity pending (needs counter tests) |
-| `026-027` | `ADS` | ⚠️ Arithmetic verified in integration only |
-| `030-037` | `CA` | ⚠️ Core behaviour implemented, untested |
-| `040-047` | `CS` | ⚠️ Implemented, lacks dedicated tests |
+| `022-023` | `LXCH` | ✅ `lxchZeroClearsL`/`lxchSwapsWithErasable…` |
+| `024-025` | `INCR` | ✅ `incrAddsOneToRegister` |
+| `026-027` | `ADS` | ✅ `adsAddsAndStoresResult` |
+| `030-037` | `CA` | ✅ `caLoadsRegisterIntoAccumulator` |
+| `040-047` | `CS` | ✅ `csComplementsRegisterValue` |
 | `050-051`, `150-157` | `INDEX`, `RESUME` | ⚠️ Resume path tested; other index cases pending |
 | `052-053` | `DXCH` | ✅ `dxchSwapsDoublePrecisionWords` |
-| `054-055` | `TS` (`OVSK`, `TCAA`) | ⚠️ Needs targeted coverage |
-| `056-057` | `XCH` | ⚠️ Implementation only |
-| `060-067` | `AD` / `DOUBLE` | ⚠️ Arithmetic exercised indirectly |
+| `054-055` | `TS` (`OVSK`, `TCAA`) | ✅ `tsOvsk…` / `tsTCAA…` |
+| `056-057` | `XCH` | ✅ `xchSwapsWithMemory…` |
+| `060-067` | `AD` / `DOUBLE` | ✅ `adAddsErasable…` |
 | `070-077` | `MASK` | ✅ `maskInstructionUsesErasableMemory` |
 | `100` | `READ` | ✅ `readAndWriteIoChannels` |
 | `101` | `WRITE` | ✅ `readAndWriteIoChannels` |
@@ -62,11 +62,11 @@ Current parity with yaAGC by instruction group (octal opcodes):
 | `122-123` | `QXCH` | ✅ Helper + tests cover ZQ and register swapping |
 | `124-125` | `AUG` | ✅ `augIncrementsPositiveValues` |
 | `126-127` | `DIM` | ✅ `dimDecrementsUntilZero` |
-| `130-137` | `DCA` | ⚠️ Implementation mirrors yaAGC, no tests |
-| `140-147` | `DCS` | ⚠️ Same as above |
-| `160-161` | `SU` | ⚠️ Logic ported, needs regression tests |
+| `130-137` | `DCA` | ✅ `dcaLoadsDoublePrecision…` |
+| `140-147` | `DCS` | ✅ `dcsComplementsDouble…` |
+| `160-161` | `SU` | ✅ `suSubtractsUnit…` |
 | `162-167` | `BZMF` | ✅ Branch logic tested, emits backtrace entries |
-| `170-177` | `MP` | ⚠️ Multiply implemented; add tests for edge cases |
+| `170-177` | `MP` | ✅ `mpZeroOperand…` / `mpMultipliesPositive…` |
 | Counter opcodes | `PINC`, `MINC`, `DINC`, `PCDU/MCDU`, `SHINC/SHANC` | ✅ Helper parity + DINC test |
 
 Legend: ✅ = parity verified by unit tests, ⚠️ = implemented but missing parity features/tests.

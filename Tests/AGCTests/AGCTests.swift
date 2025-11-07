@@ -36,6 +36,20 @@ class AGCTests {
         }
     }
 
+    private func addSP(_ lhs: Int, _ rhs: Int) -> Int {
+        var sum = (lhs & 0o177777) + (rhs & 0o177777)
+        if (sum & 0o200000) != 0 {
+            sum = (sum + 1) & 0o177777
+        } else {
+            sum &= 0o177777
+        }
+        return sum
+    }
+
+    private func signExtend(_ value: Int) -> Int {
+        return (value & 0o77777) | ((value << 1) & 0o100000)
+    }
+
     private final class TestIO: AGCIOProtocol {
         var pendingInputs: [[Int:Int]] = []
         var outputs: [(Int, Int)] = []
@@ -259,6 +273,168 @@ class AGCTests {
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o60000)
     }
 
+    @Test func lxchZeroClearsL() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regL, 0o12345)
+
+        engine.performLXCH(address10: Register.regZERO.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0)
+    }
+
+    @Test func lxchSwapsWithErasableMemory() throws {
+        let (engine, state) = try makeEngine()
+        let target = 0o210
+        let (bank, offset) = erasableLocation(for: target)
+        state.erasableMemory[bank][offset] = 0o45670
+        engine.writeRegister(.regL, 0o12345)
+
+        engine.performLXCH(address10: target)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == signExtend(0o45670))
+        #expect(state.erasableMemory[bank][offset] == 0o12345)
+    }
+
+    @Test func tsOvskIncrementsNextZOnOverflow() throws {
+        let (engine, state) = try makeEngine()
+        state.nextZ = 0o10
+
+        engine.performTS(address10: Register.regA.rawValue, overflow: true)
+
+        #expect(state.nextZ == 0o11)
+    }
+
+    @Test func tsTCAAStoresAccumulatorIntoZ() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o54321, engine: engine)
+        state.nextZ = 0
+
+        engine.performTS(address10: Register.regZ.rawValue, overflow: false)
+
+        #expect(state.nextZ == 0o54321)
+    }
+
+    @Test func xchSwapsWithMemoryAndUpdatesZ() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o12345, engine: engine)
+        let target = Register.regZ.rawValue
+        engine.writeRegister(.regZ, 0o77777)
+
+        engine.performXCH(address10: target)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o77777)
+        #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o12345)
+        #expect(state.nextZ == 0o12345)
+    }
+
+    @Test func adAddsErasableValueToAccumulator() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o1000, engine: engine)
+        let target = 0o205
+        let (bank, offset) = erasableLocation(for: target)
+        state.erasableMemory[bank][offset] = 0o7000
+
+        engine.performAD(address12: target)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o10000))
+    }
+
+    @Test func adsAddsAndStoresResult() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o5000, engine: engine)
+        engine.writeRegister(.regL, 0o3000)
+
+        engine.performADS(address10: Register.regL.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o10000)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o10000)
+    }
+
+    @Test func incrAddsOneToRegister() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regL, 0o10)
+
+        engine.performINCR(address10: Register.regL.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o11)
+    }
+
+    @Test func dcaLoadsDoublePrecisionFromMemory() throws {
+        let (engine, state) = try makeEngine()
+        let top = 0o220
+        let bottom = (top &- 1) & 0o7777
+        let topLoc = erasableLocation(for: top)
+        let bottomLoc = erasableLocation(for: bottom)
+        state.erasableMemory[topLoc.bank][topLoc.offset] = 0o12345
+        state.erasableMemory[bottomLoc.bank][bottomLoc.offset] = 0o65432
+        setAccumulator(0o77777, engine: engine)
+        engine.writeRegister(.regL, 0o77777)
+
+        engine.performDCA(address12: top)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == signExtend(0o12345))
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o65432))
+        #expect(state.erasableMemory[topLoc.bank][topLoc.offset] == 0o12345)
+        #expect(state.erasableMemory[bottomLoc.bank][bottomLoc.offset] == 0o65432)
+    }
+
+    @Test func dcsComplementsDoublePrecisionValue() throws {
+        let (engine, state) = try makeEngine()
+        let top = 0o230
+        let bottom = (top &- 1) & 0o7777
+        let topLoc = erasableLocation(for: top)
+        let bottomLoc = erasableLocation(for: bottom)
+        state.erasableMemory[topLoc.bank][topLoc.offset] = 0o10000
+        state.erasableMemory[bottomLoc.bank][bottomLoc.offset] = 0o20000
+
+        engine.performDCS(address12: top)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == signExtend(0o67777))
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o57777))
+        #expect(state.erasableMemory[topLoc.bank][topLoc.offset] == 0o10000)
+        #expect(state.erasableMemory[bottomLoc.bank][bottomLoc.offset] == 0o20000)
+    }
+
+    @Test func suSubtractsUnitFromMemoryOperand() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o3000, engine: engine)
+        let address = 0o240
+        let loc = erasableLocation(for: address)
+        state.erasableMemory[loc.bank][loc.offset] = 0o1000
+        state.extraCode = true
+
+        engine.performSU(address10: address)
+
+        let expected = signExtend(0o2000)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == expected)
+        #expect(state.erasableMemory[loc.bank][loc.offset] == 0o1000)
+    }
+
+    @Test func mpZeroOperandClearsProduct() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0, engine: engine)
+        let address = 0o250
+        let loc = erasableLocation(for: address)
+        state.erasableMemory[loc.bank][loc.offset] = 0o12345
+
+        engine.performMP(address12: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0)
+    }
+
+    @Test func mpMultipliesPositiveNumbers() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o2, engine: engine)
+        let address = 0o260
+        let loc = erasableLocation(for: address)
+        state.erasableMemory[loc.bank][loc.offset] = 0o3
+
+        engine.performMP(address12: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o6)
+    }
     @Test func qxchZeroClearsQRegister() throws {
         let (engine, state) = try makeEngine()
         engine.writeRegister(.regQ, 0o12345)
@@ -266,6 +442,24 @@ class AGCTests {
         engine.performQXCH(address10: Register.regZERO.rawValue)
 
         #expect(state.erasableMemory[0][Register.regQ.rawValue] == 0)
+    }
+
+    @Test func caLoadsRegisterIntoAccumulator() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regL, 0o12345)
+
+        engine.performCA(address12: Register.regL.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o12345))
+    }
+
+    @Test func csComplementsRegisterValue() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regL, 0o12345)
+
+        engine.performCS(address12: Register.regL.rawValue)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend((~0o12345) & 0o77777))
     }
 
     @Test func qxchWithZSwapsAndUpdatesNextZ() throws {

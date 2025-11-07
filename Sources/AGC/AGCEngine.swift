@@ -762,94 +762,20 @@ public final class AGCEngine {
             }
             
         case 0o22...0o23: // LXCH instruction (2 MCT)
-            if isL(address10) {
-                break
-            }
-            
-            if isReg(address10, .regZERO) { // ZL
-                writeRegister(.regL, AGC_P0)
-            } else if address10 < Register.ramStart {
-                let operand16 = readRegister(.regL)
-                writeRegister(.regL, readRegister(Register(rawValue: address10)!))
-                
-                if address10 >= 0o20 && address10 <= 0o23 {
-                    assignFromPointer(address10, overflowCorrected(operand16 & 0o177777))
-                } else {
-                    writeRegister(Register(rawValue: address10)!, operand16)
-                }
-                
-                if address10 == Register.regZ.rawValue {
-                    state.nextZ = readRegister(.regZ)
-                }
-            } else {
-                let whereWord = findMemoryWord(address10)
-                let operand16 = whereWord
-                assignFromPointer(address10, overflowCorrected(readRegister(.regL) & 0o177777))
-                writeRegister(.regL, signExtend(operand16))
-            }
+            performLXCH(address10: address10)
             
         case 0o24...0o25: // INCR instruction (2 MCT)
-            let whereWord = findMemoryWord(address10)
-            
-            if address10 < Register.ramStart {
-                writeRegister(Register(rawValue: address10)!, addSP16(AGC_P1, readRegister(Register(rawValue: address10)!) & 0o177777))
-            } else {
-                let sum = addSP16(AGC_P1, signExtend(whereWord))
-                assignFromPointer(address10, overflowCorrected(sum))
-                interruptRequests(address10, sum)
-            }
+            performINCR(address10: address10)
             
         case 0o26...0o27: // ADS instruction (2 MCT)
-            let whereWord = findMemoryWord(address10)
-            
-            if isA(address10) {
-                state.accumulator = addSP16(state.accumulator, state.accumulator)
-            } else if address10 < Register.ramStart {
-                state.accumulator = addSP16(state.accumulator, readRegister(Register(rawValue: address10)!) & 0o177777)
-            } else {
-                state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
-            }
-            
-            writeRegister(.regA, state.accumulator)
-            
-            if !isA(address10) {
-                if address10 < Register.ramStart {
-                    writeRegister(Register(rawValue: address10)!, state.accumulator)
-                } else {
-                    assignFromPointer(address10, overflowCorrected(state.accumulator))
-                }
-            }
+            performADS(address10: address10)
             
         case 0o30...0o37: // CA instruction
-            if isA(address12) { // NOOP
-                break
-            }
-            
-            if address12 < Register.ramStart {
-                writeRegister(.regA, readRegister(Register(rawValue: address12)!))
-                break
-            }
-            
-            let whereWord = findMemoryWord(address12)
-            writeRegister(.regA, signExtend(whereWord))
-            assignFromPointer(address12, whereWord)
+            performCA(address12: address12)
             
         case 0o40...0o47: // CS instruction
             tcTransient = true // CS causes transients on the TC0 line
-            
-            if isA(address12) { // COM
-                writeRegister(.regA, ~state.accumulator)
-                break
-            }
-            
-            if address12 < Register.ramStart {
-                writeRegister(.regA, ~readRegister(Register(rawValue: address12)!))
-                break
-            }
-            
-            let whereWord = findMemoryWord(address12)
-            writeRegister(.regA, signExtend(negateSP(whereWord)))
-            assignFromPointer(address12, whereWord)
+            performCS(address12: address12)
             
         case 0o50...0o51: // INDEX instruction
             if address10 == 0o17 {
@@ -883,63 +809,14 @@ public final class AGCEngine {
             
         case 0o54...0o55: // TS instruction
             tcTransient = true // TS causes transients on the TCF0 line
-            
-            if isA(address10) { // OVSK
-                if overflow {
-                    state.nextZ += AGC_P1
-                }
-            } else if isZ(address10) { // TCAA
-                state.nextZ = state.accumulator & 0o77777
-                if overflow {
-                    writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
-                }
-            } else { // Not OVSK or TCAA
-                _ = findMemoryWord(address10) // Parity/side-effects only
-                
-                if address10 < Register.ramStart {
-                    writeRegister(Register(rawValue: address10)!, state.accumulator)
-                } else {
-                    assignFromPointer(address10, overflowCorrected(state.accumulator))
-                }
-                
-                if overflow {
-                    writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
-                    state.nextZ += AGC_P1
-                }
-            }
+            performTS(address10: address10, overflow: overflow)
             
         case 0o56...0o57: // XCH instruction
             tcTransient = true // XCH causes transients on the TCF0 line
-            
-            if isA(address10) {
-                break
-            }
-            
-            if address10 < Register.ramStart {
-                writeRegister(.regA, readRegister(Register(rawValue: address10)!))
-                writeRegister(Register(rawValue: address10)!, state.accumulator)
-                
-                if address10 == Register.regZ.rawValue {
-                    state.nextZ = readRegister(.regZ)
-                }
-                break
-            }
-            
-            let whereWord = findMemoryWord(address10)
-            writeRegister(.regA, signExtend(whereWord))
-            assignFromPointer(address10, overflowCorrected(state.accumulator))
+            performXCH(address10: address10)
             
         case 0o60...0o67: // AD instruction
-            if isA(address12) { // DOUBLE
-                state.accumulator = addSP16(state.accumulator, state.accumulator)
-            } else if address12 < Register.ramStart {
-                state.accumulator = addSP16(state.accumulator, readRegister(Register(rawValue: address12)!) & 0o177777)
-            } else {
-                let whereWord = findMemoryWord(address12)
-                state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
-                assignFromPointer(address12, whereWord)
-            }
-            writeRegister(.regA, state.accumulator)
+            performAD(address12: address12)
             
         case 0o70...0o77: // MASK instruction
             performMask(address12: address12)
@@ -1014,82 +891,13 @@ public final class AGCEngine {
             performDIM(address10: address10)
             
         case 0o130...0o137: // DCA instruction
-            if isL(address12) {
-                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-                break
-            }
-            
-            let whereWord = findMemoryWord(address12)
-            
-            // Do topmost word first
-            if address12 < Register.ramStart {
-                writeRegister(.regL, readRegister(Register(rawValue: address12)!))
-            } else {
-                writeRegister(.regL, signExtend(whereWord))
-            }
-            
-            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-            
-            // Now do bottom word
-            if address12 < Register.ramStart + 1 {
-                writeRegister(.regA, readRegister(Register(rawValue: address12 - 1)!))
-            } else {
-                writeRegister(.regA, signExtend(whereWord - 1))
-            }
-            
-            if address12 >= 0o20 && address12 <= 0o23 {
-                assignFromPointer(address12, whereWord)
-            }
-            
-            if address12 >= 0o20 + 1 && address12 <= 0o23 + 1 {
-                assignFromPointer(address12 - 1, whereWord - 1)
-            }
+            performDCA(address12: address12)
             
         case 0o140...0o147: // DCS instruction
-            if isL(address12) { // DCOM
-                writeRegister(.regA, ~state.accumulator)
-                writeRegister(.regL, ~readRegister(.regL))
-                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-                break
-            }
-            
-            let whereWord = findMemoryWord(address12)
-            
-            // Do topmost word first
-            if address12 < Register.ramStart {
-                writeRegister(.regL, ~readRegister(Register(rawValue: address12)!))
-            } else {
-                writeRegister(.regL, ~signExtend(whereWord))
-            }
-            
-            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-            
-            // Now do bottom word
-            if address12 < Register.ramStart + 1 {
-                writeRegister(.regA, ~readRegister(Register(rawValue: address12 - 1)!))
-            } else {
-                writeRegister(.regA, ~signExtend(whereWord - 1))
-            }
-            
-            if address12 >= 0o20 && address12 <= 0o23 {
-                assignFromPointer(address12, whereWord)
-            }
-            
-            if address12 >= 0o20 + 1 && address12 <= 0o23 + 1 {
-                assignFromPointer(address12 - 1, whereWord - 1)
-            }
+            performDCS(address12: address12)
             
         case 0o160...0o161: // SU instruction
-            if isA(address10) {
-                state.accumulator = signExtend(AGC_M0)
-            } else if address10 < Register.ramStart {
-                state.accumulator = addSP16(state.accumulator, 0o177777 & ~readRegister(Register(rawValue: address10)!))
-            } else {
-                let whereWord = findMemoryWord(address10)
-                state.accumulator = addSP16(state.accumulator, signExtend(negateSP(whereWord)))
-                assignFromPointer(address10, whereWord)
-            }
-            writeRegister(.regA, state.accumulator)
+            performSU(address10: address10)
             
         case 0o162...0o167: // BZMF instruction
             if performBZMF(address12: address12) {
@@ -1097,20 +905,7 @@ public final class AGCEngine {
             }
             break
         case 0o170...0o177: // MP instruction
-            let operand16 = overflowCorrected(state.accumulator)
-            let whereWord = findMemoryWord(address12)
-            let otherOperand16: Int
-            
-            if address12 < Register.ramStart {
-                otherOperand16 = overflowCorrected(readRegister(Register(rawValue: address12)!))
-            } else {
-                otherOperand16 = whereWord
-            }
-            
-            let (msWord, lsWord) = calculateMultiplyResult(operand16, otherOperand16)
-            
-            writeRegister(.regA, signExtend(msWord))
-            writeRegister(.regL, signExtend(lsWord))
+            performMP(address12: address12)
             
         default:
             break // Unrecognized instruction
@@ -2026,6 +1821,13 @@ public final class AGCEngine {
         }
         return sum
     }
+
+    private func readRawWord(_ address: Int) -> Int {
+        if address < Register.ramStart, let reg = Register(rawValue: address) {
+            return readRegister(reg) & 0o177777
+        }
+        return findMemoryWord(address) & 0o77777
+    }
     
     /// Correct overflow in a 16-bit value
     private func overflowCorrected(_ value: Int) -> Int {
@@ -2531,6 +2333,164 @@ public final class AGCEngine {
         }
     }
 
+    func performLXCH(address10: Int) {
+        if isL(address10) {
+            return
+        }
+
+        if isReg(address10, .regZERO) {
+            writeRegister(.regL, AGC_P0)
+            return
+        }
+
+        if address10 < Register.ramStart {
+            let operand16 = readRegister(.regL)
+            writeRegister(.regL, readRegister(Register(rawValue: address10)!))
+
+            if address10 >= 0o20 && address10 <= 0o23 {
+                assignFromPointer(address10, overflowCorrected(operand16 & 0o177777))
+            } else {
+                writeRegister(Register(rawValue: address10)!, operand16)
+            }
+
+            if address10 == Register.regZ.rawValue {
+                state.nextZ = readRegister(.regZ)
+            }
+        } else {
+            let whereWord = findMemoryWord(address10)
+            let operand16 = overflowCorrected(readRegister(.regL) & 0o177777)
+            assignFromPointer(address10, operand16)
+            writeRegister(.regL, signExtend(whereWord))
+        }
+    }
+
+    func performINCR(address10: Int) {
+        let whereWord = findMemoryWord(address10)
+
+        if address10 < Register.ramStart {
+            let current = readRegister(Register(rawValue: address10)!) & 0o177777
+            writeRegister(Register(rawValue: address10)!, addSP16(AGC_P1, current))
+        } else {
+            let sum = addSP16(AGC_P1, signExtend(whereWord))
+            assignFromPointer(address10, overflowCorrected(sum))
+            interruptRequests(address10, sum)
+        }
+    }
+
+    func performADS(address10: Int) {
+        if isA(address10) {
+            state.accumulator = addSP16(state.accumulator, state.accumulator)
+        } else if address10 < Register.ramStart {
+            let operand = readRegister(Register(rawValue: address10)!) & 0o177777
+            state.accumulator = addSP16(state.accumulator, operand)
+            writeRegister(Register(rawValue: address10)!, state.accumulator)
+        } else {
+            let whereWord = findMemoryWord(address10)
+            state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
+            assignFromPointer(address10, overflowCorrected(state.accumulator))
+        }
+        writeRegister(.regA, state.accumulator)
+    }
+
+    func performCA(address12: Int) {
+        if isA(address12) {
+            return
+        }
+
+        if address12 < Register.ramStart {
+            writeRegister(.regA, readRegister(Register(rawValue: address12)!))
+            return
+        }
+
+        let whereWord = findMemoryWord(address12)
+        writeRegister(.regA, signExtend(whereWord))
+        assignFromPointer(address12, whereWord)
+    }
+
+    func performCS(address12: Int) {
+        if isA(address12) {
+            writeRegister(.regA, ~state.accumulator)
+            return
+        }
+
+        if address12 < Register.ramStart {
+            writeRegister(.regA, ~readRegister(Register(rawValue: address12)!))
+            return
+        }
+
+        let whereWord = findMemoryWord(address12)
+        writeRegister(.regA, signExtend(negateSP(whereWord)))
+        assignFromPointer(address12, whereWord)
+    }
+
+    func performTS(address10: Int, overflow: Bool) {
+        if isA(address10) {
+            if overflow {
+                state.nextZ += AGC_P1
+            }
+            return
+        }
+
+        if isZ(address10) {
+            state.nextZ = state.accumulator & 0o77777
+            if overflow {
+                writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
+            }
+            return
+        }
+
+        _ = findMemoryWord(address10)
+
+        if address10 < Register.ramStart {
+            writeRegister(Register(rawValue: address10)!, state.accumulator)
+        } else {
+            assignFromPointer(address10, overflowCorrected(state.accumulator))
+        }
+
+        if address10 == Register.regZ.rawValue {
+            state.nextZ = readRegister(.regZ)
+        }
+
+        if overflow {
+            writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
+            state.nextZ += AGC_P1
+        }
+    }
+
+    func performXCH(address10: Int) {
+        if isA(address10) {
+            return
+        }
+
+        if address10 < Register.ramStart {
+            writeRegister(.regA, readRegister(Register(rawValue: address10)!))
+            writeRegister(Register(rawValue: address10)!, state.accumulator)
+
+            if address10 == Register.regZ.rawValue {
+                state.nextZ = readRegister(.regZ)
+            }
+            return
+        }
+
+        let whereWord = findMemoryWord(address10)
+        writeRegister(.regA, signExtend(whereWord))
+        assignFromPointer(address10, overflowCorrected(state.accumulator))
+    }
+
+    func performAD(address12: Int) {
+        if isA(address12) {
+            state.accumulator = addSP16(state.accumulator, state.accumulator)
+        } else if address12 < Register.ramStart {
+            let operand = readRegister(Register(rawValue: address12)!) & 0o177777
+            state.accumulator = addSP16(state.accumulator, operand)
+        } else {
+            let whereWord = findMemoryWord(address12)
+            state.accumulator = addSP16(state.accumulator, signExtend(whereWord))
+            assignFromPointer(address12, whereWord)
+        }
+        writeRegister(.regA, state.accumulator)
+    }
+
     func performBZF(address12: Int) -> Bool {
         if state.accumulator == 0 || state.accumulator == 0o177777 {
             state.nextZ = address12
@@ -2737,6 +2697,84 @@ public final class AGCEngine {
             operand16 ^= readIO(address: address9)
             writeRegister(.regA, signExtend(operand16))
         }
+    }
+
+    func performDCA(address12: Int) {
+        if isL(address12) {
+            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+            return
+        }
+
+        let topOriginal = readRawWord(address12)
+        let topSigned = signExtend(topOriginal)
+        writeRegister(.regL, signExtend(overflowCorrected(topSigned)))
+
+        let bottomAddress = (address12 &- 1) & 0o7777
+        let bottomOriginal = readRawWord(bottomAddress)
+        writeRegister(.regA, signExtend(bottomOriginal))
+
+        if address12 >= 0o20 && address12 <= 0o23 {
+            assignFromPointer(address12, topOriginal)
+        }
+        if bottomAddress >= 0o21 && bottomAddress <= 0o24 {
+            assignFromPointer(bottomAddress, bottomOriginal)
+        }
+    }
+
+    func performDCS(address12: Int) {
+        if isL(address12) {
+            writeRegister(.regA, ~state.accumulator)
+            let complementedL = (~readRegister(.regL)) & 0o177777
+            writeRegister(.regL, signExtend(overflowCorrected(complementedL)))
+            return
+        }
+
+        let topOriginal = readRawWord(address12)
+        let topSigned = signExtend(topOriginal)
+        let complementedTop = (~topSigned) & 0o177777
+        writeRegister(.regL, signExtend(overflowCorrected(complementedTop)))
+
+        let bottomAddress = (address12 &- 1) & 0o7777
+        let bottomOriginal = readRawWord(bottomAddress)
+        let bottomSigned = signExtend(bottomOriginal)
+        let complementedBottom = (~bottomSigned) & 0o177777
+        writeRegister(.regA, signExtend(complementedBottom))
+
+        if address12 >= 0o20 && address12 <= 0o23 {
+            assignFromPointer(address12, topOriginal)
+        }
+        if bottomAddress >= 0o21 && bottomAddress <= 0o24 {
+            assignFromPointer(bottomAddress, bottomOriginal)
+        }
+    }
+
+    func performSU(address10: Int) {
+        if isA(address10) {
+            state.accumulator = signExtend(AGC_M0)
+        } else if address10 < Register.ramStart {
+            let operand = readRegister(Register(rawValue: address10)!)
+            state.accumulator = addSP16(state.accumulator, 0o177777 & ~operand)
+        } else {
+            let whereWord = findMemoryWord(address10)
+            state.accumulator = addSP16(state.accumulator, signExtend(negateSP(whereWord)))
+            assignFromPointer(address10, whereWord)
+        }
+        writeRegister(.regA, state.accumulator)
+    }
+
+    func performMP(address12: Int) {
+        let operand16 = overflowCorrected(state.accumulator)
+        let otherOperand16: Int
+
+        if address12 < Register.ramStart {
+            otherOperand16 = overflowCorrected(readRegister(Register(rawValue: address12)!))
+        } else {
+            otherOperand16 = findMemoryWord(address12)
+        }
+
+        let (msWord, lsWord) = calculateMultiplyResult(operand16, otherOperand16)
+        writeRegister(.regA, signExtend(msWord))
+        writeRegister(.regL, signExtend(lsWord))
     }
 
     // Add these helper functions:
