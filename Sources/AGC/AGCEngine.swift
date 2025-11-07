@@ -6,7 +6,7 @@ public enum AGCError: Error {
 }
 
 /// AGC Register addresses (in octal)
-private enum Register: Int {
+enum Register: Int {
     case regA = 0o00        // Accumulator
     case regL = 0o01        // L Register
     case regQ = 0o02        // Q Register
@@ -532,6 +532,11 @@ public final class AGCEngine {
         }
     }
     
+    /// Fetch an instruction word using AGC bank-selection rules (test hook)
+    func fetchInstructionWord(at address: Int) -> Int {
+        return findMemoryWord(address & 0o7777)
+    }
+    
     /// Write a word to memory at the given address
     private func writeMemory(_ address: Int, _ value: Int) {
         if address < 0o2000 {
@@ -577,9 +582,9 @@ public final class AGCEngine {
         return address == register.rawValue
     }
     
-    /// Write a word to a specific register
-    private func writeRegister(_ register: Register, _ value: Int) {
-        writeMemory(register.rawValue, value)
+    /// Write a word to a specific register, applying editing rules via assign()
+    func writeRegister(_ register: Register, _ value: Int) {
+        assign(bank: 0, offset: register.rawValue, value: value)
     }
 
     /// Write a value to an I/O channel with special handling for certain channels
@@ -646,7 +651,7 @@ public final class AGCEngine {
     }
         
     /// Execute an extended instruction based on the opcode
-    private func executeExtendedInstruction(_ instruction: Int, overflow: Bool) {
+    func executeExtendedInstruction(_ instruction: Int, overflow: Bool) {
         // Track if we took certain branch instructions
         var justTookBZF = false
         var justTookBZMF = false
@@ -698,32 +703,7 @@ public final class AGCEngine {
             }
             
         case 0o10...0o11: // CCS instruction (2 MCT)
-            var operand16: Int
-            var valueK: Int = 0
-
-            if address10 < Register.ramStart {
-                valueK = readRegister(Register(rawValue: address10)!) & 0o177777
-                operand16 = overflowCorrected(valueK)
-                writeRegister(.regA, odabs(valueK))
-            } else {
-                let whereWord = findMemoryWord(address10)
-                operand16 = whereWord & 0o77777
-                writeRegister(.regA, dabs(operand16))
-                assignFromPointer(address10, operand16)
-            }
-            
-            // Handle branching logic
-            if address10 < Register.ramStart && valueOverflowed(valueK) == 1 {
-                // No change to nextZ
-            } else if address10 < Register.ramStart && valueOverflowed(valueK) == -1 {
-                state.nextZ += 2
-            } else if operand16 == AGC_P0 {
-                state.nextZ += 1
-            } else if operand16 == AGC_M0 {
-                state.nextZ += 3
-            } else if (operand16 & 0o40000) != 0 {
-                state.nextZ += 2
-            }
+            handleCCS(address10: address10)
             
         // Continue implementing other opcodes...
         case 0o12...0o17: // TCF instruction (1 MCT)
@@ -735,18 +715,7 @@ public final class AGCEngine {
             var lsw: Int
             
             if isL(address10) { // DDOUBL
-                lsw = addSP16(readRegister(.regL) & 0o177777, readRegister(.regL) & 0o177777)
-                msw = addSP16(state.accumulator, state.accumulator)
-                
-                if (0o140000 & lsw) == 0o40000 {
-                    msw = addSP16(msw, AGC_P1)
-                } else if (0o140000 & lsw) == 0o100000 {
-                    msw = addSP16(msw, signExtend(AGC_M1))
-                }
-                lsw = overflowCorrected(lsw)
-                writeRegister(.regA, msw & 0o177777)
-                writeRegister(.regL, signExtend(lsw) & 0o177777)
-                
+                doubleRegisters()
             } else {
                 let whereWord = findMemoryWord(address10)
                 
@@ -916,45 +885,7 @@ public final class AGCEngine {
             
         case 0o52...0o53: // DXCH instruction
             tcTransient = true // DXCH causes transients on the TCF0 line
-            
-            if isL(address10) {
-                writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-                break
-            }
-            
-            let whereWord = findMemoryWord(address10)
-            
-            // Topmost word
-            if address10 < Register.ramStart {
-                let operand16 = readRegister(Register(rawValue: address10)!)
-                writeRegister(Register(rawValue: address10)!, readRegister(.regL))
-                writeRegister(.regL, operand16)
-                
-                if address10 == Register.regZ.rawValue {
-                    state.nextZ = readRegister(.regZ)
-                }
-            } else {
-                let operand16 = signExtend(whereWord)
-                assignFromPointer(address10, overflowCorrected(readRegister(.regL)))
-                writeRegister(.regL, operand16)
-            }
-            
-            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
-            
-            // Bottom word
-            if address10 < Register.ramStart + 1 {
-                let operand16 = readRegister(Register(rawValue: address10 - 1)!)
-                writeRegister(Register(rawValue: address10 - 1)!, readRegister(.regA))
-                writeRegister(.regA, operand16)
-                
-                if address10 == Register.regZ.rawValue + 1 {
-                    state.nextZ = readRegister(.regZ)
-                }
-            } else {
-                let operand16 = signExtend(whereWord - 1)
-                assignFromPointer(address10 - 1, overflowCorrected(readRegister(.regA)))
-                writeRegister(.regA, operand16)
-            }
+            handleDXCH(address10: address10)
             
         case 0o54...0o55: // TS instruction
             tcTransient = true // TS causes transients on the TCF0 line
@@ -969,7 +900,7 @@ public final class AGCEngine {
                     writeRegister(.regA, signExtend(valueOverflowed(state.accumulator)))
                 }
             } else { // Not OVSK or TCAA
-                let whereWord = findMemoryWord(address10)
+                _ = findMemoryWord(address10) // Parity/side-effects only
                 
                 if address10 < Register.ramStart {
                     writeRegister(Register(rawValue: address10)!, state.accumulator)
@@ -1841,8 +1772,8 @@ public final class AGCEngine {
         if state.substituteInstruction {
             instruction = readRegister(.regBRUPT)
         } else {
-            // Handle indexed instructions
-            let baseInstruction = readMemory(programCounter)
+            // Handle indexed instructions using full AGC bank mapping
+            let baseInstruction = fetchInstructionWord(at: programCounter)
             instruction = overflowCorrected(
                 addSP16(signExtend(state.indexValue), 
                         signExtend(baseInstruction))
@@ -1998,8 +1929,7 @@ public final class AGCEngine {
     /// Run the engine for a specified number of cycles
     public func runEngine(for cycles: UInt64) async {
         for _ in 0..<Int(cycles) {
-            let result = await self.executeCycle()
-            print("Cycle \(self.state.cycleCounter) completed with result: \(result)")
+            _ = await self.executeCycle()
         }
     }
 
@@ -2104,12 +2034,9 @@ public final class AGCEngine {
         return 0     // No overflow
     }
     
-    /// Sign extend a 16-bit value
+    /// Sign extend an SP value into AGC's 17-bit accumulator format
     private func signExtend(_ value: Int) -> Int {
-        if (value & 0o40000) != 0 {
-            return value | ~0o77777  // Negative
-        }
-        return value & 0o77777       // Positive
+        return (value & 0o77777) | ((value << 1) & 0o100000)
     }
 
     /// Convert a double-precision value to two single-precision values
@@ -2125,15 +2052,12 @@ public final class AGCEngine {
     
     /// Add two 16-bit values with 1's complement arithmetic
     private func addSP16(_ a: Int, _ b: Int) -> Int {
-        var sum = a + b
-        
-        // Handle 1's complement addition
-        if sum < -0o77777 {
-            sum = (sum + 1) & 0o77777
-        } else if sum > 0o77777 {
-            sum = (sum - 1) & 0o77777
+        var sum = (a & 0o177777) + (b & 0o177777)
+        if (sum & 0o200000) != 0 {
+            sum = (sum + 1) & 0o177777
+        } else {
+            sum &= 0o177777
         }
-        
         return sum
     }
     
@@ -2311,58 +2235,58 @@ public final class AGCEngine {
             return
         }
         
+        var newValue = value
+        
         // Handle special registers in bank 0
         if bank == 0 {
             switch offset {
             case Register.regZ.rawValue:
-                state.nextZ = value
+                state.nextZ = newValue
                 
             case Register.regCYR.rawValue:
-                var newValue = value & 0o77777
+                newValue &= 0o77777
                 if (newValue & 1) != 0 {
                     newValue = (newValue >> 1) | 0o40000
                 } else {
-                    newValue = newValue >> 1
+                    newValue >>= 1
                 }
-                state.erasableMemory[0][offset] = newValue
                 
             case Register.regSR.rawValue:
-                var newValue = value & 0o77777
+                newValue &= 0o77777
                 if (newValue & 0o40000) != 0 {
                     newValue = (newValue >> 1) | 0o40000
                 } else {
-                    newValue = newValue >> 1
+                    newValue >>= 1
                 }
-                state.erasableMemory[0][offset] = newValue
                 
             case Register.regCYL.rawValue:
-                var newValue = value & 0o77777
+                newValue &= 0o77777
                 if (newValue & 0o40000) != 0 {
                     newValue = (newValue << 1) + 1
                 } else {
-                    newValue = newValue << 1
+                    newValue <<= 1
                 }
-                state.erasableMemory[0][offset] = newValue
                 
             case Register.regEDOP.rawValue:
-                let newValue = (value & 0o77777) >> 7 & 0o177
-                state.erasableMemory[0][offset] = newValue
+                newValue = ((newValue & 0o77777) >> 7) & 0o177
                 
             case Register.regZERO.rawValue:
-                state.erasableMemory[0][offset] = AGC_P0
+                newValue = AGC_P0
                 
             default:
-                // No editing needed for other registers
-                if offset >= Register.ramStart || (offset >= 0o20 && offset <= 0o23) {
-                    state.erasableMemory[0][offset] = value & 0o77777
-                } else {
-                    state.erasableMemory[0][offset] = value & 0o177777
-                }
+                break
             }
-        } else {
-            // For banks 1-7, just store the value with 15-bit mask
-            state.erasableMemory[bank][offset] = value & 0o77777
         }
+        
+        // Apply appropriate masking rules
+        let mask: Int
+        if bank == 0 && offset < Register.ramStart && !(offset >= 0o20 && offset <= 0o23) {
+            mask = 0o177777
+        } else {
+            mask = 0o77777
+        }
+        
+        state.erasableMemory[bank][offset] = newValue & mask
     }
 
 
@@ -2496,6 +2420,93 @@ public final class AGCEngine {
             state.downlink = 0
         }
     }
+    
+    /// Handle CCS instruction logic
+    func handleCCS(address10: Int) {
+        var operand16: Int
+        var valueK: Int = 0
+
+        if address10 < Register.ramStart {
+            valueK = readRegister(Register(rawValue: address10)!) & 0o177777
+            operand16 = overflowCorrected(valueK)
+            writeRegister(.regA, odabs(valueK))
+        } else {
+            let whereWord = findMemoryWord(address10)
+            operand16 = whereWord & 0o77777
+            writeRegister(.regA, dabs(operand16))
+            assignFromPointer(address10, operand16)
+        }
+        
+        if address10 < Register.ramStart && valueOverflowed(valueK) == 1 {
+            // No change
+        } else if address10 < Register.ramStart && valueOverflowed(valueK) == -1 {
+            state.nextZ += 2
+        } else if operand16 == AGC_P0 {
+            state.nextZ += 1
+        } else if operand16 == AGC_M0 {
+            state.nextZ += 3
+        } else if (operand16 & 0o40000) != 0 {
+            state.nextZ += 2
+        }
+    }
+    
+    /// Handle DDOUBL behavior of DAS instruction
+    func doubleRegisters() {
+        var lsw = addSP16(readRegister(.regL) & 0o177777, readRegister(.regL) & 0o177777)
+        var msw = addSP16(state.accumulator, state.accumulator)
+        
+        if (0o140000 & lsw) == 0o40000 {
+            msw = addSP16(msw, AGC_P1)
+        } else if (0o140000 & lsw) == 0o100000 {
+            msw = addSP16(msw, signExtend(AGC_M1))
+        }
+        lsw = overflowCorrected(lsw)
+        writeRegister(.regA, msw & 0o177777)
+        writeRegister(.regL, signExtend(lsw) & 0o177777)
+    }
+    
+    /// Handle DXCH swaps
+    func handleDXCH(address10: Int) {
+        if isL(address10) {
+            writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+            return
+        }
+        
+        let liveWord = findMemoryWord(address10)
+        
+        if address10 < Register.ramStart {
+            let operand16 = readRegister(Register(rawValue: address10)!)
+            writeRegister(Register(rawValue: address10)!, readRegister(.regL))
+            writeRegister(.regL, operand16)
+            
+            if address10 == Register.regZ.rawValue {
+                state.nextZ = readRegister(.regZ)
+            }
+        } else {
+            let operand16 = signExtend(liveWord)
+            assignFromPointer(address10, overflowCorrected(readRegister(.regL)))
+            writeRegister(.regL, operand16)
+        }
+        
+        writeRegister(.regL, signExtend(overflowCorrected(readRegister(.regL))))
+        
+        let bottomAddress = (address10 &- 1) & 0o7777
+        
+        if address10 < Register.ramStart + 1 {
+            let operand16 = readRegister(Register(rawValue: bottomAddress)!)
+            writeRegister(Register(rawValue: bottomAddress)!, readRegister(.regA))
+            writeRegister(.regA, operand16)
+            
+            if address10 == Register.regZ.rawValue + 1 {
+                state.nextZ = readRegister(.regZ)
+            }
+        } else {
+            let lowerWord = findMemoryWord(bottomAddress)
+            let operand16 = signExtend(lowerWord)
+            assignFromPointer(bottomAddress, overflowCorrected(readRegister(.regA)))
+            writeRegister(.regA, operand16)
+        }
+    }
 
     // Add these helper functions:
     /// Convert SP value to negative
@@ -2567,14 +2578,91 @@ public final class AGCEngine {
         return value
     }
 
-    /// Simulate DV hardware behavior
-    private func simulateDV(_ divisor: Int) {
-        // TODO: Implement DV hardware simulation
+    /// Simulate DV hardware behavior to match yaAGC's "total nonsense" cases
+    func simulateDV(_ divisorInput: Int) {
+        var a = readRegister(.regA) & 0o177777
+        var l = readRegister(.regL) & 0o177777
+        var divisor = divisorInput & 0o177777
+        
+        var dividendSign = a & 0o100000
+        
+        if dividendSign == 0 {
+            a = 0o177777 & ~a
+        }
+        if a == 0o177777 {
+            dividendSign = l & 0o100000
+        }
+        if dividendSign != 0 {
+            l = 0o177777 & ~l
+        }
+        
+        l = addSP16(l, 0o40000)
+        if valueOverflowed(l) != AGC_P1 {
+            a = addSP16(a, AGC_P1)
+        }
+        var remainder = a
+        
+        let divisorSign = divisor & 0o100000
+        if divisorSign != 0 {
+            divisor = 0o177777 & ~divisor
+        }
+        
+        let quotientSign = l & 0o100000
+        var quotient = quotientSign | ((l & 0o37777) << 1) | (quotientSign >> 15)
+        quotient &= 0o177777
+        
+        for _ in 0..<14 {
+            quotient = (quotient << 1) & 0o177777
+            let remainderSign = remainder & 0o100000
+            remainder = remainderSign | ((remainder & 0o37777) << 1)
+            remainder &= 0o177777
+            
+            if (quotient & 0o100000) == 0 {
+                remainder |= (remainderSign >> 15)
+            }
+            
+            let sum = addSP16(remainder, divisor)
+            if (sum & 0o100000) != 0 {
+                quotient |= 1
+                remainder = sum
+            }
+        }
+        
+        var newA = quotientSign | (quotient & 0o77777)
+        if dividendSign != divisorSign {
+            newA = 0o177777 & ~newA
+        }
+        
+        var newL = remainder
+        if dividendSign == 0 {
+            newL = 0o177777 & ~remainder
+        }
+        
+        writeRegister(.regA, signExtend(newA))
+        writeRegister(.regL, signExtend(newL))
     }
 
-    /// Handle interrupt requests
-    private func interruptRequests(_ address: Int, _ value: Int) {
-        // TODO: Implement interrupt request handling
+    /// Handle interrupt requests generated by counter instructions
+    func interruptRequests(_ address: Int, _ value: Int) {
+        // Only care about values that overflowed
+        if valueOverflowed(value) == AGC_P0 {
+            return
+        }
+        
+        switch address {
+        case Register.regTIME1.rawValue:
+            // Overflowing TIME1 increments TIME2 via PINC
+            _ = incrementCounter(register: .regTIME2)
+        case Register.regTIME5.rawValue:
+            state.interruptRequests[2] = 1
+        case Register.regTIME3.rawValue:
+            state.interruptRequests[3] = 1
+        case Register.regTIME4.rawValue:
+            state.interruptRequests[4] = 1
+        default:
+            // TIME6 requires hardware ZOUT side-effects which are handled elsewhere
+            break
+        }
     }
 }
 
