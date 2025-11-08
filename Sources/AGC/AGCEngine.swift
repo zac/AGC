@@ -1547,7 +1547,6 @@ public final class AGCEngine {
             while !Task.isCancelled {
                 // Run one machine cycle
                 let result = await self.executeCycle()
-                print("Cycle \(self.state.cycleCounter) completed with result: \(result)")
                 // Wait 11.7 microseconds between cycles
                 try? await Task.sleep(nanoseconds: 11_700)
             }
