@@ -5,6 +5,7 @@ public final class AGC {
     public private(set) var state: AGCState
     public private(set) var io: AGCIO
     public private(set) var engine: AGCEngine
+    private var runTask: Task<Void, Never>?
     
     public init(binFile: URL) throws {
         // Load core image data
@@ -45,11 +46,19 @@ public final class AGC {
 
     /// Begin simulation.
     public func start() {
-        engine.startEngine()
+        guard runTask == nil else { return }
+        runTask = Task.detached { [engine] in
+            await engine.runEngine(for: UInt64.max)
+        }
     }
 
     /// Stop simulation.
     public func stop() {
-        engine.stopEngine()
+        runTask?.cancel()
+        runTask = nil
     }
-} 
+
+    public func writeChannel(address: Int, value: Int) {
+        engine.writeIOChannel(address: address, value: value)
+    }
+}

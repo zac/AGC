@@ -6,7 +6,7 @@ public enum AGCError: Error {
 }
 
 /// AGC Register addresses (in octal)
-enum Register: Int {
+public enum Register: Int {
     case regA = 0o00        // Accumulator
     case regL = 0o01        // L Register
     case regQ = 0o02        // Q Register
@@ -1555,7 +1555,7 @@ public final class AGCEngine {
 
     /// Run the engine for a specified number of cycles
     public func runEngine(for cycles: UInt64) async {
-        for _ in 0..<Int(cycles) {
+        for _ in 0..<cycles {
             _ = await self.executeCycle()
         }
     }
@@ -2165,6 +2165,11 @@ public final class AGCEngine {
             state.downruptTime = state.cycleCounter + (AGC_PER_SECOND / 50)
             state.downlink = 0
         }
+    }
+
+    /// Public helper for sending keypresses into the AGC
+    func writeIOChannel(address: Int, value: Int) {
+        cpuWriteIO(address: address, value: value)
     }
     
     /// Handle CCS instruction logic
