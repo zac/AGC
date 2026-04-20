@@ -1,6 +1,11 @@
 import Foundation
 
-/// A facade for the AGC.
+/// High-level facade around ``AGCEngine`` and default ``AGCIO``.
+///
+/// **Timing:** ``run(for:)`` / ``start()`` advance the CPU as fast as possible (bounded by
+/// ``Task`` cancellation when using ``UInt64.max`` cycles). For wall-clock–paced simulation
+/// (~11.7µs per machine cycle), use ``AGCEngine/startEngine()`` instead, or drive a fixed
+/// number of cycles each frame from your RealityKit update loop.
 public final class AGC {
     public private(set) var state: AGCState
     public private(set) var io: AGCIO
@@ -44,15 +49,16 @@ public final class AGC {
         self.engine.ioDelegate = self.io
     }
 
-    /// Begin simulation.
+    /// Begin simulation (runs until ``stop()`` cancels the underlying task).
     public func start() {
         guard runTask == nil else { return }
-        runTask = Task.detached { [engine] in
+        let engine = self.engine
+        runTask = Task.detached {
             await engine.runEngine(for: UInt64.max)
         }
     }
 
-    /// Stop simulation.
+    /// Stop simulation (cancels the detached run loop started by ``start()``).
     public func stop() {
         runTask?.cancel()
         runTask = nil

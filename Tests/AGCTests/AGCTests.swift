@@ -705,3 +705,220 @@ class AGCTests {
         #expect(state.erasableMemory[0][reg] == 0)
     }
 }
+
+// MARK: - LM integration (scaler parity, vehicle I/O, composite delegate)
+
+@Suite("LM integration")
+struct LMIntegrationTests {
+    @Test func `Scaler tick updates input channel four`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        await engine.runEngine(for: 40)
+        #expect(state.inputChannels[4] > 0)
+    }
+
+    @Test func `LMVehicleIO captures channels five and six`() throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        let lm = LMVehicleIO()
+        engine.ioDelegate = lm
+        engine.writeIOChannel(address: 0o5, value: 0o12121)
+        engine.writeIOChannel(address: 0o6, value: 0o06060)
+        #expect(lm.jetEngineOutputs.channel5 == 0o12121)
+        #expect(lm.jetEngineOutputs.channel6 == 0o06060)
+    }
+
+    @Test func `Composite merges channel input`() async throws {
+        final class PartA: AGCIOProtocol, @unchecked Sendable {
+            func channelOutput(channel: Int, value: Int) {}
+            func channelInput() async -> [Int: Int]? { [0o15: 0o11] }
+            func requestRadarData() {}
+            func shiftToDeda(data: Int) {}
+            func channelRoutine() async {}
+        }
+        final class PartB: AGCIOProtocol, @unchecked Sendable {
+            func channelOutput(channel: Int, value: Int) {}
+            func channelInput() async -> [Int: Int]? { [0o16: 0o22] }
+            func requestRadarData() {}
+            func shiftToDeda(data: Int) {}
+            func channelRoutine() async {}
+        }
+        let composite = CompositeAGCIO(children: [PartA(), PartB()])
+        let merged = await composite.channelInput()
+        #expect(merged?[0o15] == 0o11)
+        #expect(merged?[0o16] == 0o22)
+    }
+
+    @Test func `AGC per second matches yaAGC macro`() {
+        // C / Swift integer division: (1024000 + 6) / 12 → 85333 (yaAGC `AGC_PER_SECOND`).
+        #expect(UInt64((1_024_000 + 6) / 12) == 85_333)
+    }
+
+    @Test func `Downlink arms downrupt when channels 34 and 35 written`() throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        state.downruptTimeValid = false
+        state.downruptTime = 0
+        state.downlink = 0
+        let agcPerSecond = UInt64((1_024_000 + 6) / 12)
+        let expectedDelta = agcPerSecond / 50
+        #expect(expectedDelta == 1706)
+        engine.writeIOChannel(address: 0o34, value: 1)
+        engine.writeIOChannel(address: 0o35, value: 2)
+        #expect(state.downruptTimeValid)
+        #expect(state.downruptTime == expectedDelta)
+    }
+
+    @Test func `Scaler two advances when scaler one overflows`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        state.downruptTimeValid = false
+        await engine.runEngine(for: 600_000)
+        #expect(state.inputChannels[3] > 0)
+    }
+
+    @Test func `CDU FIFO delays PCDU on CDUX`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try makeEngineForLMTests(state: state)
+        let io = LMTestIO()
+        engine.ioDelegate = io
+        state.erasableMemory[0][Register.regCDUX.rawValue] = 0
+        io.pendingInputs = [[0o200 | Register.regCDUX.rawValue: 1]]
+        await engine.runEngine(for: 1)
+        #expect(state.erasableMemory[0][Register.regCDUX.rawValue] == 0)
+        await engine.runEngine(for: 400)
+        #expect(state.erasableMemory[0][Register.regCDUX.rawValue] == 1)
+    }
+
+    @Test func `Non-CDU immediate PCDU does not use FIFO`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try makeEngineForLMTests(state: state)
+        let io = LMTestIO()
+        engine.ioDelegate = io
+        let cmd = Register.regCDUXCMD.rawValue
+        state.erasableMemory[0][cmd] = 0
+        io.pendingInputs = [[0o200 | cmd: 1]]
+        await engine.runEngine(for: 1)
+        #expect(state.erasableMemory[0][cmd] == 1)
+    }
+
+    @Test func `Radar completion calls delegate and RADARUPT`() throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        let spy = RadarSpyIO()
+        engine.ioDelegate = spy
+        state.interruptRequests[9] = 0
+        engine.integrationTestCompleteRadarSampleGate()
+        #expect(spy.radarCallCount == 1)
+        #expect(state.interruptRequests[9] == 1)
+        #expect(state.radarGateCounter == 0)
+        #expect((state.inputChannels[0o13] & 0o10) == 0)
+    }
+
+    @Test func `Radar gate advances when activity bit set`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        state.downruptTimeValid = false
+        state.inputChannels[0o13] |= 0o10
+        let before = state.radarGateCounter
+        await engine.runEngine(for: 80_000)
+        #expect(state.radarGateCounter > before)
+    }
+
+    @Test func `Run engine UInt64 max respects task cancellation`() async throws {
+        let state = AGCState()
+        state.binFile = Data()
+        let engine = try AGCEngine(state: state)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await engine.runEngine(for: UInt64.max)
+            }
+            group.cancelAll()
+        }
+        #expect(state.cycleCounter < 200_000)
+    }
+
+    @Test func `Composite fans out channel output and radar`() {
+        final class CountIO: AGCIOProtocol, @unchecked Sendable {
+            var outputs = 0
+            var radars = 0
+            var routines = 0
+            func channelOutput(channel: Int, value: Int) { outputs += 1 }
+            func channelInput() async -> [Int: Int]? { nil }
+            func requestRadarData() { radars += 1 }
+            func shiftToDeda(data: Int) {}
+            func channelRoutine() async { routines += 1 }
+        }
+        let a = CountIO()
+        let b = CountIO()
+        let c = CompositeAGCIO(children: [a, b])
+        c.channelOutput(channel: 0o5, value: 1)
+        #expect(a.outputs == 1 && b.outputs == 1)
+        c.requestRadarData()
+        #expect(a.radars == 1 && b.radars == 1)
+    }
+
+    @Test func `Composite awaits channel routine`() async {
+        final class RoutineIO: AGCIOProtocol, @unchecked Sendable {
+            var count = 0
+            func channelOutput(channel: Int, value: Int) {}
+            func channelInput() async -> [Int: Int]? { nil }
+            func requestRadarData() {}
+            func shiftToDeda(data: Int) {}
+            func channelRoutine() async { count += 1 }
+        }
+        let a = RoutineIO()
+        let b = RoutineIO()
+        let c = CompositeAGCIO(children: [a, b])
+        await c.channelRoutine()
+        #expect(a.count == 1 && b.count == 1)
+    }
+
+    @Test func `LMVehicleIO radar callback fires`() {
+        var fired = false
+        let lm = LMVehicleIO(onRequestRadarData: { fired = true })
+        lm.requestRadarData()
+        #expect(fired)
+    }
+}
+
+// MARK: - LM test helpers
+
+private func makeEngineForLMTests(state: AGCState) throws -> AGCEngine {
+    let engine = try AGCEngine(state: state)
+    state.downruptTimeValid = false
+    return engine
+}
+
+private final class LMTestIO: AGCIOProtocol, @unchecked Sendable {
+    var pendingInputs: [[Int: Int]] = []
+
+    func channelOutput(channel: Int, value: Int) {}
+
+    func channelInput() async -> [Int: Int]? {
+        guard !pendingInputs.isEmpty else { return nil }
+        return pendingInputs.removeFirst()
+    }
+
+    func requestRadarData() {}
+    func shiftToDeda(data: Int) {}
+    func channelRoutine() async {}
+}
+
+private final class RadarSpyIO: AGCIOProtocol, @unchecked Sendable {
+    private(set) var radarCallCount = 0
+
+    func channelOutput(channel: Int, value: Int) {}
+    func channelInput() async -> [Int: Int]? { nil }
+    func requestRadarData() { radarCallCount += 1 }
+    func shiftToDeda(data: Int) {}
+    func channelRoutine() async {}
+}

@@ -134,15 +134,15 @@ final class MissionControlViewModel {
         guard let dsky else { return }
         // Map keycodes to DSKY keypress methods
         if channel == 0o15 {
-            dsky.sendKeycode(value)
-            // Release key after delay
             Task {
+                await dsky.sendKeycode(value)
                 try? await Task.sleep(nanoseconds: 12_000_000) // 12ms
-                dsky.sendKeycode(0)
+                await dsky.sendKeycode(0)
             }
         } else if channel == 0o13 {
-            // PRO key
-            dsky.sendProKey(value == 0)
+            Task {
+                await dsky.sendProKey(value == 0)
+            }
         }
     }
 

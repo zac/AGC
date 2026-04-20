@@ -29,7 +29,7 @@ struct DSKYTests {
         let dsky = DSKY()
         
         // Test indicator lights
-        let indicatorValue = 0o420  // KEY_REL | OPER_ERR | RESTART
+        let indicatorValue = 0o320  // KEY_REL | OPER_ERR | RESTART
         dsky.channelOutput(channel: 0o163, value: indicatorValue)
         
         // Check that indicators are updated
@@ -42,7 +42,7 @@ struct DSKYTests {
         let dsky = DSKY()
         
         // Send a keypress
-        dsky.sendKeycode(0o21)  // VERB key
+        await dsky.sendKeycode(0o21)  // VERB key
         
         // Check that keypress is queued
         let input = await dsky.channelInput()
@@ -54,7 +54,7 @@ struct DSKYTests {
         let dsky = DSKY()
         
         // Send PRO key press
-        dsky.sendProKey(true)
+        await dsky.sendProKey(true)
         
         let input = await dsky.channelInput()
         #expect(input != nil, "PRO keypress should be queued")

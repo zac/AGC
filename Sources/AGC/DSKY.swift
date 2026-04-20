@@ -9,7 +9,6 @@ public final class DSKY: AGCIOProtocol {
     /// Channel masks for partial updates (default: all bits writable)
     private var channelMasks: [Int: Int] = [:]
     
-    /// Actor for thread-safe keypress queue access
     private actor KeypressQueueActor {
         var queue: [(channel: Int, value: Int)] = []
         
@@ -23,9 +22,7 @@ public final class DSKY: AGCIOProtocol {
             return result
         }
         
-        var isEmpty: Bool {
-            queue.isEmpty
-        }
+        var isEmpty: Bool { queue.isEmpty }
     }
     
     private let keypressActor = KeypressQueueActor()
@@ -138,18 +135,9 @@ public final class DSKY: AGCIOProtocol {
     }
     
     public func channelInput() async -> [Int: Int]? {
-        // Return queued keypresses
-        let isEmpty = await keypressActor.isEmpty
-        guard !isEmpty else {
-            return nil
-        }
-        
+        guard await !keypressActor.isEmpty else { return nil }
         let queue = await keypressActor.removeAll()
-        guard !queue.isEmpty else {
-            return nil
-        }
-        
-        // Convert array to dictionary (last value for each channel wins)
+        guard !queue.isEmpty else { return nil }
         var input: [Int: Int] = [:]
         for (channel, value) in queue {
             input[channel] = value
@@ -399,23 +387,15 @@ public final class DSKY: AGCIOProtocol {
     
     /// Send a keypress to the AGC
     /// - Parameter keycode: Keycode value (matching yaDSKY callbacks.c)
-    public func sendKeycode(_ keycode: Int) {
-        // Queue keypress for channel 15 (triggers KEYRUPT interrupt)
-        Task { [keypressActor] in
-            await keypressActor.append((channel: 0o15, value: keycode & 0o77777))
-        }
+    public func sendKeycode(_ keycode: Int) async {
+        await keypressActor.append((channel: 0o15, value: keycode & 0o77777))
     }
     
     /// Send PRO key press state
     /// - Parameter pressed: true when pressed, false when released
-    public func sendProKey(_ pressed: Bool) {
-        // PRO key is on channel 13, bit 14 (inverted: 0 = pressed)
-        // First set the mask for bit 14 (channel 432 = 0o200 | 0o230 = channel mask)
-        Task { [keypressActor] in
-            await keypressActor.append((channel: 0o432, value: 0o20000))
-            // Then send the PRO key state
-            await keypressActor.append((channel: 0o13, value: pressed ? 0 : 0o20000))
-        }
+    public func sendProKey(_ pressed: Bool) async {
+        await keypressActor.append((channel: 0o432, value: 0o20000))
+        await keypressActor.append((channel: 0o13, value: pressed ? 0 : 0o20000))
     }
     
     // MARK: - Display Helpers

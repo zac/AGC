@@ -240,6 +240,23 @@ private struct IMUBurst {
     }
 }
 
+// MARK: - CDU FIFO (yaAGC `PushCduFifo` / `ServiceCduFifo` in agc_engine.c)
+
+private enum CDUFifoConstants {
+    static let maxEntries = 128
+    static let fifoCount = 3
+    /// Erasable offsets `RegCDUX`…`RegCDUZ` (octal 032–034).
+    static let firstCounter = Register.regCDUX.rawValue
+}
+
+private struct CDUFifoState {
+    var ptr: Int = 0
+    var size: Int = 0
+    var intervalType: Int = 0
+    var nextUpdate: UInt64 = 0
+    var counts: [Int32] = Array(repeating: 0, count: CDUFifoConstants.maxEntries)
+}
+
 public final class AGCEngine {
     /// The simulation state.
     public var state: AGCState
@@ -328,22 +345,17 @@ public final class AGCEngine {
 
     // Add these constants to the class:
     private let SCALER_OVERFLOW = 80   // 1/3200 second in machine cycles
-    private let ChanSCALER1 = 0o24     // Channel 024
-    private let ChanSCALER2 = 0o25     // Channel 025
+    /// Scaler input channels (matches yaAGC `ChanSCALER1`/`ChanSCALER2` in agc_engine.h: octal 04 and 03).
+    private let ChanSCALER1 = 0o4
+    private let ChanSCALER2 = 0o3
     private let WARNING_FILTER_INCREMENT = 25
     private let WARNING_FILTER_MAX = 250
     private let WARNING_FILTER_DECREMENT = 2
     
-    // Add these register constants
-    private let RegTIME1 = 0o24  // TIME1 register address
-    private let RegTIME2 = 0o25  // TIME2 register address
-    private let RegTIME3 = 0o26  // TIME3 register address
-    private let RegTIME4 = 0o27  // TIME4 register address
-    private let RegTIME5 = 0o30  // TIME5 register address
-    private let RegTIME6 = 0o31  // TIME6 register address
-    
     private var imuTiming = IMUTiming()
     private var gyroTiming = GyroTiming()
+    private var cduFifoStates: [CDUFifoState] = Array(repeating: CDUFifoState(), count: CDUFifoConstants.fifoCount)
+    private var cduChecker: Int = 0
     
     // Add these constants to AGCEngine:
     private let MASK9 = 0o777        // 9-bit mask
@@ -362,8 +374,8 @@ public final class AGCEngine {
     private let AGC_P1 = 1               // Positive one
     private let AGC_M1 = 0o77776         // Negative one
     
-    // Add near the top with other constants:
-    private let AGC_PER_SECOND: UInt64 = 11_700  // Machine cycles per second
+    /// Simulated machine cycles per second (yaAGC `AGC_PER_SECOND`: (1024000+6)/12).
+    private let AGC_PER_SECOND: UInt64 = UInt64((1_024_000 + 6) / 12)
 
     public init(state: AGCState) throws {
         self.state = state
@@ -448,6 +460,9 @@ public final class AGCEngine {
         
         // Initialize radar state
         state.radarGateCounter = 0
+        
+        cduFifoStates = Array(repeating: CDUFifoState(), count: CDUFifoConstants.fifoCount)
+        cduChecker = 0
         
         // Load bin file if provided
         try loadBinFile()
@@ -1042,16 +1057,9 @@ public final class AGCEngine {
             return false
         }
 
-        /*
-        //----------------------------------------------------------------------
-  // Take care of any PCDU or MCDU operations that are lingering in CDU
-  // FIFOs.
-  if (ServiceCduFifo(State)) {
-    // A CDU counter was serviced, so a cycle was used up, and we must
-    // return.
-    return (0);
-  }
-        */
+        if serviceCduFifo() {
+            return false
+        }
         
         // Handle standby button state
         if (state.inputChannels[0o32] & 0o20000) != 0 {
@@ -1227,16 +1235,9 @@ public final class AGCEngine {
             }
 
             // Check for radar cycle completion
-            if (state.radarGateCounter == 9) && 
-               (0o36 == (0o37 & state.inputChannels[ChanSCALER1])) {
-                // Completion of radar cycle:
-                // 1. Reset radar gate counter
-                state.radarGateCounter = 0
-                // 2. Reset radar activity bit
-                state.inputChannels[0o13] &= ~0o10
-                // 3. Request radar data (TODO: implement RequestRadarData)
-                // 4. Set RADARUPT pending
-                state.interruptRequests[9] = 1
+            if (state.radarGateCounter == 9) &&
+                (0o36 == (0o37 & state.inputChannels[ChanSCALER1])) {
+                completeRadarSampleGate()
             }
             
             // Handle triggered alarms
@@ -1476,6 +1477,109 @@ public final class AGCEngine {
         return servicedCounter
     }
 
+    /// Rate-limits PCDU/MCDU into CDUX–CDUZ like yaAGC `PushCduFifo`.
+    private func pushCduFifo(counter: Int, incType: Int) {
+        let first = CDUFifoConstants.firstCounter
+        guard counter >= first && counter < first + CDUFifoConstants.fifoCount else { return }
+        let (interval, base): (UInt64, UInt32)
+        switch incType {
+        case 1:
+            interval = 213
+            base = 0x0000_0000
+        case 3:
+            interval = 213
+            base = 0x4000_0000
+        case 0o21:
+            interval = 13
+            base = 0x8000_0000
+        case 0o23:
+            interval = 13
+            base = 0xC000_0000
+        default:
+            return
+        }
+        let fifoIndex = counter - first
+        var fifo = cduFifoStates[fifoIndex]
+        defer { cduFifoStates[fifoIndex] = fifo }
+
+        if fifo.size == 0 {
+            fifo.ptr = 0
+            fifo.size = 1
+            fifo.counts[0] = Int32(bitPattern: base &+ 1)
+            fifo.nextUpdate = state.cycleCounter &+ interval
+            fifo.intervalType = 1
+            return
+        }
+
+        var next = fifo.ptr + fifo.size - 1
+        if next >= CDUFifoConstants.maxEntries {
+            next -= CDUFifoConstants.maxEntries
+        }
+        let lastMasked = UInt32(bitPattern: fifo.counts[next]) & 0xC000_0000
+        if lastMasked != base {
+            if fifo.size >= CDUFifoConstants.maxEntries {
+                return
+            }
+            fifo.size += 1
+            next += 1
+            if next >= CDUFifoConstants.maxEntries {
+                next -= CDUFifoConstants.maxEntries
+            }
+            fifo.counts[next] = Int32(bitPattern: base &+ 1)
+            return
+        }
+        fifo.counts[next] &+= 1
+    }
+
+    /// Applies at most one queued CDU pulse per call (yaAGC `ServiceCduFifo`). Returns true if a machine cycle was consumed.
+    private func serviceCduFifo() -> Bool {
+        let idx = cduChecker
+        var fifo = cduFifoStates[idx]
+        var consumed = false
+        defer {
+            cduFifoStates[idx] = fifo
+            cduChecker += 1
+            if cduChecker >= CDUFifoConstants.fifoCount {
+                cduChecker = 0
+            }
+        }
+
+        if fifo.size > 0 && state.cycleCounter >= fifo.nextUpdate {
+            let counterOffset = idx + CDUFifoConstants.firstCounter
+            var count = fifo.counts[fifo.ptr]
+            let highRate = (count & Int32(bitPattern: 0x8000_0000)) != 0
+            let downCount = (count & Int32(bitPattern: 0x4000_0000)) != 0
+            if downCount {
+                _ = counterMCDU(at: counterOffset)
+            } else {
+                _ = counterPCDU(at: counterOffset)
+            }
+            count -= 1
+            let payloadMask = Int32(bitPattern: ~UInt32(0xC000_0000))
+            if (count & payloadMask) != 0 {
+                fifo.counts[fifo.ptr] = count
+            } else {
+                fifo.size -= 1
+                fifo.ptr += 1
+                if fifo.ptr >= CDUFifoConstants.maxEntries {
+                    fifo.ptr = 0
+                }
+            }
+            if fifo.nextUpdate == 0 {
+                fifo.nextUpdate = state.cycleCounter
+            }
+            if fifo.intervalType < 2 {
+                fifo.nextUpdate += highRate ? 13 : 213
+                fifo.intervalType += 1
+            } else {
+                fifo.nextUpdate += highRate ? 14 : 214
+                fifo.intervalType = 0
+            }
+            consumed = true
+        }
+        return consumed
+    }
+
     private func handleUnprogrammedIncrement(counterChannel: Int, incrementType: Int) -> Bool {
         guard (counterChannel & 0o200) != 0 else {
             return false
@@ -1487,18 +1591,28 @@ public final class AGCEngine {
         }
 
         let type = incrementType & 0o77
+        let firstCDU = CDUFifoConstants.firstCounter
+        let lastCDUExclusive = firstCDU + CDUFifoConstants.fifoCount
         switch type {
         case 0:
             _ = counterPINC(at: counter)
             return true
         case 1, 0o21:
-            _ = counterPCDU(at: counter)
+            if counter >= firstCDU && counter < lastCDUExclusive {
+                pushCduFifo(counter: counter, incType: type)
+            } else {
+                _ = counterPCDU(at: counter)
+            }
             return true
         case 2:
             _ = counterMINC(at: counter)
             return true
         case 3, 0o23:
-            _ = counterMCDU(at: counter)
+            if counter >= firstCDU && counter < lastCDUExclusive {
+                pushCduFifo(counter: counter, incType: type)
+            } else {
+                _ = counterMCDU(at: counter)
+            }
             return true
         case 4:
             _ = counterDINC(at: counter, counterNumber: counter)
@@ -1539,6 +1653,9 @@ public final class AGCEngine {
         state.inputChannels[0o32] = 0o77777
         state.inputChannels[0o33] = 0o77777
         
+        cduFifoStates = Array(repeating: CDUFifoState(), count: CDUFifoConstants.fifoCount)
+        cduChecker = 0
+        
         // Clear erasable memory
         for bank in 0..<8 {
             for addr in 0..<0o400 {
@@ -1551,17 +1668,29 @@ public final class AGCEngine {
             guard let self = self else { return }
             while !Task.isCancelled {
                 // Run one machine cycle
-                let result = await self.executeCycle()
+                _ = await self.executeCycle()
                 // Wait 11.7 microseconds between cycles
                 try? await Task.sleep(nanoseconds: 11_700)
             }
         }
     }
 
-    /// Run the engine for a specified number of cycles
+    /// Runs the simulation for a fixed number of cycles, or until `Task` cancellation when `cycles == UInt64.max`.
+    ///
+    /// For visionOS / RealityKit, prefer driving the engine from your frame loop with a bounded cycle count
+    /// (deterministic coupling to physics). Use `startEngine()` for wall-clock–paced stepping (~11.7µs/cycle).
     public func runEngine(for cycles: UInt64) async {
-        for _ in 0..<cycles {
-            _ = await self.executeCycle()
+        if cycles == UInt64.max {
+            while !Task.isCancelled {
+                _ = await self.executeCycle()
+            }
+        } else {
+            var remaining = cycles
+            while remaining > 0 {
+                if Task.isCancelled { break }
+                _ = await self.executeCycle()
+                remaining -= 1
+            }
         }
     }
 
@@ -2041,39 +2170,22 @@ public final class AGCEngine {
     }
 
 
-    /// Process channel I/O routines
-    private func channelRoutine() {
-        // Update DSKY display
-        updateDSKY()
-        
-        // Process radar data if needed
-        if state.radarGateCounter == 9 && 
-           (0o36 == (0o37 & state.inputChannels[ChanSCALER1])) {
-            
-            // Reset radar gate counter
-            state.radarGateCounter = 0
-            
-            // Reset radar activity bit
-            state.inputChannels[0o13] &= ~0o10
-            
-            // Request new radar data
-            requestRadarData()
-            
-            // Set RADARUPT pending
-            state.interruptRequests[9] = 1
-        }
-        
-        // TODO: Implement DEDA shift register
-//        // Process DEDA shift register
-//        if let dedaData = state.dedaShiftRegister {
-//            shiftToDeda(dedaData)
-//            state.dedaShiftRegister = nil
-//        }
-    }
-
     /// Request new radar data from peripherals
     private func requestRadarData() {
         ioDelegate?.requestRadarData()
+    }
+
+    /// Radar sample gate finished: reset gate state, notify delegate, then RADARUPT (yaAGC parity).
+    private func completeRadarSampleGate() {
+        state.radarGateCounter = 0
+        state.inputChannels[0o13] &= ~0o10
+        requestRadarData()
+        state.interruptRequests[9] = 1
+    }
+
+    /// Invokes the same completion path as a hardware radar gate end (for tests / tooling).
+    internal func integrationTestCompleteRadarSampleGate() {
+        completeRadarSampleGate()
     }
 
     /// Shift data to DEDA display

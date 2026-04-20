@@ -1,9 +1,10 @@
+import Foundation
 import Testing
 @testable import AGC
 
 @Suite("AGCPacket Tests")
 struct AGCPacketTests {
-    @Test func packetEncodeDecode() {
+    @Test func packetEncodeDecode() throws {
         // Test encoding and decoding round-trip
         let channel = 0o15
         let value = 0o21
@@ -26,7 +27,7 @@ struct AGCPacketTests {
         #expect(!AGCPacket.isValid(invalidPacket), "Invalid packet should fail validation")
     }
     
-    @Test func packetChannel10() {
+    @Test func packetChannel10() throws {
         // Test channel 10 encoding (display data)
         let channel = 0o10
         let value = 0o50021  // Example display value
@@ -38,7 +39,7 @@ struct AGCPacketTests {
         #expect(decoded.value == value)
     }
     
-    @Test func packetChannel163() {
+    @Test func packetChannel163() throws {
         // Test channel 163 encoding (indicator lights)
         let channel = 0o163
         let value = 0o420  // Example indicator value (KEY_REL | OPER_ERR | RESTART)

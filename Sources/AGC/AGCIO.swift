@@ -8,7 +8,9 @@ public protocol AGCIOProtocol {
     /// Get input from peripherals
     func channelInput() async -> [Int:Int]?
     
-    /// Request new radar data
+    /// Called when a radar sample gate completes (before RADARUPT). Implementations should
+    /// load erasable address octal 046 (`Register.regRNRAD`) on the owning engine’s state,
+    /// matching yaAGC `RequestRadarData`.
     func requestRadarData()
     
     /// Shift data to DEDA display
