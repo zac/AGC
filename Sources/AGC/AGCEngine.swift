@@ -1465,6 +1465,11 @@ public final class AGCEngine {
             } else {
                 let normalizedChannel = channel & 0o777
                 state.inputChannels[normalizedChannel] = value & 0o77777
+                
+                // If this is a keystroke from the DSKY (channel 15), generate KEYRUPT interrupt
+                if normalizedChannel == 0o15 {
+                    state.interruptRequests[5] = 1  // KEYRUPT interrupt
+                }
             }
         }
 
@@ -2112,7 +2117,10 @@ public final class AGCEngine {
         
         if address == 0o10 {
             // Channel 10 is converted externally into up to 16 ports via latching relays
-            state.outputChannel10[(maskedValue >> 11) & 0o17] = maskedValue
+            let rowIndex = (maskedValue >> 11) & 0o17
+            state.outputChannel10[rowIndex] = maskedValue
+            // Also store in outputChannels for I/O delegate
+            state.outputChannels[address] = maskedValue
         }
         else if address == 0o15 || address == 0o16 {
             // RSET being pressed on either DSKY clears RESTART light directly

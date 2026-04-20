@@ -43,6 +43,7 @@ final class MissionControlViewModel {
     private(set) var latestDSKY: DSKYState?
 
     @ObservationIgnored private var agc: AGC?
+    @ObservationIgnored private var dsky: DSKY?
     @ObservationIgnored private var tickerTask: Task<Void, Never>?
     
     var registerSnapshot: RegisterSnapshot? {
@@ -63,15 +64,22 @@ final class MissionControlViewModel {
         
         do {
             agc = try AGC(binFile: url)
+            
+            // Create and connect DSKY
+            let dskyInstance = DSKY(agcEngine: agc?.engine)
+            self.dsky = dskyInstance
+            agc?.engine.ioDelegate = dskyInstance
+            
             selectedURL = url
             let data = try Data(contentsOf: url)
             let wordCount = data.count / 2
             programSummary = "\(url.lastPathComponent) – \(wordCount) words (\(data.count) bytes)"
             status = .idle
             isRunning = false
-            updateSnapshots(from: agc?.state)
+            updateSnapshots(from: agc?.state, dsky: dskyInstance)
         } catch {
             agc = nil
+            dsky = nil
             status = .error(error.localizedDescription)
             clearSnapshots()
         }
@@ -80,6 +88,7 @@ final class MissionControlViewModel {
     func clearProgram() {
         stop()
         agc = nil
+        dsky = nil
         selectedURL = nil
         status = .empty
         programSummary = "No program loaded"
@@ -111,29 +120,40 @@ final class MissionControlViewModel {
     
     private func startTicker() {
         tickerTask?.cancel()
-        guard let agc else { return }
+        guard let agc, let dsky else { return }
         tickerTask = Task { [weak self] in
             while !(Task.isCancelled) {
                 try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
                 guard let self else { break }
-                updateSnapshots(from: agc.state)
+                updateSnapshots(from: agc.state, dsky: dsky)
             }
         }
     }
 
     func pressKey(channel: Int, value: Int) {
-        guard let agc else { return }
-        agc.writeChannel(address: channel, value: value)
-        Task { [weak agc] in
-            try? await Task.sleep(nanoseconds: 12_000_000)
-            agc?.writeChannel(address: channel, value: 0)
+        guard let dsky else { return }
+        // Map keycodes to DSKY keypress methods
+        if channel == 0o15 {
+            dsky.sendKeycode(value)
+            // Release key after delay
+            Task {
+                try? await Task.sleep(nanoseconds: 12_000_000) // 12ms
+                dsky.sendKeycode(0)
+            }
+        } else if channel == 0o13 {
+            // PRO key
+            dsky.sendProKey(value == 0)
         }
     }
 
-    private func updateSnapshots(from state: AGCState?) {
+    private func updateSnapshots(from state: AGCState?, dsky: DSKY?) {
         if let state {
             latestSnapshot = RegisterSnapshot(state: state)
-            latestDSKY = DSKYState(state: state)
+            if let dsky {
+                latestDSKY = DSKYState(dsky: dsky)
+            } else {
+                latestDSKY = DSKYState(state: state)
+            }
         }
     }
 
@@ -565,6 +585,43 @@ struct DSKYState {
         var statuses: [Int: Bool] = [:]
         for definition in DSKYIndicatorDefinition.luminaryDefinitions {
             statuses[definition.id] = DSKYIndicatorDefinition.evaluate(definition, state: state)
+        }
+        indicatorStatuses = statuses
+    }
+    
+    init(dsky: DSKY) {
+        // Get display values from DSKY
+        channel10 = 0  // Not directly available, but displays are decoded
+        input11 = dsky.channel11
+        input13 = dsky.channel13
+        output163 = dsky.channel163
+        cycle = 0  // Not available from DSKY directly
+        
+        // Format displays from DSKY registers
+        let r1Str = dsky.formatRegister(dsky.r1)
+        let r2Str = dsky.formatRegister(dsky.r2)
+        let r3Str = dsky.formatRegister(dsky.r3)
+        
+        // Extract digits from formatted strings (format is "+12345" or "-12345")
+        displays = [
+            String(r1Str.prefix(1)),  // Sign
+            String(r1Str.dropFirst(1).prefix(2)),  // First 2 digits
+            String(r1Str.dropFirst(3).prefix(2)),  // Next 2 digits
+            String(r1Str.suffix(1))   // Last digit
+        ]
+        
+        verbDigits = dsky.formatVerb()
+        nounDigits = dsky.formatNoun()
+        plusSign = dsky.r1.sign == "+"
+        verbNounFlash = dsky.verbNounFlash
+        proOn = !dsky.proKeyPressed
+        keyRelOn = dsky.indicatorIsOn(14)
+        lampTest = dsky.lampTest
+        
+        // Get indicator statuses from DSKY
+        var statuses: [Int: Bool] = [:]
+        for id in [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27] {
+            statuses[id] = dsky.indicatorIsOn(id)
         }
         indicatorStatuses = statuses
     }
