@@ -20,6 +20,21 @@ class AGCTests {
         return (engine, state)
     }
 
+    private func makeLuminaryHarness() throws -> (library: AGC, dsky: DSKY) {
+        let library = try #require(self.library)
+        try library.reset()
+        let dsky = DSKY(agcEngine: library.engine)
+        library.engine.ioDelegate = CompositeAGCIO(children: [dsky])
+        return (library, dsky)
+    }
+
+    private func sendPacedDSKYSequence(_ sequence: [Int], dsky: DSKY, library: AGC, cyclesPerKey: UInt64 = 50_000) async {
+        for key in sequence {
+            await dsky.sendKeycode(key)
+            await library.run(for: cyclesPerKey)
+        }
+    }
+
     private func setAccumulator(_ value: Int, engine: AGCEngine) {
         engine.state.accumulator = value & 0o177777
         engine.writeRegister(.regA, engine.state.accumulator)
@@ -185,6 +200,26 @@ class AGCTests {
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o4000)
     }
 
+    @Test func dasUsesPreviousMemoryWordForMostSignificantResult() throws {
+        let (engine, state) = try makeEngine()
+        let topAddress = 0o200
+        let bottomAddress = (topAddress &- 1) & 0o7777
+        let topLoc = erasableLocation(for: topAddress)
+        let bottomLoc = erasableLocation(for: bottomAddress)
+
+        engine.writeRegister(.regA, 0o2)
+        engine.writeRegister(.regL, 0o1)
+        state.accumulator = state.erasableMemory[0][Register.regA.rawValue]
+        state.erasableMemory[topLoc.bank][topLoc.offset] = 0o3
+        state.erasableMemory[bottomLoc.bank][bottomLoc.offset] = 0o4
+
+        let instruction = (0o20 << 9) | topAddress
+        engine.executeExtendedInstruction(instruction, opcode: instruction >> 9, overflow: false)
+
+        #expect(state.erasableMemory[topLoc.bank][topLoc.offset] == 0o4)
+        #expect(state.erasableMemory[bottomLoc.bank][bottomLoc.offset] == 0o6)
+    }
+
     @Test func ccsAdjustsNextZForNegativeValues() async throws {
         let (engine, state) = try makeEngine()
         engine.writeRegister(.regA, 0o100000) // Negative overflow
@@ -218,6 +253,113 @@ class AGCTests {
         setAccumulator(0o12345, engine: engine)
         engine.performWrite(address9: 0o45)
         #expect(state.inputChannels[0o45] == 0o12345)
+    }
+
+    @Test func cpuIoWriteEmitsOneOutputCallback() throws {
+        let (engine, _) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+
+        engine.writeIOChannel(address: 0o5, value: 0o12345)
+
+        #expect(io.outputs.filter { $0.0 == 0o5 && $0.1 == 0o12345 }.count == 1)
+    }
+
+    @Test func channel7WriteUpdatesSuperbankInternally() throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+
+        engine.writeIOChannel(address: 0o7, value: 0o177)
+
+        #expect(state.outputChannel7 == 0o160)
+        #expect(state.inputChannels[0o7] == 0o160)
+        #expect(state.outputChannels[0o7] == 0o160)
+        #expect(!io.outputs.contains { $0.0 == 0o7 })
+    }
+
+    @Test func channelInputAppliesUBitMasks() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+        state.downruptTimeValid = false
+        state.inputChannels[0o32] = 0o77777
+        io.pendingInputs = [
+            [0o432: 0o20000],
+            [0o32: 0]
+        ]
+
+        await engine.runEngine(for: 2)
+
+        #expect((state.inputChannels[0o32] & 0o20000) == 0)
+        #expect((state.inputChannels[0o32] & 0o57777) == 0o57777)
+    }
+
+    @Test func channelInputRaisesUplinkInterrupt() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+        state.downruptTimeValid = false
+        state.allowInterrupt = false
+        io.pendingInputs = [[0o173: 0o12345]]
+
+        await engine.runEngine(for: 1)
+
+        #expect(state.erasableMemory[0][Register.regINLINK.rawValue] == 0o12345)
+        #expect(state.interruptRequests[7] == 1)
+    }
+
+    @Test func dskyKeypressRaisesKeyruptWhenEngineConsumesQueue() async throws {
+        let library = try #require(self.library)
+        try library.reset()
+
+        let dsky = DSKY(agcEngine: library.engine)
+        library.engine.ioDelegate = CompositeAGCIO(children: [dsky])
+
+        await dsky.sendKeycode(0o21)
+        await library.run(for: 1)
+
+        #expect(library.state.interruptRequests[5] == 1)
+        #expect(library.state.inputChannels[0o15] == 0o21)
+    }
+
+    @Test func luminaryPacedV35EDrivesLampTestDisplay() async throws {
+        let (library, dsky) = try makeLuminaryHarness()
+
+        await library.run(for: 1_000_000)
+
+        #expect((library.state.inputChannels[0o77] & 0o000010) == 0, "Boot should not trip the RUPT LOCK alarm")
+
+        await sendPacedDSKYSequence([0o22], dsky: dsky, library: library)
+        #expect(!library.state.restartLight, "RSET should clear the RESTART light")
+
+        await sendPacedDSKYSequence([0o21, 0o3, 0o5, 0o34], dsky: dsky, library: library)
+
+        #expect(dsky.lampTest, "Verb 35 should drive the DSKY lamp test when keys are paced at the API level")
+        #expect(dsky.formatVerb() == "88")
+        #expect(dsky.formatNoun() == "88")
+        #expect(dsky.formatRegister(dsky.r1).contains("88888"))
+        #expect(dsky.indicatorIsOn(24), "RESTART annunciator should light during lamp test")
+        #expect(dsky.indicatorIsOn(13), "STBY annunciator should light during lamp test")
+    }
+
+    @Test func rotationalHandControllerInputsLatchWhenRequested() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+        state.downruptTimeValid = false
+        io.pendingInputs = [
+            [0o166: 0o1],
+            [0o167: 0o2],
+            [0o170: 0o3]
+        ]
+
+        await engine.runEngine(for: 3)
+        engine.writeIOChannel(address: 0o13, value: 0o600)
+
+        #expect(state.erasableMemory[0][Register.regRHCP.rawValue] == 0o1)
+        #expect(state.erasableMemory[0][Register.regRHCY.rawValue] == 0o2)
+        #expect(state.erasableMemory[0][Register.regRHCR.rawValue] == 0o3)
     }
 
     @Test func unprogrammedDincEmitsZoutPulse() async throws {
@@ -322,7 +464,7 @@ class AGCTests {
 
         engine.performXCH(address10: target)
 
-        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o77777)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o77777))
         #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o12345)
         #expect(state.nextZ == 0o12345)
     }
@@ -507,8 +649,8 @@ class AGCTests {
         state.backtrace.removeAll()
 
         let tcTarget = 0o200
-        let tcInstruction = tcTarget << 6
-        engine.executeExtendedInstruction(tcInstruction, opcode: 0, overflow: false)
+        let tcInstruction = tcTarget
+        engine.executeExtendedInstruction(tcInstruction, opcode: tcInstruction >> 9, overflow: false)
 
         #expect(state.backtrace.last?.target == tcTarget)
 
@@ -520,6 +662,34 @@ class AGCTests {
         setAccumulator(0o100000, engine: engine)
         _ = engine.performBZMF(address12: 0o444)
         #expect(state.backtrace.last?.target == 0o444)
+    }
+
+    @Test func executeInstructionUsesActualLowBitOperandFields() throws {
+        let (engine, state) = try makeEngine()
+
+        let tcInstruction = 0o1234
+        state.nextZ = 0o4321
+        engine.executeExtendedInstruction(tcInstruction, opcode: tcInstruction >> 9, overflow: false)
+        #expect(state.nextZ == 0o1234)
+        #expect(state.erasableMemory[0][Register.regQ.rawValue] == 0o4321)
+
+        engine.writeRegister(.regL, 0o24642)
+        let caLInstruction = (0o30 << 9) | Register.regL.rawValue
+        engine.executeExtendedInstruction(caLInstruction, opcode: caLInstruction >> 9, overflow: false)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o24642)
+    }
+
+    @Test func executeIncrUsesTenBitOperandField() throws {
+        let (engine, state) = try makeEngine()
+
+        state.erasableMemory[0][Register.regTIME1.rawValue] = 0o37777
+        state.erasableMemory[0][Register.regTIME2.rawValue] = 0
+
+        let instruction = (0o24 << 9) | Register.regTIME1.rawValue
+        engine.executeExtendedInstruction(instruction, opcode: instruction >> 9, overflow: false)
+
+        #expect(state.erasableMemory[0][Register.regTIME1.rawValue] == 0)
+        #expect(state.erasableMemory[0][Register.regTIME2.rawValue] == 1)
     }
 
     @Test func edruptVectorsToAddressZero() async throws {

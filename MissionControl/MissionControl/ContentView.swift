@@ -12,6 +12,10 @@ import AGC
 @MainActor
 @Observable
 final class MissionControlViewModel {
+    fileprivate static let idleSingleKeyValidationCycles: UInt64 = 12_000
+    fileprivate static let idleSequenceValidationCycles: UInt64 = 120_000
+    fileprivate static let scriptedKeySettleCycles: UInt64 = 50_000
+
     enum Status: Equatable {
         case empty
         case idle
@@ -41,10 +45,21 @@ final class MissionControlViewModel {
     private(set) var programSummary = "No program loaded"
     private(set) var latestSnapshot: RegisterSnapshot?
     private(set) var latestDSKY: DSKYState?
+    private(set) var engineHealth: EngineHealthSnapshot?
+    private(set) var radarHookInvocations: UInt64 = 0
+    private(set) var recentEvents: [MissionControlEvent] = []
+    private(set) var backtraceTail: [BacktraceSnapshot] = []
 
     @ObservationIgnored private var agc: AGC?
     @ObservationIgnored private var dsky: DSKY?
-    @ObservationIgnored private var tickerTask: Task<Void, Never>?
+    @ObservationIgnored private var compositeIO: CompositeAGCIO?
+    @ObservationIgnored private var lmVehicleIO: LMVehicleIO?
+    @ObservationIgnored private var simulationTask: Task<Void, Never>?
+    @ObservationIgnored private var dskySequenceTask: Task<Void, Never>?
+    @ObservationIgnored private var lastHealthWall: CFAbsoluteTime = 0
+    @ObservationIgnored private var lastHealthCycle: UInt64 = 0
+    @ObservationIgnored private var smoothedCyclesPerSec: Double = 0
+    @ObservationIgnored private var previousCycleForAdvance: UInt64 = 0
     
     var registerSnapshot: RegisterSnapshot? {
         latestSnapshot
@@ -53,8 +68,17 @@ final class MissionControlViewModel {
     var canStart: Bool { agc != nil && !isRunning }
     var canStop: Bool { isRunning }
     var canReset: Bool { agc != nil }
+    var canStep: Bool { agc != nil && !isRunning }
+    var hasSampleProgram: Bool {
+        Bundle.main.url(forResource: "Luminary099", withExtension: "bin") != nil
+    }
     
     func loadProgram(from url: URL) {
+        simulationTask?.cancel()
+        simulationTask = nil
+        isRunning = false
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
         let needsAccess = url.startAccessingSecurityScopedResource()
         defer {
             if needsAccess {
@@ -63,53 +87,139 @@ final class MissionControlViewModel {
         }
         
         do {
-            agc = try AGC(binFile: url)
-            
-            // Create and connect DSKY
-            let dskyInstance = DSKY(agcEngine: agc?.engine)
-            self.dsky = dskyInstance
-            agc?.engine.ioDelegate = dskyInstance
-            
+            let loaded = try AGC(binFile: url)
+            agc = loaded
+
+            let dskyInstance = DSKY(agcEngine: loaded.engine)
+            let lmIO = LMVehicleIO(agcEngine: loaded.engine) { [weak self] in
+                Task { @MainActor in
+                    self?.radarHookInvocations += 1
+                }
+            }
+            lmVehicleIO = lmIO
+            let composite = CompositeAGCIO(children: [dskyInstance, lmIO])
+            compositeIO = composite
+            dsky = dskyInstance
+            loaded.engine.ioDelegate = composite
+
             selectedURL = url
             let data = try Data(contentsOf: url)
             let wordCount = data.count / 2
             programSummary = "\(url.lastPathComponent) – \(wordCount) words (\(data.count) bytes)"
             status = .idle
             isRunning = false
-            updateSnapshots(from: agc?.state, dsky: dskyInstance)
+            radarHookInvocations = 0
+            engineHealth = nil
+            lastHealthWall = 0
+            lastHealthCycle = 0
+            previousCycleForAdvance = 0
+            smoothedCyclesPerSec = 0
+            updateSnapshots(from: loaded.state, dsky: dskyInstance)
+            refreshEngineHealth(cycle: loaded.state.cycleCounter)
+            recordEvent("Loaded \(url.lastPathComponent)")
         } catch {
             agc = nil
             dsky = nil
+            compositeIO = nil
+            lmVehicleIO = nil
             status = .error(error.localizedDescription)
             clearSnapshots()
+            recordEvent("Load failed: \(error.localizedDescription)")
         }
+    }
+
+    func loadSampleProgram() {
+        guard let url = Bundle.main.url(forResource: "Luminary099", withExtension: "bin") else {
+            status = .error("Bundled Luminary099.bin is missing.")
+            recordEvent("Sample binary missing")
+            return
+        }
+        loadProgram(from: url)
     }
     
     func clearProgram() {
         stop()
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
         agc = nil
         dsky = nil
+        compositeIO = nil
+        lmVehicleIO = nil
         selectedURL = nil
         status = .empty
         programSummary = "No program loaded"
         clearSnapshots()
+        recordEvent("Cleared program")
     }
     
     func start() {
-        guard canStart else { return }
-        agc?.start()
+        guard canStart, let agc, let dsky else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
         isRunning = true
         status = .running
-        startTicker()
+        lastHealthWall = CFAbsoluteTimeGetCurrent()
+        lastHealthCycle = agc.state.cycleCounter
+        previousCycleForAdvance = agc.state.cycleCounter
+        smoothedCyclesPerSec = 0
+        let cyclesPerBatch: UInt64 = 30_000
+        recordEvent("Started continuous run")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await agc.run(for: cyclesPerBatch)
+                updateSnapshots(from: agc.state, dsky: dsky)
+                refreshEngineHealth(cycle: agc.state.cycleCounter)
+                await Task.yield()
+            }
+            self.isRunning = false
+            self.simulationTask = nil
+            if case .running = self.status {
+                self.status = .stopped
+            }
+            self.updateSnapshots(from: agc.state, dsky: dsky)
+            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+            self.recordEvent("Continuous run stopped at cycle \(agc.state.cycleCounter)")
+        }
+    }
+
+    func runCycles(_ cycles: UInt64) {
+        guard canStep, let agc, let dsky else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        isRunning = true
+        status = .running
+        lastHealthWall = CFAbsoluteTimeGetCurrent()
+        lastHealthCycle = agc.state.cycleCounter
+        previousCycleForAdvance = agc.state.cycleCounter
+        recordEvent("Running \(cycles.formatted()) cycles")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await agc.run(for: cycles)
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.updateSnapshots(from: agc.state, dsky: dsky)
+            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+            self.recordEvent("Finished \(cycles.formatted()) cycles at cycle \(agc.state.cycleCounter)")
+        }
     }
     
     func stop() {
-        guard canStop else { return }
-        agc?.stop()
-        tickerTask?.cancel()
-        tickerTask = nil
+        guard canStop || dskySequenceTask != nil else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        simulationTask = nil
         isRunning = false
         status = .stopped
+        if let agc, let dsky {
+            updateSnapshots(from: agc.state, dsky: dsky)
+            refreshEngineHealth(cycle: agc.state.cycleCounter)
+            recordEvent("Stopped at cycle \(agc.state.cycleCounter)")
+        }
     }
     
     func reset() {
@@ -118,31 +228,121 @@ final class MissionControlViewModel {
         loadProgram(from: url)
     }
     
-    private func startTicker() {
-        tickerTask?.cancel()
-        guard let agc, let dsky else { return }
-        tickerTask = Task { [weak self] in
-            while !(Task.isCancelled) {
-                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2s
-                guard let self else { break }
-                updateSnapshots(from: agc.state, dsky: dsky)
-            }
+    private func refreshEngineHealth(cycle: UInt64) {
+        let batchDelta = cycle &- previousCycleForAdvance
+        previousCycleForAdvance = cycle
+        let now = CFAbsoluteTimeGetCurrent()
+        if lastHealthWall == 0 {
+            lastHealthWall = now
+            lastHealthCycle = cycle
+            engineHealth = EngineHealthSnapshot(
+                cycle: cycle,
+                cyclesPerSecond: 0,
+                isAdvancing: false,
+                lmOutputs: lmVehicleIO?.jetEngineOutputs
+            )
+            return
         }
+        let dt = now - lastHealthWall
+        let delta = cycle &- lastHealthCycle
+        if dt > 0.05, delta > 0 {
+            let instant = Double(delta) / dt
+            smoothedCyclesPerSec = smoothedCyclesPerSec == 0
+                ? instant
+                : smoothedCyclesPerSec * 0.88 + instant * 0.12
+            lastHealthWall = now
+            lastHealthCycle = cycle
+        }
+        engineHealth = EngineHealthSnapshot(
+            cycle: cycle,
+            cyclesPerSecond: smoothedCyclesPerSec,
+            isAdvancing: isRunning && batchDelta > 0,
+            lmOutputs: lmVehicleIO?.jetEngineOutputs
+        )
     }
 
     func pressKey(channel: Int, value: Int) {
-        guard let dsky else { return }
-        // Map keycodes to DSKY keypress methods
-        if channel == 0o15 {
-            Task {
-                await dsky.sendKeycode(value)
-                try? await Task.sleep(nanoseconds: 12_000_000) // 12ms
-                await dsky.sendKeycode(0)
+        sendDSKYSequence(
+            label: "Key \(String(format: "%03o", value))",
+            keys: [DSKYKey(label: "", channel: channel, value: value, accent: false)],
+            autoRunCyclesWhenIdle: Self.idleSingleKeyValidationCycles
+        )
+    }
+
+    func sendDSKYSequence(label: String, keys: [DSKYKey], autoRunCyclesWhenIdle: UInt64? = nil) {
+        guard let agc, let dsky else { return }
+        recordEvent("Queued \(label)")
+        let settleCycles = if keys.count > 1 {
+            max(
+                Self.scriptedKeySettleCycles,
+                (autoRunCyclesWhenIdle ?? 0) / UInt64(max(keys.count, 1))
+            )
+        } else {
+            autoRunCyclesWhenIdle ?? 0
+        }
+
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        if isRunning {
+            dskySequenceTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                for key in keys {
+                    if Task.isCancelled { break }
+                    await self.sendDSKYKey(key, to: dsky)
+                    if settleCycles > 0 {
+                        await self.waitForCycleAdvance(settleCycles, agc: agc)
+                    }
+                }
+                self.dskySequenceTask = nil
+                self.updateSnapshots(from: agc.state, dsky: dsky)
+                self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+                self.recordEvent("Sent \(label) into live run")
             }
-        } else if channel == 0o13 {
-            Task {
-                await dsky.sendProKey(value == 0)
+            return
+        }
+
+        simulationTask?.cancel()
+        simulationTask = nil
+        isRunning = true
+        status = .running
+        lastHealthWall = CFAbsoluteTimeGetCurrent()
+        lastHealthCycle = agc.state.cycleCounter
+        previousCycleForAdvance = agc.state.cycleCounter
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for key in keys {
+                if Task.isCancelled { break }
+                await self.sendDSKYKey(key, to: dsky)
+
+                if settleCycles > 0 {
+                    await agc.run(for: settleCycles)
+                    self.updateSnapshots(from: agc.state, dsky: dsky)
+                    self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+                }
             }
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.updateSnapshots(from: agc.state, dsky: dsky)
+            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+            self.recordEvent("Sent \(label)")
+        }
+    }
+
+    private func sendDSKYKey(_ key: DSKYKey, to dsky: DSKY) async {
+        if key.channel == 0o13 {
+            await dsky.sendProKey(true)
+            await dsky.sendProKey(false)
+        } else {
+            await dsky.sendKeycode(key.value)
+        }
+    }
+
+    private func waitForCycleAdvance(_ cycles: UInt64, agc: AGC) async {
+        guard cycles > 0 else { return }
+        let targetCycle = agc.state.cycleCounter &+ cycles
+        while !Task.isCancelled && agc.state.cycleCounter < targetCycle {
+            try? await Task.sleep(for: .milliseconds(10))
         }
     }
 
@@ -150,16 +350,26 @@ final class MissionControlViewModel {
         if let state {
             latestSnapshot = RegisterSnapshot(state: state)
             if let dsky {
-                latestDSKY = DSKYState(dsky: dsky)
+                latestDSKY = DSKYState(state: state, dsky: dsky)
             } else {
                 latestDSKY = DSKYState(state: state)
             }
+            backtraceTail = state.backtrace.suffix(8).map(BacktraceSnapshot.init)
         }
     }
 
     private func clearSnapshots() {
         latestSnapshot = nil
         latestDSKY = nil
+        engineHealth = nil
+        backtraceTail = []
+    }
+
+    private func recordEvent(_ message: String) {
+        recentEvents.insert(MissionControlEvent(message: message), at: 0)
+        if recentEvents.count > 12 {
+            recentEvents.removeLast(recentEvents.count - 12)
+        }
     }
 }
 
@@ -187,25 +397,129 @@ struct RegisterSnapshot {
     }
 }
 
+struct EngineHealthSnapshot: Equatable {
+    var cycle: UInt64
+    var cyclesPerSecond: Double
+    var isAdvancing: Bool
+    var lmOutputs: LMJetEngineOutputs?
+}
+
+struct BacktraceSnapshot: Identifiable, Equatable {
+    let id = UUID()
+    let cycle: UInt64
+    let source: Int
+    let target: Int
+    let tag: Int
+
+    init(entry: AGCBacktraceEntry) {
+        cycle = entry.cycle
+        source = entry.source
+        target = entry.target
+        tag = entry.tag
+    }
+}
+
+struct MissionControlEvent: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp = Date()
+    let message: String
+
+    var label: String {
+        "\(timestamp.formatted(date: .omitted, time: .standard))  \(message)"
+    }
+}
+
+struct EventLogWindow: View {
+    @State var viewModel: MissionControlViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Event Log")
+                .font(.title2)
+                .bold()
+
+            if viewModel.recentEvents.isEmpty {
+                Text("Load a program, run cycles, or send DSKY input to record events.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.recentEvents) { event in
+                            Text(event.label)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 520, minHeight: 360)
+    }
+}
+
 struct MissionControlRootView: View {
     @State var viewModel: MissionControlViewModel
     @State private var isImporterPresented = false
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            programSection
-            controlSection
-            statusSection
-            Divider()
-            HStack {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 20) {
                 dskySection
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 keypadSection
+                    .frame(width: 320, alignment: .topLeading)
             }
-            registersSection
-            Spacer()
+            .padding(24)
+
+            Divider()
+
+            ScrollView {
+                dashboardSection
+                    .padding(24)
+            }
         }
-        .frame(minWidth: 520, minHeight: 360)
-        .padding(24)
+        .frame(minWidth: 860, minHeight: 640)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button("Load Luminary099") {
+                    viewModel.loadSampleProgram()
+                }
+                .disabled(!viewModel.hasSampleProgram)
+
+                Button(viewModel.selectedURL == nil ? "Open…" : "Change…") {
+                    isImporterPresented = true
+                }
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    viewModel.isRunning ? viewModel.stop() : viewModel.start()
+                } label: {
+                    Label(viewModel.isRunning ? "Stop" : "Start",
+                          systemImage: viewModel.isRunning ? "stop.fill" : "play.fill")
+                }
+                .disabled(viewModel.selectedURL == nil)
+
+                Button("Step 1K") {
+                    viewModel.runCycles(1_000)
+                }
+                .disabled(!viewModel.canStep)
+
+                Button("Run 100K") {
+                    viewModel.runCycles(100_000)
+                }
+                .disabled(!viewModel.canStep)
+
+                Button {
+                    viewModel.reset()
+                } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(!viewModel.canReset)
+            }
+        }
         .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.init(filenameExtension: "bin") ?? .data]) { result in
             switch result {
             case .success(let url):
@@ -214,6 +528,21 @@ struct MissionControlRootView: View {
                 viewModel.clearProgram()
                 viewModel.status = .error(error.localizedDescription)
             }
+        }
+    }
+
+    private var dashboardSection: some View {
+        HStack(alignment: .top, spacing: 28) {
+            VStack(alignment: .leading, spacing: 20) {
+                programSection
+                statusSection
+                engineTelemetrySection
+                validationSection
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            registersSection
+                .frame(minWidth: 280, alignment: .topLeading)
         }
     }
     
@@ -232,51 +561,14 @@ struct MissionControlRootView: View {
                             .foregroundColor(.secondary)
                     }
                 } else {
-                    Text("No program selected")
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button(viewModel.selectedURL == nil ? "Open…" : "Change…") {
-                    isImporterPresented = true
-                }
-                if viewModel.selectedURL != nil {
-                    Button(role: .destructive) {
-                        viewModel.clearProgram()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .symbolRenderingMode(.hierarchical)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No program selected")
+                            .foregroundColor(.secondary)
+                        Text("Use any Luminary/Colossus core image (.bin). After Start, cycles and DSKY should update on the main thread without racing the CPU.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain)
                 }
-            }
-        }
-    }
-    
-    private var controlSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Controls")
-                .font(.headline)
-            HStack(spacing: 16) {
-                Button {
-                    viewModel.start()
-                } label: {
-                    Label("Start", systemImage: "play.fill")
-                }
-                .disabled(!viewModel.canStart)
-                
-                Button {
-                    viewModel.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .disabled(!viewModel.canStop)
-                
-                Button {
-                    viewModel.reset()
-                } label: {
-                    Label("Reset", systemImage: "arrow.counterclockwise")
-                }
-                .disabled(!viewModel.canReset)
             }
         }
     }
@@ -288,6 +580,86 @@ struct MissionControlRootView: View {
             Text(viewModel.status.label)
                 .font(.body)
                 .foregroundStyle(statusColor)
+        }
+    }
+
+    private var engineTelemetrySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Engine telemetry")
+                .font(.headline)
+            if let health = viewModel.engineHealth {
+                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+                    gridRow(label: "Cycle counter", value: "\(health.cycle)")
+                    gridRow(
+                        label: "Throughput",
+                        value: health.cyclesPerSecond > 0
+                            ? String(format: "%.2f M cycles/s", health.cyclesPerSecond / 1_000_000)
+                            : "—"
+                    )
+                    gridRow(
+                        label: "Stepping",
+                        value: viewModel.isRunning
+                            ? (health.isAdvancing ? "Batches advancing" : "No advance (unexpected)")
+                            : "CPU idle"
+                    )
+                    if let lm = health.lmOutputs {
+                        gridRow(label: "LM CH5", value: String(format: "%05o", lm.channel5))
+                        gridRow(label: "LM CH6", value: String(format: "%05o", lm.channel6))
+                    }
+                    gridRow(label: "Radar data hooks", value: "\(viewModel.radarHookInvocations)")
+                }
+                .font(.system(.body, design: .monospaced))
+            } else {
+                Text("Load a binary and press Start to see cycle throughput, LM jet/engine channels, and radar integration callbacks.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var validationSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Validation")
+                .font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+                validationRow(
+                    label: "Program loaded",
+                    isPassing: viewModel.selectedURL != nil,
+                    detail: viewModel.selectedURL?.lastPathComponent ?? "No core image"
+                )
+                validationRow(
+                    label: "CPU cycle source",
+                    isPassing: (viewModel.engineHealth?.cycle ?? 0) > 0,
+                    detail: viewModel.engineHealth.map { "\($0.cycle) cycles" } ?? "No cycles run"
+                )
+                validationRow(
+                    label: "DSKY delegate",
+                    isPassing: viewModel.latestDSKY != nil,
+                    detail: viewModel.latestDSKY == nil ? "Not connected" : "Connected"
+                )
+                validationRow(
+                    label: "Backtrace",
+                    isPassing: !viewModel.backtraceTail.isEmpty,
+                    detail: viewModel.backtraceTail.isEmpty ? "No branches observed yet" : "\(viewModel.backtraceTail.count) recent entries"
+                )
+            }
+            .font(.system(.caption, design: .monospaced))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recent branches")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if viewModel.backtraceTail.isEmpty {
+                    Text("Run cycles to populate branch trace.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(viewModel.backtraceTail) { entry in
+                        Text("\(entry.cycle)  \(octal(entry.source)) -> \(octal(entry.target))  tag \(String(format: "%03o", entry.tag))")
+                    }
+                }
+            }
+            .font(.system(.caption2, design: .monospaced))
         }
     }
 
@@ -308,6 +680,10 @@ struct MissionControlRootView: View {
                     }
                 }
             }
+            Text("Verb 35 (after Start) is a lamp test: expect the yellow status lamps and “Lamp test” / ch 163 activity, not R1–R3. To see register lines change, try Verb 16 Noun 36 then Entr (monitor-style display; depends on your core image).")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if let dsky = viewModel.latestDSKY {
                 VStack(spacing: 12) {
@@ -325,14 +701,16 @@ struct MissionControlRootView: View {
                             Text("Register display")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                            HStack(spacing: 4) {
-                                Text(dsky.plusSign ? "+" : "-")
-                                    .font(.system(.title3, design: .monospaced))
-                                ForEach(dsky.displays, id: \.self) { segment in
-                                    Text(segment)
-                                        .font(.system(.title3, design: .monospaced))
-                                        .frame(width: 36)
-                                }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("R1 \(dsky.r1Text)")
+                                Text("R2 \(dsky.r2Text)")
+                                Text("R3 \(dsky.r3Text)")
+                            }
+                            .font(.system(.title3, design: .monospaced))
+                            HStack(spacing: 12) {
+                                Text(dsky.compActy ? "COMP ACTY" : "COMP idle")
+                                    .font(.caption2)
+                                    .foregroundColor(dsky.compActy ? .green : .secondary)
                             }
                             HStack(spacing: 16) {
                                 VStack(alignment: .leading) {
@@ -364,6 +742,7 @@ struct MissionControlRootView: View {
                         }
                     }
                     HStack(spacing: 12) {
+                        Text("Cycle \(dsky.cycle)")
                         Text("Ch 10: \(octal(dsky.channel10))")
                         Text("Ch 11: \(String(format: "%05o", dsky.input11))")
                         Text("Ch 13: \(String(format: "%05o", dsky.input13))")
@@ -385,6 +764,23 @@ struct MissionControlRootView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Keypad")
                 .font(.headline)
+            HStack(spacing: 8) {
+                ForEach(quickSequences) { sequence in
+                    Button(sequence.label) {
+                        viewModel.sendDSKYSequence(
+                            label: sequence.label,
+                            keys: sequence.keys,
+                            autoRunCyclesWhenIdle: MissionControlViewModel.idleSequenceValidationCycles
+                        )
+                    }
+                    .disabled(viewModel.selectedURL == nil)
+                }
+            }
+            .font(.caption)
+            Text("When the CPU is idle, DSKY key presses auto-run a short validation burst so the result is visible immediately.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 8) {
                 ForEach(Array(keypadRows.enumerated()), id: \.offset) { _, row in
                     HStack(spacing: 8) {
@@ -439,6 +835,16 @@ struct MissionControlRootView: View {
             Text(value)
         }
     }
+
+    private func validationRow(label: String, isPassing: Bool, detail: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(isPassing ? "OK" : "WAIT")
+                .foregroundStyle(isPassing ? .green : .orange)
+            Text(detail)
+        }
+    }
     
     private func octal(_ value: Int) -> String {
         String(format: "%06o", value & 0o177777)
@@ -455,6 +861,38 @@ struct MissionControlRootView: View {
         default:
             return .primary
         }
+    }
+
+    private var quickSequences: [QuickDSKYSequence] {
+        [
+            QuickDSKYSequence(
+                label: "V35E lamp",
+                keys: [
+                    DSKYKey(label: "VERB", channel: 0o15, value: 0o21, accent: true),
+                    DSKYKey(label: "3", channel: 0o15, value: 0o3, accent: false),
+                    DSKYKey(label: "5", channel: 0o15, value: 0o5, accent: false),
+                    DSKYKey(label: "ENTR", channel: 0o15, value: 0o34, accent: true),
+                ]
+            ),
+            QuickDSKYSequence(
+                label: "V16N36E",
+                keys: [
+                    DSKYKey(label: "VERB", channel: 0o15, value: 0o21, accent: true),
+                    DSKYKey(label: "1", channel: 0o15, value: 0o1, accent: false),
+                    DSKYKey(label: "6", channel: 0o15, value: 0o6, accent: false),
+                    DSKYKey(label: "NOUN", channel: 0o15, value: 0o37, accent: true),
+                    DSKYKey(label: "3", channel: 0o15, value: 0o3, accent: false),
+                    DSKYKey(label: "6", channel: 0o15, value: 0o6, accent: false),
+                    DSKYKey(label: "ENTR", channel: 0o15, value: 0o34, accent: true),
+                ]
+            ),
+            QuickDSKYSequence(
+                label: "RSET",
+                keys: [
+                    DSKYKey(label: "RSET", channel: 0o15, value: 0o22, accent: true),
+                ]
+            ),
+        ]
     }
 
     private var keypadRows: [[DSKYKey]] {
@@ -545,13 +983,22 @@ struct DSKYKey: Identifiable {
     }
 }
 
+struct QuickDSKYSequence: Identifiable {
+    let label: String
+    let keys: [DSKYKey]
+
+    var id: String { label }
+}
+
 struct DSKYState {
     let channel10: Int
     let input11: Int
     let input13: Int
     let output163: Int
     let cycle: UInt64
-    let displays: [String]
+    let r1Text: String
+    let r2Text: String
+    let r3Text: String
     let verbDigits: String
     let nounDigits: String
     let plusSign: Bool
@@ -559,6 +1006,7 @@ struct DSKYState {
     let proOn: Bool
     let keyRelOn: Bool
     let lampTest: Bool
+    let compActy: Bool
     private let indicatorStatuses: [Int: Bool]
 
     init(state: AGCState) {
@@ -569,18 +1017,17 @@ struct DSKYState {
         cycle = state.cycleCounter
 
         let digits = String(format: "%05o", channel10 & 0o77777)
-        displays = [
-            String(digits.prefix(2)),
-            String(digits.dropFirst(2).prefix(2)),
-            String(digits.suffix(1))
-        ]
+        plusSign = (channel10 & 0o40000) == 0
+        r1Text = (plusSign ? "+" : "-") + digits
+        r2Text = "—"
+        r3Text = "—"
         verbDigits = String(digits.prefix(2))
         nounDigits = String(digits.dropFirst(2).prefix(2))
-        plusSign = (channel10 & 0o40000) == 0
         verbNounFlash = (state.inputChannels[0o11] & 0o40) != 0
         proOn = (state.inputChannels[0o13] & 0o40000) != 0
         keyRelOn = (state.inputChannels[0o11] & 0o20) != 0
         lampTest = (state.inputChannels[0o13] & 0o1000) != 0
+        compActy = (input11 & 0o2) != 0
 
         var statuses: [Int: Bool] = [:]
         for definition in DSKYIndicatorDefinition.luminaryDefinitions {
@@ -588,28 +1035,16 @@ struct DSKYState {
         }
         indicatorStatuses = statuses
     }
-    
-    init(dsky: DSKY) {
-        // Get display values from DSKY
-        channel10 = 0  // Not directly available, but displays are decoded
+
+    init(state: AGCState, dsky: DSKY) {
+        channel10 = state.outputChannels[0o10]
         input11 = dsky.channel11
         input13 = dsky.channel13
         output163 = dsky.channel163
-        cycle = 0  // Not available from DSKY directly
-        
-        // Format displays from DSKY registers
-        let r1Str = dsky.formatRegister(dsky.r1)
-        let r2Str = dsky.formatRegister(dsky.r2)
-        let r3Str = dsky.formatRegister(dsky.r3)
-        
-        // Extract digits from formatted strings (format is "+12345" or "-12345")
-        displays = [
-            String(r1Str.prefix(1)),  // Sign
-            String(r1Str.dropFirst(1).prefix(2)),  // First 2 digits
-            String(r1Str.dropFirst(3).prefix(2)),  // Next 2 digits
-            String(r1Str.suffix(1))   // Last digit
-        ]
-        
+        cycle = state.cycleCounter
+        r1Text = dsky.formatRegister(dsky.r1)
+        r2Text = dsky.formatRegister(dsky.r2)
+        r3Text = dsky.formatRegister(dsky.r3)
         verbDigits = dsky.formatVerb()
         nounDigits = dsky.formatNoun()
         plusSign = dsky.r1.sign == "+"
@@ -617,8 +1052,8 @@ struct DSKYState {
         proOn = !dsky.proKeyPressed
         keyRelOn = dsky.indicatorIsOn(14)
         lampTest = dsky.lampTest
-        
-        // Get indicator statuses from DSKY
+        compActy = dsky.compActy
+
         var statuses: [Int: Bool] = [:]
         for id in [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27] {
             statuses[id] = dsky.indicatorIsOn(id)

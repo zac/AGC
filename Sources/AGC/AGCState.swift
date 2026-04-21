@@ -75,7 +75,7 @@ public final class AGCState {
     public var scalerCounter: Int = 0
     public var channelRoutineCount: Int = 0
     public var dskyTimer: Int = 0
-    public var dskyFlash: Bool = false
+    public var dskyFlash: Int = 0
     public var dskyChannel163: Int = 0
     public var tookBZF: Bool = false
     public var tookBZMF: Bool = false
@@ -157,7 +157,7 @@ public final class AGCState {
         scalerCounter = 0
         channelRoutineCount = 0
         dskyTimer = 0
-        dskyFlash = false
+        dskyFlash = 0
         dskyChannel163 = 0
         tookBZF = false
         tookBZMF = false

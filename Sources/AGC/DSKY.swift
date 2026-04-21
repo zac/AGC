@@ -11,17 +11,18 @@ public final class DSKY: AGCIOProtocol {
     
     private actor KeypressQueueActor {
         var queue: [(channel: Int, value: Int)] = []
-        
+
         func append(_ item: (channel: Int, value: Int)) {
             queue.append(item)
         }
-        
-        func removeAll() -> [(channel: Int, value: Int)] {
-            let result = queue
-            queue.removeAll()
-            return result
+
+        /// Returns one queued I/O event per call so multi-key sequences are not collapsed.
+        /// Merging several channel-15 writes into one dictionary per poll dropped all but the last keycode.
+        func dequeueOne() -> (channel: Int, value: Int)? {
+            guard !queue.isEmpty else { return nil }
+            return queue.removeFirst()
         }
-        
+
         var isEmpty: Bool { queue.isEmpty }
     }
     
@@ -32,7 +33,7 @@ public final class DSKY: AGCIOProtocol {
     /// 7-segment display registers (R1, R2, R3)
     public struct DisplayRegister {
         var signBits: Int = 0  // Bit 2 = +, Bit 1 = - (matching yaDSKY)
-        var digits: [Int] = [0, 0, 0, 0, 0]  // 5 digits
+        var digits: [Int] = [-1, -1, -1, -1, -1]  // 5 digits; -1 is blank
         
         public var sign: String {
             if (signBits & 2) != 0 {
@@ -50,11 +51,11 @@ public final class DSKY: AGCIOProtocol {
     public var r3 = DisplayRegister()
     
     /// VERB and NOUN displays (2 digits each)
-    public var verbDigits: [Int] = [0, 0]
-    public var nounDigits: [Int] = [0, 0]
+    public var verbDigits: [Int] = [-1, -1]
+    public var nounDigits: [Int] = [-1, -1]
     
     /// MODE display (2 digits)
-    public var modeDigits: [Int] = [0, 0]
+    public var modeDigits: [Int] = [-1, -1]
     
     /// Indicator light states
     public struct IndicatorState {
@@ -135,14 +136,8 @@ public final class DSKY: AGCIOProtocol {
     }
     
     public func channelInput() async -> [Int: Int]? {
-        guard await !keypressActor.isEmpty else { return nil }
-        let queue = await keypressActor.removeAll()
-        guard !queue.isEmpty else { return nil }
-        var input: [Int: Int] = [:]
-        for (channel, value) in queue {
-            input[channel] = value
-        }
-        return input
+        guard let item = await keypressActor.dequeueOne() else { return nil }
+        return [item.channel: item.value]
     }
     
     public func requestRadarData() {
@@ -180,25 +175,25 @@ public final class DSKY: AGCIOProtocol {
             channel10IndicatorValue = value
         }
         
-        // Decode based on row selector (matching yaDSKY callbacks.c ActOnIncomingIO)
-        // Row selector values: 11D=0x5800, 10D=0x5000, 9=0x4800, 8=0x4000, etc.
+        // Decode based on row selector (matching yaDSKY callbacks.c ActOnIncomingIO).
+        // Row selector values are decimal: 11D=0x5800, 10D=0x5000, 9D=0x4800, etc.
         switch rowSelector {
-        case 0o11:  // AAAA=11D (0x5800) - MODE display (MD1, MD2)
+        case 11:    // AAAA=11D (0x5800) - MODE display (MD1, MD2)
             modeDigits[0] = decode7Segment(leftDigit)
             modeDigits[1] = decode7Segment(rightDigit)
             
-        case 0o10:  // AAAA=10D (0x5000) - VERB display (VD1, VD2)
+        case 10:    // AAAA=10D (0x5000) - VERB display (VD1, VD2)
             verbDigits[0] = decode7Segment(leftDigit)
             verbDigits[1] = decode7Segment(rightDigit)
             
-        case 9:     // AAAA=9 (0x4800) - NOUN display (ND1, ND2)
+        case 9:     // AAAA=9D (0x4800) - NOUN display (ND1, ND2)
             nounDigits[0] = decode7Segment(leftDigit)
             nounDigits[1] = decode7Segment(rightDigit)
             
-        case 8:     // AAAA=8 (0x4000) - R1 digit 1
+        case 8:     // AAAA=8D (0x4000) - R1 digit 1
             r1.digits[0] = decode7Segment(rightDigit)
             
-        case 0o7:   // AAAA=7 (0x3800) - R1 sign and digits 2-3
+        case 7:     // AAAA=7D (0x3800) - R1 sign and digits 2-3
             // Sign bit handling: bit 2 = +, bit 1 = -
             if signBit {
                 r1.signBits |= 2  // Set + bit
@@ -208,7 +203,7 @@ public final class DSKY: AGCIOProtocol {
             r1.digits[1] = decode7Segment(leftDigit)
             r1.digits[2] = decode7Segment(rightDigit)
             
-        case 0o6:   // AAAA=6 (0x3000) - R1 digits 4-5
+        case 6:     // AAAA=6D (0x3000) - R1 digits 4-5
             // Sign bit handling for second part
             if signBit {
                 r1.signBits |= 1  // Set - bit
@@ -218,7 +213,7 @@ public final class DSKY: AGCIOProtocol {
             r1.digits[3] = decode7Segment(leftDigit)
             r1.digits[4] = decode7Segment(rightDigit)
             
-        case 0o5:   // AAAA=5 (0x2800) - R2 sign and digits 1-2
+        case 5:     // AAAA=5D (0x2800) - R2 sign and digits 1-2
             if signBit {
                 r2.signBits |= 2  // Set + bit
             } else {
@@ -227,7 +222,7 @@ public final class DSKY: AGCIOProtocol {
             r2.digits[0] = decode7Segment(leftDigit)
             r2.digits[1] = decode7Segment(rightDigit)
             
-        case 0o4:   // AAAA=4 (0x2000) - R2 digits 3-4
+        case 4:     // AAAA=4D (0x2000) - R2 digits 3-4
             if signBit {
                 r2.signBits |= 1  // Set - bit
             } else {
@@ -236,11 +231,11 @@ public final class DSKY: AGCIOProtocol {
             r2.digits[2] = decode7Segment(leftDigit)
             r2.digits[3] = decode7Segment(rightDigit)
             
-        case 0o3:   // AAAA=3 (0x1800) - R2 digit 5 and R3 digit 1
+        case 3:     // AAAA=3D (0x1800) - R2 digit 5 and R3 digit 1
             r2.digits[4] = decode7Segment(leftDigit)
             r3.digits[0] = decode7Segment(rightDigit)
             
-        case 0o2:   // AAAA=2 (0x1000) - R3 sign and digits 2-3
+        case 2:     // AAAA=2D (0x1000) - R3 sign and digits 2-3
             if signBit {
                 r3.signBits |= 2  // Set + bit
             } else {
@@ -249,7 +244,7 @@ public final class DSKY: AGCIOProtocol {
             r3.digits[1] = decode7Segment(leftDigit)
             r3.digits[2] = decode7Segment(rightDigit)
             
-        case 0o1:   // AAAA=1 (0x0800) - R3 digits 4-5
+        case 1:     // AAAA=1D (0x0800) - R3 digits 4-5
             if signBit {
                 r3.signBits |= 1  // Set - bit
             } else {
@@ -344,27 +339,23 @@ public final class DSKY: AGCIOProtocol {
     
     // MARK: - 7-Segment Decoding
     
-    /// Decode 7-segment display value to digit (0-9)
+    /// Decode 7-segment display value to digit (0-9). Returns -1 for blank/unknown.
     /// Mapping from yaDSKY callbacks.c SevenSegmentFilenames array
     private func decode7Segment(_ value: Int) -> Int {
         switch value {
-        case 0: return 0
-        case 3: return 3
-        case 15: return 15  // Special character
-        case 19: return 19  // Special character
-        case 21: return 21  // Special character
-        case 25: return 25  // Special character
-        case 27: return 27  // Special character
-        case 28: return 28  // Special character
-        case 29: return 29  // Special character
-        case 30: return 30  // Special character
-        case 31: return 31  // Special character
+        case 0: return -1
+        case 21: return 0
+        case 3: return 1
+        case 25: return 2
+        case 27: return 3
+        case 15: return 4
+        case 30: return 5
+        case 28: return 6
+        case 19: return 7
+        case 29: return 8
+        case 31: return 9
         default:
-            // For standard digits, the value typically matches the digit
-            if value >= 0 && value <= 9 {
-                return value
-            }
-            return 0  // Blank/unknown
+            return -1
         }
     }
     
@@ -402,18 +393,21 @@ public final class DSKY: AGCIOProtocol {
     
     /// Get formatted display string for a register
     public func formatRegister(_ reg: DisplayRegister) -> String {
-        let digits = reg.digits.map { String($0) }.joined()
+        let digits = reg.digits.map(formatDigit).joined()
         return "\(reg.sign)\(digits)"
     }
     
     /// Get formatted VERB display
     public func formatVerb() -> String {
-        return verbDigits.map { String($0) }.joined()
+        return verbDigits.map(formatDigit).joined()
     }
     
     /// Get formatted NOUN display
     public func formatNoun() -> String {
-        return nounDigits.map { String($0) }.joined()
+        return nounDigits.map(formatDigit).joined()
+    }
+
+    private func formatDigit(_ digit: Int) -> String {
+        return digit >= 0 ? String(digit) : " "
     }
 }
-

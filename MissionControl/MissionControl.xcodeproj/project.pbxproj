@@ -8,10 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		1109D3722EBEBAF600207E5C /* AGC in Frameworks */ = {isa = PBXBuildFile; productRef = 1109D3712EBEBAF600207E5C /* AGC */; };
+		1109D3742EC0000100207E5C /* Luminary099.bin in Resources */ = {isa = PBXBuildFile; fileRef = 1109D3732EC0000100207E5C /* Luminary099.bin */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		1109D35E2EBEBAE200207E5C /* MissionControl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MissionControl.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1109D3732EC0000100207E5C /* Luminary099.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; name = Luminary099.bin; path = ../Tests/Luminary099.bin; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -51,6 +53,7 @@
 			isa = PBXGroup;
 			children = (
 				1109D3602EBEBAE200207E5C /* MissionControl */,
+				1109D3732EC0000100207E5C /* Luminary099.bin */,
 				1109D35F2EBEBAE200207E5C /* Products */,
 			);
 			sourceTree = "<group>";
@@ -131,6 +134,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1109D3742EC0000100207E5C /* Luminary099.bin in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
