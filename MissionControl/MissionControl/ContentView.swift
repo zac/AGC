@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 import AGC
 
@@ -441,67 +442,82 @@ struct EventLogWindow: View {
     }
 }
 
+private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable {
+    case overview
+    case dsky
+    case telemetry
+    case validation
+    case trace
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .overview: "Overview"
+        case .dsky: "DSKY"
+        case .telemetry: "Telemetry"
+        case .validation: "Validation"
+        case .trace: "Channel Trace"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .overview: "Runtime, DSKY, and health"
+        case .dsky: "Display, lamps, and keypad"
+        case .telemetry: "Cycles, LM outputs, and registers"
+        case .validation: "Smoke checks and branch trace"
+        case .trace: "Ordered AGC channel traffic"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .overview: "gauge.with.dots.needle.67percent"
+        case .dsky: "rectangle.grid.3x2"
+        case .telemetry: "waveform.path.ecg"
+        case .validation: "checkmark.seal"
+        case .trace: "list.bullet.rectangle"
+        }
+    }
+
+}
+
 struct MissionControlRootView: View {
     @State var viewModel: MissionControlViewModel
     @State private var isImporterPresented = false
-    
+    @State private var selectedSection: MissionControlSection? = .overview
+    @State private var isInspectorPresented = true
+    @Environment(\.openWindow) private var openWindow
+
+    private var activeSection: MissionControlSection {
+        selectedSection ?? .overview
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 20) {
-                dskySection
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                keypadSection
-                    .frame(width: 320, alignment: .topLeading)
-            }
-            .padding(24)
-
-            Divider()
-
+        NavigationSplitView {
+            sidebar
+        } detail: {
             ScrollView {
-                dashboardSection
-                    .padding(24)
+                VStack(alignment: .leading, spacing: 16) {
+                    runtimeHeader
+
+                    dskyConsoleSection
+                    activeDetailSection
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .navigationTitle(activeSection.title)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .toolbar {
+                mainToolbar
+            }
+            .inspector(isPresented: $isInspectorPresented) {
+                inspectorSection
             }
         }
-        .frame(minWidth: 860, minHeight: 640)
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button("Load Luminary099") {
-                    viewModel.loadSampleProgram()
-                }
-                .disabled(!viewModel.hasSampleProgram)
-
-                Button(viewModel.selectedURL == nil ? "Open…" : "Change…") {
-                    isImporterPresented = true
-                }
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    viewModel.isRunning ? viewModel.stop() : viewModel.start()
-                } label: {
-                    Label(viewModel.isRunning ? "Stop" : "Start",
-                          systemImage: viewModel.isRunning ? "stop.fill" : "play.fill")
-                }
-                .disabled(viewModel.selectedURL == nil)
-
-                Button("Step 1K") {
-                    viewModel.runCycles(1_000)
-                }
-                .disabled(!viewModel.canStep)
-
-                Button("Run 100K") {
-                    viewModel.runCycles(100_000)
-                }
-                .disabled(!viewModel.canStep)
-
-                Button {
-                    viewModel.reset()
-                } label: {
-                    Label("Reset", systemImage: "arrow.counterclockwise")
-                }
-                .disabled(!viewModel.canReset)
-            }
-        }
+        .frame(minWidth: 1080, minHeight: 720)
         .fileImporter(isPresented: $isImporterPresented, allowedContentTypes: [.init(filenameExtension: "bin") ?? .data]) { result in
             switch result {
             case .success(let url):
@@ -513,101 +529,267 @@ struct MissionControlRootView: View {
         }
     }
 
-    private var dashboardSection: some View {
-        HStack(alignment: .top, spacing: 28) {
-            VStack(alignment: .leading, spacing: 20) {
-                programSection
-                statusSection
-                engineTelemetrySection
-                validationSection
+    private var sidebar: some View {
+        List(selection: $selectedSection) {
+            Section("Mission Control") {
+                ForEach(MissionControlSection.allCases) { section in
+                    NavigationLink(value: section) {
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(section.title)
+                                Text(section.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        } icon: {
+                            Image(systemName: section.systemImage)
+                        }
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            VStack(alignment: .leading, spacing: 20) {
-                registersSection
-                channelTraceSection
+            Section("Runtime") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(viewModel.selectedURL?.lastPathComponent ?? "No image loaded")
+                        .font(.callout)
+                        .lineLimit(1)
+                    Text(viewModel.status.label)
+                        .font(.caption)
+                        .foregroundStyle(statusTint)
+                        .lineLimit(2)
+                }
+                .padding(.vertical, 4)
             }
-                .frame(minWidth: 280, alignment: .topLeading)
         }
+        .navigationTitle("Mission Control")
     }
-    
-    private var programSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Program")
-                .font(.headline)
-            HStack {
-                if let url = viewModel.selectedURL {
-                    VStack(alignment: .leading) {
-                        Text(url.lastPathComponent)
-                            .font(.title3)
-                            .bold()
-                        Text(viewModel.programSummary)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("No program selected")
-                            .foregroundColor(.secondary)
-                        Text("Use any Luminary/Colossus core image (.bin). After Start, cycles and DSKY should update on the main thread without racing the CPU.")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
+
+    @ToolbarContentBuilder
+    private var mainToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button {
+                viewModel.loadSampleProgram()
+            } label: {
+                Label("Load Luminary099", systemImage: "shippingbox")
+            }
+            .disabled(!viewModel.hasSampleProgram)
+
+            Button {
+                isImporterPresented = true
+            } label: {
+                Label(viewModel.selectedURL == nil ? "Open" : "Change", systemImage: "folder")
+            }
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            ControlGroup {
+                Button {
+                    viewModel.isRunning ? viewModel.stop() : viewModel.start()
+                } label: {
+                    Label(viewModel.isRunning ? "Stop" : "Start",
+                          systemImage: viewModel.isRunning ? "stop.fill" : "play.fill")
+                }
+                .disabled(viewModel.selectedURL == nil)
+
+                Button {
+                    viewModel.runCycles(1_000)
+                } label: {
+                    Label("Step 1K", systemImage: "forward.frame")
+                }
+                .disabled(!viewModel.canStep)
+
+                Button {
+                    viewModel.runCycles(100_000)
+                } label: {
+                    Label("Run 100K", systemImage: "forward.end")
+                }
+                .disabled(!viewModel.canStep)
+            }
+
+            ControlGroup {
+                Button {
+                    viewModel.reset()
+                } label: {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(!viewModel.canReset)
+
+                Button {
+                    isInspectorPresented.toggle()
+                } label: {
+                    Label(isInspectorPresented ? "Hide Inspector" : "Show Inspector",
+                          systemImage: "sidebar.right")
                 }
             }
         }
     }
-    
-    private var statusSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Status")
+
+    private var runtimeHeader: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Label(viewModel.status.label, systemImage: statusSymbol)
                 .font(.headline)
-            Text(viewModel.status.label)
-                .font(.body)
-                .foregroundStyle(statusColor)
+                .foregroundStyle(statusTint)
+                .lineLimit(1)
+
+            Spacer(minLength: 12)
+
+            metricPill(label: "Cycle", value: viewModel.latestSnapshot.map { $0.cycle.formatted() } ?? "0")
+            metricPill(label: "Image", value: viewModel.selectedURL?.lastPathComponent ?? "None")
+
+            Button {
+                openWindow(id: "event-log")
+            } label: {
+                Label("Event Log", systemImage: "list.bullet.rectangle")
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(panelFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(panelStroke)
+    }
+
+    @ViewBuilder
+    private var activeDetailSection: some View {
+        switch activeSection {
+        case .overview:
+            overviewSection
+        case .dsky:
+            dskyDetailSection
+        case .telemetry:
+            telemetrySection
+        case .validation:
+            validationDetailSection
+        case .trace:
+            traceDetailSection
         }
     }
 
-    private var engineTelemetrySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Engine telemetry")
-                .font(.headline)
+    private var overviewSection: some View {
+        LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+            programPanel
+            engineTelemetryPanel
+            validationPanel
+            lmVehiclePanel
+        }
+    }
+
+    private var dskyDetailSection: some View {
+        LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+            channelTracePanel(limit: 18)
+            validationPanel
+        }
+    }
+
+    private var telemetrySection: some View {
+        LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+            engineTelemetryPanel
+            lmVehiclePanel
+            processorPanel
+            recentBranchesPanel
+        }
+    }
+
+    private var validationDetailSection: some View {
+        LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+            validationPanel
+            recentBranchesPanel
+            channelTracePanel(limit: 18)
+        }
+    }
+
+    private var traceDetailSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            channelTracePanel(limit: nil)
+        }
+    }
+
+    private var inspectorSection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                inspectorGroup(title: "Processor Snapshot", systemImage: "cpu") {
+                    processorContent
+                }
+                inspectorDivider
+                inspectorGroup(title: "Channel Trace", systemImage: "list.bullet.rectangle") {
+                    channelTraceContent(limit: 16)
+                }
+                inspectorDivider
+                inspectorGroup(title: "Recent Branches", systemImage: "arrow.triangle.branch") {
+                    recentBranchesContent
+                }
+            }
+            .padding(.horizontal, 34)
+            .padding(.top, 24)
+            .padding(.bottom, 28)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(minWidth: 320, idealWidth: 360)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var programPanel: some View {
+        missionPanel(title: "Program", systemImage: "shippingbox") {
+            if let url = viewModel.selectedURL {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(url.lastPathComponent)
+                        .font(.title3)
+                        .bold()
+                        .lineLimit(1)
+                    Text(viewModel.programSummary)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Load a Luminary or Colossus core image.")
+                        .foregroundStyle(.secondary)
+                    Button("Open Binary...") {
+                        isImporterPresented = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    private var engineTelemetryPanel: some View {
+        missionPanel(title: "Engine Telemetry", systemImage: "waveform.path.ecg") {
             if let health = viewModel.engineHealth {
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
-                    gridRow(label: "Cycle counter", value: "\(health.cycle)")
+                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 7) {
+                    gridRow(label: "Cycle counter", value: health.cycle.formatted())
                     gridRow(
                         label: "Throughput",
                         value: health.cyclesPerSecond > 0
                             ? String(format: "%.2f M cycles/s", health.cyclesPerSecond / 1_000_000)
-                            : "—"
+                            : "-"
                     )
                     gridRow(
                         label: "Stepping",
                         value: viewModel.isRunning
-                            ? (health.isAdvancing ? "Batches advancing" : "No advance (unexpected)")
+                            ? (health.isAdvancing ? "Batches advancing" : "No advance")
                             : "CPU idle"
                     )
                     if let lm = health.lmOutputs {
-                        gridRow(label: "LM OUT0", value: String(format: "%05o", lm.out0))
-                        gridRow(label: "LM OUT1", value: String(format: "%05o", lm.out1))
+                        gridRow(label: "LM OUT0", value: octalWord(lm.out0))
+                        gridRow(label: "LM OUT1", value: octalWord(lm.out1))
                         gridRow(label: "RCS commands", value: "\(lm.rcsJets.count)")
                     }
                     gridRow(label: "Radar data hooks", value: "\(viewModel.radarHookInvocations)")
                 }
                 .font(.system(.body, design: .monospaced))
             } else {
-                Text("Load a binary and press Start to see cycle throughput, LM jet/engine channels, and radar integration callbacks.")
-                    .font(.caption)
+                Text("Run cycles to see throughput, vehicle outputs, and integration callbacks.")
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    private var validationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Validation")
-                .font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 6) {
+    private var validationPanel: some View {
+        missionPanel(title: "Validation", systemImage: "checkmark.seal") {
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 7) {
                 validationRow(
                     label: "Program loaded",
                     isPassing: viewModel.selectedURL != nil,
@@ -616,7 +798,7 @@ struct MissionControlRootView: View {
                 validationRow(
                     label: "CPU cycle source",
                     isPassing: (viewModel.engineHealth?.cycle ?? 0) > 0,
-                    detail: viewModel.engineHealth.map { "\($0.cycle) cycles" } ?? "No cycles run"
+                    detail: viewModel.engineHealth.map { "\($0.cycle.formatted()) cycles" } ?? "No cycles run"
                 )
                 validationRow(
                     label: "DSKY delegate",
@@ -626,130 +808,160 @@ struct MissionControlRootView: View {
                 validationRow(
                     label: "Backtrace",
                     isPassing: !viewModel.backtraceTail.isEmpty,
-                    detail: viewModel.backtraceTail.isEmpty ? "No branches observed yet" : "\(viewModel.backtraceTail.count) recent entries"
+                    detail: viewModel.backtraceTail.isEmpty ? "No branches observed" : "\(viewModel.backtraceTail.count) recent entries"
                 )
             }
             .font(.system(.caption, design: .monospaced))
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Recent branches")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if viewModel.backtraceTail.isEmpty {
-                    Text("Run cycles to populate branch trace.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    ForEach(viewModel.backtraceTail) { entry in
-                        Text("\(entry.cycle)  \(octal(entry.source)) -> \(octal(entry.target))  tag \(String(format: "%03o", entry.tag))")
-                    }
-                }
-            }
-            .font(.system(.caption2, design: .monospaced))
         }
     }
 
-    private var dskySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("DSKY")
-                    .font(.headline)
-                Spacer()
-                if let dsky = viewModel.latestDSKY {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .frame(width: 12, height: 12)
-                            .foregroundColor(dsky.lampTest ? .yellow : .gray.opacity(0.5))
-                        Text(dsky.lampTest ? "Lamp test" : "Normal")
-                            .font(.caption2)
-                            .foregroundColor(dsky.lampTest ? .yellow : .secondary)
+    private var lmVehiclePanel: some View {
+        missionPanel(title: "LM Vehicle Outputs", systemImage: "gyroscope") {
+            if let lm = viewModel.engineHealth?.lmOutputs {
+                VStack(alignment: .leading, spacing: 12) {
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                        gridRow(label: "OUT0 / ch 005", value: octalWord(lm.out0))
+                        gridRow(label: "OUT1 / ch 006", value: octalWord(lm.out1))
+                        gridRow(label: "Unmapped bits", value: "\(lm.unmappedBits.count)")
                     }
+                    .font(.system(.caption, design: .monospaced))
+
+                    if lm.rcsJets.isEmpty {
+                        Text("No source-backed RCS jet commands are active.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("RCS commands")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(Array(lm.rcsJets.enumerated()), id: \.offset) { _, command in
+                                Text("Jet \(command.jet.rawValue)  \(command.axis.rawValue)  ch \(octalChannel(command.channel)) bit \(command.bit)")
+                            }
+                        }
+                        .font(.system(.caption, design: .monospaced))
+                    }
+
+                    if !lm.discreteGroups.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Discrete groups")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(Array(lm.discreteGroups.enumerated()), id: \.offset) { _, group in
+                                Text("\(group.name)  \(octalWord(group.mask))")
+                            }
+                        }
+                        .font(.system(.caption, design: .monospaced))
+                    }
+                }
+            } else {
+                Text("No vehicle output snapshot yet.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var processorPanel: some View {
+        missionPanel(title: "Processor Snapshot", systemImage: "cpu") {
+            processorContent
+        }
+    }
+
+    private func channelTracePanel(limit: Int?) -> some View {
+        missionPanel(title: "Channel Trace", systemImage: "list.bullet.rectangle") {
+            channelTraceContent(limit: limit)
+        }
+    }
+
+    private var recentBranchesPanel: some View {
+        missionPanel(title: "Recent Branches", systemImage: "arrow.triangle.branch") {
+            recentBranchesContent
+        }
+    }
+
+    private var dskyConsoleSection: some View {
+        missionPanel(title: "DSKY", systemImage: "rectangle.grid.3x2") {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    dskyDisplay
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    keypadSection
+                        .frame(width: 340, alignment: .topLeading)
+                }
+
+                VStack(alignment: .leading, spacing: 18) {
+                    dskyDisplay
+                    keypadSection
                 }
             }
-            Text("Verb 35 (after Start) is a lamp test: expect the yellow status lamps and “Lamp test” / ch 163 activity, not R1–R3. To see register lines change, try Verb 16 Noun 36 then Entr (monitor-style display; depends on your core image).")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
 
-            if let dsky = viewModel.latestDSKY {
-                VStack(spacing: 12) {
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(indicatorRows.enumerated()), id: \.offset) { _, row in
-                                HStack(spacing: 12) {
-                                    indicatorCell(for: row.left, state: dsky)
-                                    indicatorCell(for: row.right, state: dsky)
-                                }
-                            }
-                        }
-                        Divider()
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Register display")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("R1 \(dsky.r1)")
-                                Text("R2 \(dsky.r2)")
-                                Text("R3 \(dsky.r3)")
-                            }
-                            .font(.system(.title3, design: .monospaced))
-                            HStack(spacing: 12) {
-                                Text(dsky.compActy ? "COMP ACTY" : "COMP idle")
-                                    .font(.caption2)
-                                    .foregroundColor(dsky.compActy ? .green : .secondary)
-                            }
-                            HStack(spacing: 16) {
-                                VStack(alignment: .leading) {
-                                    Text("VERB")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    Text(dsky.verb)
-                                        .font(.system(.title3, design: .monospaced))
-                                        .foregroundColor(dsky.verbNounFlash ? .yellow : .primary)
-                                }
-                                VStack(alignment: .leading) {
-                                    Text("NOUN")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    Text(dsky.noun)
-                                        .font(.system(.title3, design: .monospaced))
-                                        .foregroundColor(dsky.verbNounFlash ? .yellow : .primary)
-                                }
-                                Spacer()
-                                VStack(alignment: .leading) {
-                                    Text(dsky.proKeyPressed ? "PRO ON" : "PRO")
-                                        .font(.caption2)
-                                        .foregroundColor(dsky.proKeyPressed ? .green : .secondary)
-                                    Text(dsky.indicatorIsOn(14) ? "KEY REL ON" : "KEY REL")
-                                        .font(.caption2)
-                                        .foregroundColor(dsky.indicatorIsOn(14) ? .yellow : .secondary)
-                                }
-                            }
-                        }
-                    }
-                    HStack(spacing: 12) {
-                        Text("Cycle \(viewModel.latestSnapshot?.cycle ?? 0)")
-                        Text("Ch 10 rows: \(dsky.channel10Rows.filter { $0 != 0 }.count)")
-                        Text("Ch 11: \(String(format: "%05o", dsky.channel11))")
-                        Text("Ch 13: \(String(format: "%05o", dsky.channel13))")
-                        Text("Ch 163: \(String(format: "%05o", dsky.channel163))")
-                    }
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+            Text("V35E runs lamp test. V16N36E requests a monitor-style display when the loaded program supports it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var dskyDisplay: some View {
+        if let dsky = viewModel.latestDSKY {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .frame(width: 12, height: 12)
+                        .foregroundStyle(dsky.lampTest ? .yellow : Color.secondary.opacity(0.45))
+                    Text(dsky.lampTest ? "Lamp test" : "Normal")
+                        .font(.caption)
+                        .foregroundStyle(dsky.lampTest ? .yellow : .secondary)
+                    Spacer()
+                    Text("Cycle \(viewModel.latestSnapshot?.cycle.formatted() ?? "0")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
-            } else {
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 18) {
+                        indicatorGrid(state: dsky)
+                        Divider()
+                        dskyRegisterDisplay(state: dsky)
+                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .topLeading)
+                    }
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        indicatorGrid(state: dsky)
+                        Divider()
+                        dskyRegisterDisplay(state: dsky)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Text("Rows \(dsky.channel10Rows.filter { $0 != 0 }.count)")
+                    Text("Ch11 \(octalWord(dsky.channel11))")
+                    Text("Ch13 \(octalWord(dsky.channel13))")
+                    Text("Ch163 \(octalWord(dsky.channel163))")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Program inactive")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
+                Text("Load a core image to initialize DSKY display state.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
     }
 
     private var keypadSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Keypad")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Keypad")
+                    .font(.headline)
+                Spacer()
+            }
+
             HStack(spacing: 8) {
                 ForEach(quickSequences) { sequence in
                     Button(sequence.label) {
@@ -759,13 +971,16 @@ struct MissionControlRootView: View {
                         )
                     }
                     .disabled(viewModel.selectedURL == nil)
+                    .buttonStyle(.bordered)
                 }
             }
-            .font(.caption)
-            Text("When the CPU is idle, DSKY key presses auto-run a short validation burst so the result is visible immediately.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            .controlSize(.small)
+
+            Text("Idle key presses run a bounded validation burst so display changes settle immediately.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
             VStack(spacing: 8) {
                 ForEach(Array(keypadRows.enumerated()), id: \.offset) { _, row in
                     HStack(spacing: 8) {
@@ -774,63 +989,176 @@ struct MissionControlRootView: View {
                                 viewModel.pressKey(key.code)
                             } label: {
                                 Text(key.label)
-                                    .font(.body)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 10)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(key.backgroundColor))
-                                    .foregroundColor(key.foregroundColor)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(Color.primary.opacity(0.1))
-                                    )
+                                    .font(.title3)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
                             }
+                            .buttonStyle(DSKYKeyButtonStyle(accent: key.accent))
+                            .disabled(viewModel.selectedURL == nil)
                         }
                     }
                 }
             }
         }
     }
-    
-    private var registersSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Processor Snapshot")
-                .font(.headline)
-            if let snapshot = viewModel.registerSnapshot {
-                Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 8) {
-                    gridRow(label: "Cycle", value: "\(snapshot.cycle)")
-                    gridRow(label: "A", value: octal(snapshot.accumulator))
-                    gridRow(label: "L", value: octal(snapshot.l))
-                    gridRow(label: "Q", value: octal(snapshot.q))
-                    gridRow(label: "Z", value: octal(snapshot.z))
-                    gridRow(label: "BB", value: octal(snapshot.index))
-                    gridRow(label: "Flags", value: snapshot.statusFlags)
+
+    private func indicatorGrid(state: DSKYSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(indicatorRows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 12) {
+                    indicatorCell(for: row.left, state: state)
+                    indicatorCell(for: row.right, state: state)
                 }
-                .font(.system(.body, design: .monospaced))
-            } else {
-                Text("No runtime data yet")
-                    .foregroundColor(.secondary)
             }
         }
     }
 
-    private var channelTraceSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Channel Trace")
-                .font(.headline)
-            if viewModel.latestChannelTrace.isEmpty {
-                Text("No channel activity yet")
-                    .foregroundColor(.secondary)
-            } else {
+    private func dskyRegisterDisplay(state dsky: DSKYSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Register display")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("R1 \(dsky.r1)")
+                Text("R2 \(dsky.r2)")
+                Text("R3 \(dsky.r3)")
+            }
+            .font(.system(.title3, design: .monospaced))
+
+            HStack(spacing: 16) {
+                dskyReadout(label: "VERB", value: dsky.verb, isFlashing: dsky.verbNounFlash)
+                dskyReadout(label: "NOUN", value: dsky.noun, isFlashing: dsky.verbNounFlash)
+                Spacer(minLength: 8)
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(viewModel.latestChannelTrace.suffix(14)) { entry in
-                        Text("\(entry.direction.rawValue.uppercased())  \(String(format: "%03o", entry.channel))  \(String(format: "%05o", entry.value))")
-                    }
+                    Text(dsky.compActy ? "COMP ACTY" : "COMP idle")
+                        .foregroundStyle(dsky.compActy ? .green : .secondary)
+                    Text(dsky.proKeyPressed ? "PRO ON" : "PRO")
+                        .foregroundStyle(dsky.proKeyPressed ? .green : .secondary)
+                    Text(dsky.indicatorIsOn(14) ? "KEY REL ON" : "KEY REL")
+                        .foregroundStyle(dsky.indicatorIsOn(14) ? .yellow : .secondary)
                 }
-                .font(.system(.caption, design: .monospaced))
+                .font(.caption)
             }
         }
     }
-    
+
+    private func dskyReadout(label: String, value: String, isFlashing: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.title3, design: .monospaced))
+                .foregroundStyle(isFlashing ? .yellow : .primary)
+        }
+    }
+
+    @ViewBuilder
+    private var processorContent: some View {
+        if let snapshot = viewModel.registerSnapshot {
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 7) {
+                gridRow(label: "Cycle", value: snapshot.cycle.formatted())
+                gridRow(label: "A", value: octalRegister(snapshot.accumulator))
+                gridRow(label: "L", value: octalRegister(snapshot.l))
+                gridRow(label: "Q", value: octalRegister(snapshot.q))
+                gridRow(label: "Z", value: octalRegister(snapshot.z))
+                gridRow(label: "BB", value: octalRegister(snapshot.index))
+                gridRow(label: "Flags", value: snapshot.statusFlags)
+            }
+            .font(.system(.body, design: .monospaced))
+        } else {
+            Text("No runtime data yet.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func channelTraceContent(limit: Int?) -> some View {
+        let entries = traceEntries(limit: limit)
+        if entries.isEmpty {
+            Text("No channel activity yet.")
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(entries) { entry in
+                    HStack(spacing: 10) {
+                        Text(entry.direction.rawValue.uppercased())
+                            .frame(width: 36, alignment: .leading)
+                        Text(octalChannel(entry.channel))
+                        Text(octalWord(entry.value))
+                    }
+                }
+            }
+            .font(.system(.caption, design: .monospaced))
+        }
+    }
+
+    @ViewBuilder
+    private var recentBranchesContent: some View {
+        if viewModel.backtraceTail.isEmpty {
+            Text("Run cycles to populate the branch trace.")
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(viewModel.backtraceTail) { entry in
+                    Text("\(entry.cycle.formatted())  \(octalRegister(entry.source)) -> \(octalRegister(entry.target))  tag \(String(format: "%03o", entry.tag))")
+                }
+            }
+            .font(.system(.caption, design: .monospaced))
+        }
+    }
+
+    private func inspectorGroup<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var inspectorDivider: some View {
+        Divider()
+            .padding(.vertical, 18)
+    }
+
+    private func missionPanel<Content: View>(
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(panelFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(panelStroke)
+    }
+
+    private func metricPill(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .fontWeight(.medium)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: 180, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
     private func gridRow(label: String, value: String) -> some View {
         GridRow {
             Text(label)
@@ -848,12 +1176,48 @@ struct MissionControlRootView: View {
             Text(detail)
         }
     }
-    
-    private func octal(_ value: Int) -> String {
+
+    private func traceEntries(limit: Int?) -> [AGCChannelTraceEntry] {
+        guard let limit else { return viewModel.latestChannelTrace }
+        return Array(viewModel.latestChannelTrace.suffix(limit))
+    }
+
+    private func octalRegister(_ value: Int) -> String {
         String(format: "%06o", value & 0o177777)
     }
-    
-    private var statusColor: Color {
+
+    private func octalWord(_ value: Int) -> String {
+        String(format: "%05o", value & 0o77777)
+    }
+
+    private func octalChannel(_ value: Int) -> String {
+        String(format: "%03o", value)
+    }
+
+    private var dashboardColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 320), spacing: 16, alignment: .top)]
+    }
+
+    private var panelFill: Color {
+        Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var panelStroke: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+    }
+
+    private var statusSymbol: String {
+        switch viewModel.status {
+        case .empty: "circle"
+        case .idle: "checkmark.circle"
+        case .running: "play.circle.fill"
+        case .stopped: "pause.circle"
+        case .error: "exclamationmark.triangle"
+        }
+    }
+
+    private var statusTint: Color {
         switch viewModel.status {
         case .running:
             return .green
@@ -861,8 +1225,10 @@ struct MissionControlRootView: View {
             return .orange
         case .error:
             return .red
-        default:
+        case .idle:
             return .primary
+        case .empty:
+            return .secondary
         }
     }
 
@@ -925,18 +1291,19 @@ struct MissionControlRootView: View {
         if let id {
             let isOn = state.indicatorIsOn(id)
             let label = DSKYIndicatorLabel.labels[id]
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Circle()
-                    .frame(width: 10, height: 10)
-                    .foregroundColor(state.lampTest ? .yellow : (isOn ? .yellow : .gray.opacity(0.5)))
-                    .opacity(label == nil ? 0.3 : 1)
-                Text(label ?? "")
-                    .font(.caption2)
-                    .foregroundColor(label == nil ? .secondary : .primary)
+                    .frame(width: 9, height: 9)
+                    .foregroundStyle(state.lampTest ? .yellow : (isOn ? .yellow : Color.secondary.opacity(0.45)))
+                    .opacity(label == nil ? 0.25 : 1)
+                Text(label ?? " ")
+                    .font(.caption)
+                    .foregroundStyle(label == nil ? .secondary : .primary)
                     .opacity(label == nil ? 0.4 : 1)
             }
+            .frame(width: 132, alignment: .leading)
         } else {
-            Spacer(minLength: 64)
+            Spacer(minLength: 132)
         }
     }
 }
@@ -952,16 +1319,28 @@ struct DSKYKey: Identifiable {
     var label: String {
         code.label
     }
+}
 
-    var backgroundColor: Color {
-        if accent {
-            return Color.accentColor.opacity(0.25)
-        }
-        return Color.secondary.opacity(0.17)
+struct DSKYKeyButtonStyle: ButtonStyle {
+    let accent: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(accent ? Color.accentColor : Color.primary)
+            .background(backgroundColor(isPressed: configuration.isPressed))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+            )
+            .opacity(configuration.isPressed ? 0.82 : 1)
     }
 
-    var foregroundColor: Color {
-        accent ? Color.accentColor : .primary
+    private func backgroundColor(isPressed: Bool) -> Color {
+        if accent {
+            return Color.accentColor.opacity(isPressed ? 0.35 : 0.22)
+        }
+        return Color(nsColor: .textBackgroundColor).opacity(isPressed ? 0.75 : 1)
     }
 }
 
