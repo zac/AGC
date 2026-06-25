@@ -390,88 +390,12 @@ public final class AGCEngine {
 
     public init(state: AGCState) throws {
         self.state = state
-        
-        // Initialize I/O channels
-        for i in 0..<state.inputChannels.count {
-            state.inputChannels[i] = 0
-        }
-        
-        // Channels 030-033 default to 077777 (signals inverted)
-        for i in 0o30...0o33 {
-            state.inputChannels[i] = 0o77777
-        }
-        
-        // Initialize erasable memory
-        for bank in 0..<8 {
-            for addr in 0..<ERASABLE_BANK_SIZE {
-                state.erasableMemory[bank][addr] = 0
-            }
-        }
-        
-        // Set initial program counter (RegZ) to 04000
-        writeRegister(.regZ, 0o4000)
-        
-        // Initialize CPU state variables
-        state.cycleCounter = 0
-        state.extraCode = false
-        state.allowInterrupt = true // The GOJAM sequence enables interrupts
-        state.interruptRequests[8] = 1 // DOWNRUPT
-        state.pendFlag = false
-        state.pendDelay = 0
-        state.extraDelay = 0
-        
-        state.outputChannel7 = 0
-        for j in 0..<16 {
-            state.outputChannel10[j] = 0
-        }
-        state.indexValue = 0
-        for j in 0...NUM_INTERRUPT_TYPES {
-            state.interruptRequests[j] = 0
-        }
-        state.inIsr = false
-        state.substituteInstruction = false
-        state.downruptTimeValid = true
-        state.downruptTime = 0
-        state.downlink = 0
-        
-        // Initialize alarm and warning state
-        state.nightWatchman = 0
-        state.nightWatchmanTripped = false
-        state.ruptLock = false
-        state.noRupt = false
-        state.tcTrap = false
-        state.noTC = false
-        state.parityFail = false
-        
-        state.warningFilter = 0
-        state.generatedWarning = false
-        
-        // Initialize DSKY state
-        state.restartLight = false
-        state.standby = false
-        state.sbyPressed = false
-        state.sbyStillPressed = false
-        
-        // Initialize other state
-        state.nextZ = 0
-        state.scalerCounter = 0
-        state.channelRoutineCount = 0
-        
-        state.dskyTimer = 0
-        state.dskyFlash = 0
-        state.dskyChannel163 = 0
-        
-        state.tookBZF = false
-        state.tookBZMF = false
-        
-        // Initialize HANDRUPT traps
-        state.trap31A = false
-        state.trap31B = false
-        state.trap32 = false
-        
-        // Initialize radar state
-        state.radarGateCounter = 0
-        
+        state.resetForBoot()
+        resetPeripheralTiming()
+        try loadBinFile()
+    }
+
+    private func resetPeripheralTiming() {
         cduFifoStates = Array(repeating: CDUFifoState(), count: CDUFifoConstants.fifoCount)
         cduChecker = 0
         channelMasks = Array(repeating: 0o77777, count: 256)
@@ -481,9 +405,6 @@ public final class AGCEngine {
         imuTiming = IMUTiming()
         gyroTiming = GyroTiming()
         IMUBurst.reset()
-        
-        // Load bin file if provided
-        try loadBinFile()
     }
     
     /// Convert AGC-format word to internal format
@@ -1517,11 +1438,11 @@ public final class AGCEngine {
 
         var servicedCounter = false
 
-        for (channel, value) in input {
-            let normalizedChannel = channel & 0o377
-            let maskedInput = value & 0o77777
+        for event in input {
+            let normalizedChannel = event.channel & 0o377
+            let maskedInput = event.value & 0o77777
 
-            if (channel & 0o400) != 0 {
+            if (event.channel & 0o400) != 0 {
                 if normalizedChannel < channelMasks.count {
                     channelMasks[normalizedChannel] = maskedInput
                 }
@@ -1713,50 +1634,10 @@ public final class AGCEngine {
     /// Start the simulation engine.
     /// This initializes the AGC state and starts the main execution loop running at 11.7 microsecond intervals
     public func startEngine() {
-        // Initialize state
-        state.cycleCounter = 0
-        state.extraCode = false
-        state.allowInterrupt = false
-        state.pendFlag = false 
-        state.pendDelay = 0
-        state.extraDelay = 0
-        
-        // Set initial program counter to 04000
-        writeRegister(.regZ, 0o4000)
-        
-        // Clear I/O channels
-        for channel in 0..<NUM_CHANNELS {
-            state.inputChannels[channel] = 0
-        }
-        
-        // Set initial values for certain channels
-        state.inputChannels[0o30] = 0o37777
-        state.inputChannels[0o31] = 0o77777 
-        state.inputChannels[0o32] = 0o77777
-        state.inputChannels[0o33] = 0o77777
-        state.outputChannel7 = 0
-        state.outputChannel10 = Array(repeating: 0, count: 16)
-        state.dskyTimer = 0
-        state.dskyFlash = 0
-        state.dskyChannel163 = 0
-        
-        cduFifoStates = Array(repeating: CDUFifoState(), count: CDUFifoConstants.fifoCount)
-        cduChecker = 0
-        channelMasks = Array(repeating: 0o77777, count: 256)
-        lastRhcPitch = 0
-        lastRhcYaw = 0
-        lastRhcRoll = 0
-        imuTiming = IMUTiming()
-        gyroTiming = GyroTiming()
-        IMUBurst.reset()
-        
-        // Clear erasable memory
-        for bank in 0..<8 {
-            for addr in 0..<0o400 {
-                state.erasableMemory[bank][addr] = 0
-            }
-        }
-        
+        state.resetForBoot()
+        resetPeripheralTiming()
+        try? loadBinFile()
+
         // Start main execution loop
         engineTask = Task.detached { [weak self] in
             guard let self = self else { return }

@@ -50,5 +50,22 @@ struct AGCPacketTests {
         #expect(decoded.channel == channel)
         #expect(decoded.value == value)
     }
-}
 
+    @Test func packetRoundTripsUBitMaskChannel() throws {
+        let channel = 0o432
+        let value = 0o20000
+
+        let packet = try #require(AGCPacket.encode(channel: channel, value: value))
+        let decoded = try #require(AGCPacket.decode(packet))
+
+        #expect(decoded.channel == channel)
+        #expect(decoded.value == value)
+        #expect(decoded.uBit == 1)
+    }
+
+    @Test func packetRejectsOutOfRangeValues() {
+        #expect(AGCPacket.encode(channel: 0o1000, value: 0) == nil)
+        #expect(AGCPacket.encode(channel: 0o10, value: 0o100000) == nil)
+        #expect(AGCPacket.decode(Data([0xC0, 0x40, 0x80, 0xC0])) == nil)
+    }
+}

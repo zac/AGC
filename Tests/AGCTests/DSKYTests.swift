@@ -63,7 +63,7 @@ struct DSKYTests {
         // Check that keypress is queued
         let input = await dsky.channelInput()
         #expect(input != nil, "Keypress should be queued")
-        #expect(input?[0o15] == 0o21, "Keycode should match")
+        #expect(input?.first == AGCChannelInput(channel: 0o15, value: 0o21), "Keycode should match")
     }
 
     @Test func keypressQueueDeliversOneChannel15PerPoll() async {
@@ -74,9 +74,9 @@ struct DSKYTests {
         let first = await dsky.channelInput()
         let second = await dsky.channelInput()
         let third = await dsky.channelInput()
-        #expect(first?[0o15] == 0o21)
-        #expect(second?[0o15] == 3)
-        #expect(third?[0o15] == 0o34)
+        #expect(first?.first == AGCChannelInput(channel: 0o15, value: 0o21))
+        #expect(second?.first == AGCChannelInput(channel: 0o15, value: 3))
+        #expect(third?.first == AGCChannelInput(channel: 0o15, value: 0o34))
         let empty = await dsky.channelInput()
         #expect(empty == nil)
     }
@@ -91,7 +91,7 @@ struct DSKYTests {
 
         for keycode in sequence {
             let next = await dsky.channelInput()
-            #expect(next?[0o15] == keycode)
+            #expect(next?.first == AGCChannelInput(channel: 0o15, value: keycode))
         }
 
         #expect(await dsky.channelInput() == nil)
@@ -104,7 +104,7 @@ struct DSKYTests {
 
         let mask = await dsky.channelInput()
         let pro = await dsky.channelInput()
-        #expect(mask?[0o432] != nil, "Mask should be set")
-        #expect(pro?[0o13] != nil, "PRO key value should be set")
+        #expect(mask?.first == AGCChannelInput(channel: 0o432, value: 0o20000), "Mask should be set")
+        #expect(pro?.first == AGCChannelInput(channel: 0o13, value: 0), "PRO key value should be set")
     }
 }

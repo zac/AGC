@@ -6,12 +6,9 @@ import Foundation
 @Suite("AGC Tests")
 class AGCTests {
 
-    private var library: AGC? = {
-        guard let url = Bundle.module.url(forResource: "Luminary099", withExtension: "bin") else {
-            return nil
-        }
-        return try? AGC(binFile: url)
-    }()
+    private var luminaryURL: URL? {
+        Bundle.module.url(forResource: "Luminary099", withExtension: "bin")
+    }
 
     private func makeEngine() throws -> (AGCEngine, AGCState) {
         let state = AGCState()
@@ -20,19 +17,9 @@ class AGCTests {
         return (engine, state)
     }
 
-    private func makeLuminaryHarness() throws -> (library: AGC, dsky: DSKY) {
-        let library = try #require(self.library)
-        try library.reset()
-        let dsky = DSKY(agcEngine: library.engine)
-        library.engine.ioDelegate = CompositeAGCIO(children: [dsky])
-        return (library, dsky)
-    }
-
-    private func sendPacedDSKYSequence(_ sequence: [Int], dsky: DSKY, library: AGC, cyclesPerKey: UInt64 = 50_000) async {
-        for key in sequence {
-            await dsky.sendKeycode(key)
-            await library.run(for: cyclesPerKey)
-        }
+    private func makeRuntime() throws -> AGCRuntime {
+        let url = try #require(luminaryURL)
+        return try AGCRuntime(binFile: url)
     }
 
     private func setAccumulator(_ value: Int, engine: AGCEngine) {
@@ -66,14 +53,14 @@ class AGCTests {
     }
 
     private final class TestIO: AGCIOProtocol {
-        var pendingInputs: [[Int:Int]] = []
+        var pendingInputs: [[AGCChannelInput]] = []
         var outputs: [(Int, Int)] = []
 
         func channelOutput(channel: Int, value: Int) {
             outputs.append((channel, value))
         }
 
-        func channelInput() async -> [Int:Int]? {
+        func channelInput() async -> [AGCChannelInput]? {
             guard !pendingInputs.isEmpty else { return nil }
             return pendingInputs.removeFirst()
         }
@@ -84,15 +71,57 @@ class AGCTests {
     }
 
     @Test func engineCreation() async throws {
-        let library = try #require(self.library)
-        try library.reset()
+        let runtime = try makeRuntime()
+        let snapshot = await runtime.snapshot()
+        #expect(snapshot.registers.z == 0o4000)
+    }
+
+    @Test func bootResetUsesYaAGCStartupDefaults() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        let snapshot = try await runtime.reset()
+
+        #expect(snapshot.registers.z == 0o4000)
+        #expect(snapshot.inputChannels[0o30] == 0o37777)
+        #expect(snapshot.inputChannels[0o31] == 0o77777)
+        #expect(snapshot.inputChannels[0o32] == 0o77777)
+        #expect(snapshot.inputChannels[0o33] == 0o77777)
+        #expect(snapshot.interruptRequests[8] == 1, "DOWNRUPT startup behavior should be explicit")
+    }
+
+    @Test func repeatedRuntimeResetProducesIdenticalSnapshots() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        let first = try await runtime.reset()
+        _ = await runtime.step(cycles: 50)
+        let second = try await runtime.reset()
+
+        #expect(second == first)
     }
 
     @Test func runEngineFor1000Cycles() async throws {
-        let library = try #require(self.library)
-        try library.reset()
-        await library.run(for: 1000)
-        #expect(library.state.cycleCounter == 1000)
+        let runtime = try makeRuntime()
+        let snapshot = await runtime.step(cycles: 1000)
+        #expect(snapshot.cycle == 1000)
+    }
+
+    @Test func runtimeStepAdvancesDeterministically() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        let first = await runtime.step(cycles: 10)
+        let second = await runtime.step(cycles: 10)
+
+        #expect(first.cycle == 10)
+        #expect(second.cycle == 20)
+    }
+
+    @Test func runtimeCancellationLeavesSnapshotReadable() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        let task = Task {
+            await runtime.step(cycles: UInt64.max)
+        }
+        task.cancel()
+        let cancelledSnapshot = await task.value
+        let currentSnapshot = await runtime.snapshot()
+
+        #expect(currentSnapshot.cycle == cancelledSnapshot.cycle)
     }
 
     @Test func instructionFetchRespectsBankSelection() async throws {
@@ -285,8 +314,8 @@ class AGCTests {
         state.downruptTimeValid = false
         state.inputChannels[0o32] = 0o77777
         io.pendingInputs = [
-            [0o432: 0o20000],
-            [0o32: 0]
+            [AGCChannelInput(channel: 0o432, value: 0o20000)],
+            [AGCChannelInput(channel: 0o32, value: 0)]
         ]
 
         await engine.runEngine(for: 2)
@@ -295,13 +324,28 @@ class AGCTests {
         #expect((state.inputChannels[0o32] & 0o57777) == 0o57777)
     }
 
+    @Test func channelTracePreservesOrderedRepeatedInputs() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        await runtime.enqueueInputs([
+            AGCChannelInput(channel: 0o15, value: 0o21),
+            AGCChannelInput(channel: 0o15, value: 0o3),
+            AGCChannelInput(channel: 0o15, value: 0o5)
+        ])
+
+        let snapshot = await runtime.step(cycles: 1)
+        let inputs = snapshot.channelTrace.filter { $0.direction == .input && $0.channel == 0o15 }
+
+        #expect(inputs.map(\.value) == [0o21, 0o3, 0o5])
+        #expect(snapshot.inputChannels[0o15] == 0o5)
+    }
+
     @Test func channelInputRaisesUplinkInterrupt() async throws {
         let (engine, state) = try makeEngine()
         let io = TestIO()
         engine.ioDelegate = io
         state.downruptTimeValid = false
         state.allowInterrupt = false
-        io.pendingInputs = [[0o173: 0o12345]]
+        io.pendingInputs = [[AGCChannelInput(channel: 0o173, value: 0o12345)]]
 
         await engine.runEngine(for: 1)
 
@@ -310,37 +354,48 @@ class AGCTests {
     }
 
     @Test func dskyKeypressRaisesKeyruptWhenEngineConsumesQueue() async throws {
-        let library = try #require(self.library)
-        try library.reset()
+        let runtime = try makeRuntime()
+        await runtime.sendDSKYKey(.verb)
+        let snapshot = await runtime.step(cycles: 1)
 
-        let dsky = DSKY(agcEngine: library.engine)
-        library.engine.ioDelegate = CompositeAGCIO(children: [dsky])
-
-        await dsky.sendKeycode(0o21)
-        await library.run(for: 1)
-
-        #expect(library.state.interruptRequests[5] == 1)
-        #expect(library.state.inputChannels[0o15] == 0o21)
+        #expect(snapshot.interruptRequests[5] == 1)
+        #expect(snapshot.inputChannels[0o15] == 0o21)
     }
 
     @Test func luminaryPacedV35EDrivesLampTestDisplay() async throws {
-        let (library, dsky) = try makeLuminaryHarness()
+        let runtime = try makeRuntime()
+        let runner = AGCScenarioRunner(runtime: runtime)
 
-        await library.run(for: 1_000_000)
+        var snapshot = await runtime.step(cycles: 1_000_000)
 
-        #expect((library.state.inputChannels[0o77] & 0o000010) == 0, "Boot should not trip the RUPT LOCK alarm")
+        #expect(((snapshot.inputChannels[0o77] ?? 0) & 0o000010) == 0, "Boot should not trip the RUPT LOCK alarm")
 
-        await sendPacedDSKYSequence([0o22], dsky: dsky, library: library)
-        #expect(!library.state.restartLight, "RSET should clear the RESTART light")
+        let rsetResult = await runner.rset()
+        #expect(!rsetResult.finalSnapshot.dsky.indicatorIsOn(24), "RSET should clear the RESTART light")
 
-        await sendPacedDSKYSequence([0o21, 0o3, 0o5, 0o34], dsky: dsky, library: library)
+        let v35eResult = await runner.v35e()
+        snapshot = v35eResult.finalSnapshot
 
-        #expect(dsky.lampTest, "Verb 35 should drive the DSKY lamp test when keys are paced at the API level")
-        #expect(dsky.formatVerb() == "88")
-        #expect(dsky.formatNoun() == "88")
-        #expect(dsky.formatRegister(dsky.r1).contains("88888"))
-        #expect(dsky.indicatorIsOn(24), "RESTART annunciator should light during lamp test")
-        #expect(dsky.indicatorIsOn(13), "STBY annunciator should light during lamp test")
+        #expect(snapshot.dsky.lampTest, "Verb 35 should drive the DSKY lamp test when keys are paced at the API level")
+        #expect(snapshot.dsky.verb == "88")
+        #expect(snapshot.dsky.noun == "88")
+        #expect(snapshot.dsky.r1.contains("88888"))
+        #expect(snapshot.dsky.indicatorIsOn(24), "RESTART annunciator should light during lamp test")
+        #expect(snapshot.dsky.indicatorIsOn(13), "STBY annunciator should light during lamp test")
+    }
+
+    @Test func luminaryPacedV16N36ECapturesDSKYActivity() async throws {
+        let runtime = try makeRuntime()
+        let runner = AGCScenarioRunner(runtime: runtime)
+
+        _ = await runtime.step(cycles: 1_000_000)
+        let result = await runner.v16n36e()
+        let channel15Values = result.channelTrace
+            .filter { $0.direction == .input && $0.channel == 0o15 }
+            .map(\.value)
+
+        #expect(Array(channel15Values.suffix(DSKYScript.v16n36e.keys.count)) == DSKYScript.v16n36e.keys.map(\.rawValue))
+        #expect(result.channelTrace.contains { $0.direction == .output && ($0.channel == 0o10 || $0.channel == 0o163) })
     }
 
     @Test func rotationalHandControllerInputsLatchWhenRequested() async throws {
@@ -349,9 +404,9 @@ class AGCTests {
         engine.ioDelegate = io
         state.downruptTimeValid = false
         io.pendingInputs = [
-            [0o166: 0o1],
-            [0o167: 0o2],
-            [0o170: 0o3]
+            [AGCChannelInput(channel: 0o166, value: 0o1)],
+            [AGCChannelInput(channel: 0o167, value: 0o2)],
+            [AGCChannelInput(channel: 0o170, value: 0o3)]
         ]
 
         await engine.runEngine(for: 3)
@@ -369,7 +424,7 @@ class AGCTests {
 
         let counterAddress = 0o37
         state.erasableMemory[0][counterAddress] = 0
-        io.pendingInputs = [[0o200 | counterAddress: 4]]
+        io.pendingInputs = [[AGCChannelInput(channel: 0o200 | counterAddress, value: 4)]]
 
         await engine.runEngine(for: 1)
 
@@ -896,29 +951,43 @@ struct LMIntegrationTests {
         engine.ioDelegate = lm
         engine.writeIOChannel(address: 0o5, value: 0o12121)
         engine.writeIOChannel(address: 0o6, value: 0o06060)
-        #expect(lm.jetEngineOutputs.channel5 == 0o12121)
-        #expect(lm.jetEngineOutputs.channel6 == 0o06060)
+        #expect(lm.snapshot.out0 == 0o12121)
+        #expect(lm.snapshot.out1 == 0o06060)
+        #expect(lm.snapshot.rcsJets.contains { $0.jet == .jet1 && $0.channel == 0o5 })
+        #expect(lm.snapshot.unmappedBits.contains { $0.channel == 0o6 })
+    }
+
+    @Test func `LMVehicleSnapshot decodes source backed RCS and preserves unknown bits`() {
+        let snapshot = LMVehicleSnapshot(out0: 0o377, out1: 0o377)
+        let jets = Set(snapshot.rcsJets.map(\.jet))
+
+        #expect(jets == Set([.jet1, .jet2, .jet5, .jet6, .jet9, .jet10, .jet13, .jet14]))
+        #expect(snapshot.discreteGroups.contains { $0.name.contains("positive pitch") && $0.mask == 0o125 })
+        #expect(snapshot.discreteGroups.contains { $0.name.contains("negative pitch") && $0.mask == 0o252 })
+        #expect(snapshot.unmappedBits.contains { $0.channel == 0o6 && $0.bit == 1 })
     }
 
     @Test func `Composite merges channel input`() async throws {
         final class PartA: AGCIOProtocol, @unchecked Sendable {
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [Int: Int]? { [0o15: 0o11] }
+            func channelInput() async -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o15, value: 0o11)] }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
             func channelRoutine() async {}
         }
         final class PartB: AGCIOProtocol, @unchecked Sendable {
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [Int: Int]? { [0o16: 0o22] }
+            func channelInput() async -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o16, value: 0o22)] }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
             func channelRoutine() async {}
         }
         let composite = CompositeAGCIO(children: [PartA(), PartB()])
         let merged = await composite.channelInput()
-        #expect(merged?[0o15] == 0o11)
-        #expect(merged?[0o16] == 0o22)
+        #expect(merged == [
+            AGCChannelInput(channel: 0o15, value: 0o11),
+            AGCChannelInput(channel: 0o16, value: 0o22)
+        ])
     }
 
     @Test func `AGC per second matches yaAGC macro`() {
@@ -958,7 +1027,7 @@ struct LMIntegrationTests {
         let io = LMTestIO()
         engine.ioDelegate = io
         state.erasableMemory[0][Register.regCDUX.rawValue] = 0
-        io.pendingInputs = [[0o200 | Register.regCDUX.rawValue: 1]]
+        io.pendingInputs = [[AGCChannelInput(channel: 0o200 | Register.regCDUX.rawValue, value: 1)]]
         await engine.runEngine(for: 1)
         #expect(state.erasableMemory[0][Register.regCDUX.rawValue] == 0)
         await engine.runEngine(for: 400)
@@ -973,7 +1042,7 @@ struct LMIntegrationTests {
         engine.ioDelegate = io
         let cmd = Register.regCDUXCMD.rawValue
         state.erasableMemory[0][cmd] = 0
-        io.pendingInputs = [[0o200 | cmd: 1]]
+        io.pendingInputs = [[AGCChannelInput(channel: 0o200 | cmd, value: 1)]]
         await engine.runEngine(for: 1)
         #expect(state.erasableMemory[0][cmd] == 1)
     }
@@ -1022,7 +1091,7 @@ struct LMIntegrationTests {
             var radars = 0
             var routines = 0
             func channelOutput(channel: Int, value: Int) { outputs += 1 }
-            func channelInput() async -> [Int: Int]? { nil }
+            func channelInput() async -> [AGCChannelInput]? { nil }
             func requestRadarData() { radars += 1 }
             func shiftToDeda(data: Int) {}
             func channelRoutine() async { routines += 1 }
@@ -1040,7 +1109,7 @@ struct LMIntegrationTests {
         final class RoutineIO: AGCIOProtocol, @unchecked Sendable {
             var count = 0
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [Int: Int]? { nil }
+            func channelInput() async -> [AGCChannelInput]? { nil }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
             func channelRoutine() async { count += 1 }
@@ -1069,11 +1138,11 @@ private func makeEngineForLMTests(state: AGCState) throws -> AGCEngine {
 }
 
 private final class LMTestIO: AGCIOProtocol, @unchecked Sendable {
-    var pendingInputs: [[Int: Int]] = []
+    var pendingInputs: [[AGCChannelInput]] = []
 
     func channelOutput(channel: Int, value: Int) {}
 
-    func channelInput() async -> [Int: Int]? {
+    func channelInput() async -> [AGCChannelInput]? {
         guard !pendingInputs.isEmpty else { return nil }
         return pendingInputs.removeFirst()
     }
@@ -1087,7 +1156,7 @@ private final class RadarSpyIO: AGCIOProtocol, @unchecked Sendable {
     private(set) var radarCallCount = 0
 
     func channelOutput(channel: Int, value: Int) {}
-    func channelInput() async -> [Int: Int]? { nil }
+    func channelInput() async -> [AGCChannelInput]? { nil }
     func requestRadarData() { radarCallCount += 1 }
     func shiftToDeda(data: Int) {}
     func channelRoutine() async {}

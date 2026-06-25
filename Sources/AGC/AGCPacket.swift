@@ -15,7 +15,7 @@ public struct AGCPacket {
         guard value >= 0 && value <= 0x7fff else { return nil }
         
         var packet = Data(count: 4)
-        packet[0] = UInt8((channel >> 3) & 0x1F)
+        packet[0] = UInt8((channel >> 3) & 0x3F)
         packet[1] = UInt8(0x40 | ((channel << 3) & 0x38) | ((value >> 12) & 0x07))
         packet[2] = UInt8(0x80 | ((value >> 6) & 0x3F))
         packet[3] = UInt8(0xC0 | (value & 0x3F))
@@ -35,7 +35,7 @@ public struct AGCPacket {
         guard (packet[2] & 0xC0) == 0x80 else { return nil }
         guard (packet[3] & 0xC0) == 0xC0 else { return nil }
         
-        let channel = ((Int(packet[0]) & 0x1F) << 3) | ((Int(packet[1]) >> 3) & 0x07)
+        let channel = ((Int(packet[0]) & 0x3F) << 3) | ((Int(packet[1]) >> 3) & 0x07)
         let value = ((Int(packet[1]) & 0x07) << 12) | ((Int(packet[2]) & 0x3F) << 6) | (Int(packet[3]) & 0x3F)
         let uBit = (packet[0] & 0x20) != 0 ? 1 : 0
         
@@ -51,5 +51,4 @@ public struct AGCPacket {
                (packet[3] & 0xC0) == 0xC0
     }
 }
-
 

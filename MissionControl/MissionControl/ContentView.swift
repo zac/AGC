@@ -44,16 +44,14 @@ final class MissionControlViewModel {
     private(set) var isRunning = false
     private(set) var programSummary = "No program loaded"
     private(set) var latestSnapshot: RegisterSnapshot?
-    private(set) var latestDSKY: DSKYState?
+    private(set) var latestDSKY: DSKYSnapshot?
     private(set) var engineHealth: EngineHealthSnapshot?
     private(set) var radarHookInvocations: UInt64 = 0
     private(set) var recentEvents: [MissionControlEvent] = []
     private(set) var backtraceTail: [BacktraceSnapshot] = []
+    private(set) var latestChannelTrace: [AGCChannelTraceEntry] = []
 
-    @ObservationIgnored private var agc: AGC?
-    @ObservationIgnored private var dsky: DSKY?
-    @ObservationIgnored private var compositeIO: CompositeAGCIO?
-    @ObservationIgnored private var lmVehicleIO: LMVehicleIO?
+    @ObservationIgnored private var runtime: AGCRuntime?
     @ObservationIgnored private var simulationTask: Task<Void, Never>?
     @ObservationIgnored private var dskySequenceTask: Task<Void, Never>?
     @ObservationIgnored private var lastHealthWall: CFAbsoluteTime = 0
@@ -65,10 +63,10 @@ final class MissionControlViewModel {
         latestSnapshot
     }
     
-    var canStart: Bool { agc != nil && !isRunning }
+    var canStart: Bool { runtime != nil && !isRunning }
     var canStop: Bool { isRunning }
-    var canReset: Bool { agc != nil }
-    var canStep: Bool { agc != nil && !isRunning }
+    var canReset: Bool { runtime != nil }
+    var canStep: Bool { runtime != nil && !isRunning }
     var hasSampleProgram: Bool {
         Bundle.main.url(forResource: "Luminary099", withExtension: "bin") != nil
     }
@@ -87,20 +85,8 @@ final class MissionControlViewModel {
         }
         
         do {
-            let loaded = try AGC(binFile: url)
-            agc = loaded
-
-            let dskyInstance = DSKY(agcEngine: loaded.engine)
-            let lmIO = LMVehicleIO(agcEngine: loaded.engine) { [weak self] in
-                Task { @MainActor in
-                    self?.radarHookInvocations += 1
-                }
-            }
-            lmVehicleIO = lmIO
-            let composite = CompositeAGCIO(children: [dskyInstance, lmIO])
-            compositeIO = composite
-            dsky = dskyInstance
-            loaded.engine.ioDelegate = composite
+            let loaded = try AGCRuntime(binFile: url)
+            runtime = loaded
 
             selectedURL = url
             let data = try Data(contentsOf: url)
@@ -114,14 +100,14 @@ final class MissionControlViewModel {
             lastHealthCycle = 0
             previousCycleForAdvance = 0
             smoothedCyclesPerSec = 0
-            updateSnapshots(from: loaded.state, dsky: dskyInstance)
-            refreshEngineHealth(cycle: loaded.state.cycleCounter)
             recordEvent("Loaded \(url.lastPathComponent)")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let snapshot = await loaded.snapshot()
+                self.applySnapshot(snapshot)
+            }
         } catch {
-            agc = nil
-            dsky = nil
-            compositeIO = nil
-            lmVehicleIO = nil
+            runtime = nil
             status = .error(error.localizedDescription)
             clearSnapshots()
             recordEvent("Load failed: \(error.localizedDescription)")
@@ -141,10 +127,7 @@ final class MissionControlViewModel {
         stop()
         dskySequenceTask?.cancel()
         dskySequenceTask = nil
-        agc = nil
-        dsky = nil
-        compositeIO = nil
-        lmVehicleIO = nil
+        runtime = nil
         selectedURL = nil
         status = .empty
         programSummary = "No program loaded"
@@ -153,24 +136,23 @@ final class MissionControlViewModel {
     }
     
     func start() {
-        guard canStart, let agc, let dsky else { return }
+        guard canStart, let runtime else { return }
         dskySequenceTask?.cancel()
         dskySequenceTask = nil
         simulationTask?.cancel()
         isRunning = true
         status = .running
         lastHealthWall = CFAbsoluteTimeGetCurrent()
-        lastHealthCycle = agc.state.cycleCounter
-        previousCycleForAdvance = agc.state.cycleCounter
+        lastHealthCycle = latestSnapshot?.cycle ?? 0
+        previousCycleForAdvance = latestSnapshot?.cycle ?? 0
         smoothedCyclesPerSec = 0
         let cyclesPerBatch: UInt64 = 30_000
         recordEvent("Started continuous run")
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                await agc.run(for: cyclesPerBatch)
-                updateSnapshots(from: agc.state, dsky: dsky)
-                refreshEngineHealth(cycle: agc.state.cycleCounter)
+                let snapshot = await runtime.step(cycles: cyclesPerBatch)
+                self.applySnapshot(snapshot)
                 await Task.yield()
             }
             self.isRunning = false
@@ -178,32 +160,31 @@ final class MissionControlViewModel {
             if case .running = self.status {
                 self.status = .stopped
             }
-            self.updateSnapshots(from: agc.state, dsky: dsky)
-            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
-            self.recordEvent("Continuous run stopped at cycle \(agc.state.cycleCounter)")
+            let snapshot = await runtime.snapshot()
+            self.applySnapshot(snapshot)
+            self.recordEvent("Continuous run stopped at cycle \(snapshot.cycle)")
         }
     }
 
     func runCycles(_ cycles: UInt64) {
-        guard canStep, let agc, let dsky else { return }
+        guard canStep, let runtime else { return }
         dskySequenceTask?.cancel()
         dskySequenceTask = nil
         simulationTask?.cancel()
         isRunning = true
         status = .running
         lastHealthWall = CFAbsoluteTimeGetCurrent()
-        lastHealthCycle = agc.state.cycleCounter
-        previousCycleForAdvance = agc.state.cycleCounter
+        lastHealthCycle = latestSnapshot?.cycle ?? 0
+        previousCycleForAdvance = latestSnapshot?.cycle ?? 0
         recordEvent("Running \(cycles.formatted()) cycles")
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await agc.run(for: cycles)
+            let snapshot = await runtime.step(cycles: cycles)
             self.isRunning = false
             self.simulationTask = nil
             self.status = .stopped
-            self.updateSnapshots(from: agc.state, dsky: dsky)
-            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
-            self.recordEvent("Finished \(cycles.formatted()) cycles at cycle \(agc.state.cycleCounter)")
+            self.applySnapshot(snapshot)
+            self.recordEvent("Finished \(cycles.formatted()) cycles at cycle \(snapshot.cycle)")
         }
     }
     
@@ -215,10 +196,13 @@ final class MissionControlViewModel {
         simulationTask = nil
         isRunning = false
         status = .stopped
-        if let agc, let dsky {
-            updateSnapshots(from: agc.state, dsky: dsky)
-            refreshEngineHealth(cycle: agc.state.cycleCounter)
-            recordEvent("Stopped at cycle \(agc.state.cycleCounter)")
+        if let runtime {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let snapshot = await runtime.snapshot()
+                self.applySnapshot(snapshot)
+                self.recordEvent("Stopped at cycle \(snapshot.cycle)")
+            }
         }
     }
     
@@ -228,49 +212,53 @@ final class MissionControlViewModel {
         loadProgram(from: url)
     }
     
-    private func refreshEngineHealth(cycle: UInt64) {
-        let batchDelta = cycle &- previousCycleForAdvance
-        previousCycleForAdvance = cycle
+    private func refreshEngineHealth(snapshot: AGCSnapshot) {
+        let batchDelta = snapshot.cycle &- previousCycleForAdvance
+        previousCycleForAdvance = snapshot.cycle
         let now = CFAbsoluteTimeGetCurrent()
         if lastHealthWall == 0 {
             lastHealthWall = now
-            lastHealthCycle = cycle
+            lastHealthCycle = snapshot.cycle
             engineHealth = EngineHealthSnapshot(
-                cycle: cycle,
+                cycle: snapshot.cycle,
                 cyclesPerSecond: 0,
                 isAdvancing: false,
-                lmOutputs: lmVehicleIO?.jetEngineOutputs
+                lmOutputs: snapshot.vehicle
             )
             return
         }
         let dt = now - lastHealthWall
-        let delta = cycle &- lastHealthCycle
+        let delta = snapshot.cycle &- lastHealthCycle
         if dt > 0.05, delta > 0 {
             let instant = Double(delta) / dt
             smoothedCyclesPerSec = smoothedCyclesPerSec == 0
                 ? instant
                 : smoothedCyclesPerSec * 0.88 + instant * 0.12
             lastHealthWall = now
-            lastHealthCycle = cycle
+            lastHealthCycle = snapshot.cycle
         }
         engineHealth = EngineHealthSnapshot(
-            cycle: cycle,
+            cycle: snapshot.cycle,
             cyclesPerSecond: smoothedCyclesPerSec,
             isAdvancing: isRunning && batchDelta > 0,
-            lmOutputs: lmVehicleIO?.jetEngineOutputs
+            lmOutputs: snapshot.vehicle
         )
     }
 
-    func pressKey(channel: Int, value: Int) {
+    func pressKey(_ key: DSKYKeyCode) {
         sendDSKYSequence(
-            label: "Key \(String(format: "%03o", value))",
-            keys: [DSKYKey(label: "", channel: channel, value: value, accent: false)],
+            label: "Key \(key.label)",
+            keys: [key],
             autoRunCyclesWhenIdle: Self.idleSingleKeyValidationCycles
         )
     }
 
-    func sendDSKYSequence(label: String, keys: [DSKYKey], autoRunCyclesWhenIdle: UInt64? = nil) {
-        guard let agc, let dsky else { return }
+    func sendDSKYScript(_ script: DSKYScript, autoRunCyclesWhenIdle: UInt64? = nil) {
+        sendDSKYSequence(label: script.id, keys: script.keys, autoRunCyclesWhenIdle: autoRunCyclesWhenIdle)
+    }
+
+    func sendDSKYSequence(label: String, keys: [DSKYKeyCode], autoRunCyclesWhenIdle: UInt64? = nil) {
+        guard let runtime else { return }
         recordEvent("Queued \(label)")
         let settleCycles = if keys.count > 1 {
             max(
@@ -288,14 +276,21 @@ final class MissionControlViewModel {
                 guard let self else { return }
                 for key in keys {
                     if Task.isCancelled { break }
-                    await self.sendDSKYKey(key, to: dsky)
+                    let startCycle: UInt64
+                    if let cycle = self.latestSnapshot?.cycle {
+                        startCycle = cycle
+                    } else {
+                        let currentSnapshot = await runtime.snapshot()
+                        startCycle = currentSnapshot.cycle
+                    }
+                    await runtime.sendDSKYKey(key)
                     if settleCycles > 0 {
-                        await self.waitForCycleAdvance(settleCycles, agc: agc)
+                        await self.waitForCycleAdvance(settleCycles, runtime: runtime, startCycle: startCycle)
                     }
                 }
                 self.dskySequenceTask = nil
-                self.updateSnapshots(from: agc.state, dsky: dsky)
-                self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+                let snapshot = await runtime.snapshot()
+                self.applySnapshot(snapshot)
                 self.recordEvent("Sent \(label) into live run")
             }
             return
@@ -306,56 +301,46 @@ final class MissionControlViewModel {
         isRunning = true
         status = .running
         lastHealthWall = CFAbsoluteTimeGetCurrent()
-        lastHealthCycle = agc.state.cycleCounter
-        previousCycleForAdvance = agc.state.cycleCounter
+        lastHealthCycle = latestSnapshot?.cycle ?? 0
+        previousCycleForAdvance = latestSnapshot?.cycle ?? 0
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for key in keys {
                 if Task.isCancelled { break }
-                await self.sendDSKYKey(key, to: dsky)
-
+                await runtime.sendDSKYKey(key)
                 if settleCycles > 0 {
-                    await agc.run(for: settleCycles)
-                    self.updateSnapshots(from: agc.state, dsky: dsky)
-                    self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+                    let snapshot = await runtime.step(cycles: settleCycles)
+                    self.applySnapshot(snapshot)
                 }
             }
+            let snapshot = await runtime.snapshot()
             self.isRunning = false
             self.simulationTask = nil
             self.status = .stopped
-            self.updateSnapshots(from: agc.state, dsky: dsky)
-            self.refreshEngineHealth(cycle: agc.state.cycleCounter)
+            self.applySnapshot(snapshot)
             self.recordEvent("Sent \(label)")
         }
     }
 
-    private func sendDSKYKey(_ key: DSKYKey, to dsky: DSKY) async {
-        if key.channel == 0o13 {
-            await dsky.sendProKey(true)
-            await dsky.sendProKey(false)
-        } else {
-            await dsky.sendKeycode(key.value)
-        }
-    }
-
-    private func waitForCycleAdvance(_ cycles: UInt64, agc: AGC) async {
+    private func waitForCycleAdvance(_ cycles: UInt64, runtime: AGCRuntime, startCycle: UInt64) async {
         guard cycles > 0 else { return }
-        let targetCycle = agc.state.cycleCounter &+ cycles
-        while !Task.isCancelled && agc.state.cycleCounter < targetCycle {
+        let targetCycle = startCycle &+ cycles
+        while !Task.isCancelled {
+            let snapshot = await runtime.snapshot()
+            if snapshot.cycle >= targetCycle {
+                applySnapshot(snapshot)
+                return
+            }
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
 
-    private func updateSnapshots(from state: AGCState?, dsky: DSKY?) {
-        if let state {
-            latestSnapshot = RegisterSnapshot(state: state)
-            if let dsky {
-                latestDSKY = DSKYState(state: state, dsky: dsky)
-            } else {
-                latestDSKY = DSKYState(state: state)
-            }
-            backtraceTail = state.backtrace.suffix(8).map(BacktraceSnapshot.init)
-        }
+    private func applySnapshot(_ snapshot: AGCSnapshot) {
+        latestSnapshot = RegisterSnapshot(snapshot: snapshot)
+        latestDSKY = snapshot.dsky
+        latestChannelTrace = Array(snapshot.channelTrace.suffix(80))
+        backtraceTail = snapshot.backtrace.suffix(8).map(BacktraceSnapshot.init)
+        refreshEngineHealth(snapshot: snapshot)
     }
 
     private func clearSnapshots() {
@@ -363,6 +348,7 @@ final class MissionControlViewModel {
         latestDSKY = nil
         engineHealth = nil
         backtraceTail = []
+        latestChannelTrace = []
     }
 
     private func recordEvent(_ message: String) {
@@ -382,18 +368,14 @@ struct RegisterSnapshot {
     let index: Int
     let statusFlags: String
     
-    init(state: AGCState) {
-        self.cycle = state.cycleCounter
-        self.accumulator = state.accumulator
-        self.l = state.erasableMemory[0][Register.regL.rawValue]
-        self.q = state.erasableMemory[0][Register.regQ.rawValue]
-        self.z = state.erasableMemory[0][Register.regZ.rawValue]
-        self.index = state.indexValue
-        var flags: [String] = []
-        if state.extraCode { flags.append("EXTRA") }
-        if state.inIsr { flags.append("ISR") }
-        if state.pendFlag { flags.append("PEND") }
-        statusFlags = flags.isEmpty ? "—" : flags.joined(separator: ", ")
+    init(snapshot: AGCSnapshot) {
+        self.cycle = snapshot.cycle
+        self.accumulator = snapshot.registers.a
+        self.l = snapshot.registers.l
+        self.q = snapshot.registers.q
+        self.z = snapshot.registers.z
+        self.index = snapshot.registers.bb
+        statusFlags = snapshot.interruptRequests.contains(1) ? "RUPT" : "-"
     }
 }
 
@@ -401,7 +383,7 @@ struct EngineHealthSnapshot: Equatable {
     var cycle: UInt64
     var cyclesPerSecond: Double
     var isAdvancing: Bool
-    var lmOutputs: LMJetEngineOutputs?
+    var lmOutputs: LMVehicleSnapshot?
 }
 
 struct BacktraceSnapshot: Identifiable, Equatable {
@@ -541,7 +523,10 @@ struct MissionControlRootView: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            registersSection
+            VStack(alignment: .leading, spacing: 20) {
+                registersSection
+                channelTraceSection
+            }
                 .frame(minWidth: 280, alignment: .topLeading)
         }
     }
@@ -603,8 +588,9 @@ struct MissionControlRootView: View {
                             : "CPU idle"
                     )
                     if let lm = health.lmOutputs {
-                        gridRow(label: "LM CH5", value: String(format: "%05o", lm.channel5))
-                        gridRow(label: "LM CH6", value: String(format: "%05o", lm.channel6))
+                        gridRow(label: "LM OUT0", value: String(format: "%05o", lm.out0))
+                        gridRow(label: "LM OUT1", value: String(format: "%05o", lm.out1))
+                        gridRow(label: "RCS commands", value: "\(lm.rcsJets.count)")
                     }
                     gridRow(label: "Radar data hooks", value: "\(viewModel.radarHookInvocations)")
                 }
@@ -702,9 +688,9 @@ struct MissionControlRootView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("R1 \(dsky.r1Text)")
-                                Text("R2 \(dsky.r2Text)")
-                                Text("R3 \(dsky.r3Text)")
+                                Text("R1 \(dsky.r1)")
+                                Text("R2 \(dsky.r2)")
+                                Text("R3 \(dsky.r3)")
                             }
                             .font(.system(.title3, design: .monospaced))
                             HStack(spacing: 12) {
@@ -717,7 +703,7 @@ struct MissionControlRootView: View {
                                     Text("VERB")
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
-                                    Text(dsky.verbDigits)
+                                    Text(dsky.verb)
                                         .font(.system(.title3, design: .monospaced))
                                         .foregroundColor(dsky.verbNounFlash ? .yellow : .primary)
                                 }
@@ -725,28 +711,28 @@ struct MissionControlRootView: View {
                                     Text("NOUN")
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
-                                    Text(dsky.nounDigits)
+                                    Text(dsky.noun)
                                         .font(.system(.title3, design: .monospaced))
                                         .foregroundColor(dsky.verbNounFlash ? .yellow : .primary)
                                 }
                                 Spacer()
                                 VStack(alignment: .leading) {
-                                    Text(dsky.proOn ? "PRO ON" : "PRO")
+                                    Text(dsky.proKeyPressed ? "PRO ON" : "PRO")
                                         .font(.caption2)
-                                        .foregroundColor(dsky.proOn ? .green : .secondary)
-                                    Text(dsky.keyRelOn ? "KEY REL ON" : "KEY REL")
+                                        .foregroundColor(dsky.proKeyPressed ? .green : .secondary)
+                                    Text(dsky.indicatorIsOn(14) ? "KEY REL ON" : "KEY REL")
                                         .font(.caption2)
-                                        .foregroundColor(dsky.keyRelOn ? .yellow : .secondary)
+                                        .foregroundColor(dsky.indicatorIsOn(14) ? .yellow : .secondary)
                                 }
                             }
                         }
                     }
                     HStack(spacing: 12) {
-                        Text("Cycle \(dsky.cycle)")
-                        Text("Ch 10: \(octal(dsky.channel10))")
-                        Text("Ch 11: \(String(format: "%05o", dsky.input11))")
-                        Text("Ch 13: \(String(format: "%05o", dsky.input13))")
-                        Text("Ch 163: \(String(format: "%05o", dsky.output163))")
+                        Text("Cycle \(viewModel.latestSnapshot?.cycle ?? 0)")
+                        Text("Ch 10 rows: \(dsky.channel10Rows.filter { $0 != 0 }.count)")
+                        Text("Ch 11: \(String(format: "%05o", dsky.channel11))")
+                        Text("Ch 13: \(String(format: "%05o", dsky.channel13))")
+                        Text("Ch 163: \(String(format: "%05o", dsky.channel163))")
                     }
                     .font(.caption2)
                     .foregroundColor(.secondary)
@@ -767,9 +753,8 @@ struct MissionControlRootView: View {
             HStack(spacing: 8) {
                 ForEach(quickSequences) { sequence in
                     Button(sequence.label) {
-                        viewModel.sendDSKYSequence(
-                            label: sequence.label,
-                            keys: sequence.keys,
+                        viewModel.sendDSKYScript(
+                            sequence.script,
                             autoRunCyclesWhenIdle: MissionControlViewModel.idleSequenceValidationCycles
                         )
                     }
@@ -786,7 +771,7 @@ struct MissionControlRootView: View {
                     HStack(spacing: 8) {
                         ForEach(row) { key in
                             Button {
-                                viewModel.pressKey(channel: key.channel, value: key.value)
+                                viewModel.pressKey(key.code)
                             } label: {
                                 Text(key.label)
                                     .font(.body)
@@ -817,13 +802,31 @@ struct MissionControlRootView: View {
                     gridRow(label: "L", value: octal(snapshot.l))
                     gridRow(label: "Q", value: octal(snapshot.q))
                     gridRow(label: "Z", value: octal(snapshot.z))
-                    gridRow(label: "Index", value: octal(snapshot.index))
+                    gridRow(label: "BB", value: octal(snapshot.index))
                     gridRow(label: "Flags", value: snapshot.statusFlags)
                 }
                 .font(.system(.body, design: .monospaced))
             } else {
                 Text("No runtime data yet")
                     .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var channelTraceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Channel Trace")
+                .font(.headline)
+            if viewModel.latestChannelTrace.isEmpty {
+                Text("No channel activity yet")
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(viewModel.latestChannelTrace.suffix(14)) { entry in
+                        Text("\(entry.direction.rawValue.uppercased())  \(String(format: "%03o", entry.channel))  \(String(format: "%05o", entry.value))")
+                    }
+                }
+                .font(.system(.caption, design: .monospaced))
             }
         }
     }
@@ -865,66 +868,42 @@ struct MissionControlRootView: View {
 
     private var quickSequences: [QuickDSKYSequence] {
         [
-            QuickDSKYSequence(
-                label: "V35E lamp",
-                keys: [
-                    DSKYKey(label: "VERB", channel: 0o15, value: 0o21, accent: true),
-                    DSKYKey(label: "3", channel: 0o15, value: 0o3, accent: false),
-                    DSKYKey(label: "5", channel: 0o15, value: 0o5, accent: false),
-                    DSKYKey(label: "ENTR", channel: 0o15, value: 0o34, accent: true),
-                ]
-            ),
-            QuickDSKYSequence(
-                label: "V16N36E",
-                keys: [
-                    DSKYKey(label: "VERB", channel: 0o15, value: 0o21, accent: true),
-                    DSKYKey(label: "1", channel: 0o15, value: 0o1, accent: false),
-                    DSKYKey(label: "6", channel: 0o15, value: 0o6, accent: false),
-                    DSKYKey(label: "NOUN", channel: 0o15, value: 0o37, accent: true),
-                    DSKYKey(label: "3", channel: 0o15, value: 0o3, accent: false),
-                    DSKYKey(label: "6", channel: 0o15, value: 0o6, accent: false),
-                    DSKYKey(label: "ENTR", channel: 0o15, value: 0o34, accent: true),
-                ]
-            ),
-            QuickDSKYSequence(
-                label: "RSET",
-                keys: [
-                    DSKYKey(label: "RSET", channel: 0o15, value: 0o22, accent: true),
-                ]
-            ),
+            QuickDSKYSequence(script: .v35e),
+            QuickDSKYSequence(script: .v16n36e),
+            QuickDSKYSequence(script: .reset),
         ]
     }
 
     private var keypadRows: [[DSKYKey]] {
         [
             [
-                DSKYKey(label: "VERB", channel: 0o15, value: 0o21, accent: true),
-                DSKYKey(label: "NOUN", channel: 0o15, value: 0o37, accent: true),
-                DSKYKey(label: "PRO", channel: 0o13, value: 0o2000, accent: true),
-                DSKYKey(label: "KEY REL", channel: 0o15, value: 0o31, accent: true),
+                DSKYKey(code: .verb, accent: true),
+                DSKYKey(code: .noun, accent: true),
+                DSKYKey(code: .pro, accent: true),
+                DSKYKey(code: .keyRelease, accent: true),
             ],
             [
-                DSKYKey(label: "7", channel: 0o15, value: 0o7, accent: false),
-                DSKYKey(label: "8", channel: 0o15, value: 8, accent: false),
-                DSKYKey(label: "9", channel: 0o15, value: 9, accent: false),
-                DSKYKey(label: "+", channel: 0o15, value: 0o32, accent: true),
+                DSKYKey(code: .digit7, accent: false),
+                DSKYKey(code: .digit8, accent: false),
+                DSKYKey(code: .digit9, accent: false),
+                DSKYKey(code: .plus, accent: true),
             ],
             [
-                DSKYKey(label: "4", channel: 0o15, value: 0o4, accent: false),
-                DSKYKey(label: "5", channel: 0o15, value: 0o5, accent: false),
-                DSKYKey(label: "6", channel: 0o15, value: 0o6, accent: false),
-                DSKYKey(label: "-", channel: 0o15, value: 0o33, accent: true),
+                DSKYKey(code: .digit4, accent: false),
+                DSKYKey(code: .digit5, accent: false),
+                DSKYKey(code: .digit6, accent: false),
+                DSKYKey(code: .minus, accent: true),
             ],
             [
-                DSKYKey(label: "1", channel: 0o15, value: 0o1, accent: false),
-                DSKYKey(label: "2", channel: 0o15, value: 0o2, accent: false),
-                DSKYKey(label: "3", channel: 0o15, value: 0o3, accent: false),
-                DSKYKey(label: "ENTR", channel: 0o15, value: 0o34, accent: true),
+                DSKYKey(code: .digit1, accent: false),
+                DSKYKey(code: .digit2, accent: false),
+                DSKYKey(code: .digit3, accent: false),
+                DSKYKey(code: .enter, accent: true),
             ],
             [
-                DSKYKey(label: "CLR", channel: 0o15, value: 0o36, accent: true),
-                DSKYKey(label: "0", channel: 0o15, value: 0o20, accent: false),
-                DSKYKey(label: "RSET", channel: 0o15, value: 0o22, accent: true),
+                DSKYKey(code: .clear, accent: true),
+                DSKYKey(code: .digit0, accent: false),
+                DSKYKey(code: .reset, accent: true),
             ]
         ]
     }
@@ -942,18 +921,19 @@ struct MissionControlRootView: View {
     }
 
     @ViewBuilder
-    private func indicatorCell(for id: Int?, state: DSKYState) -> some View {
-        if let id, let definition = DSKYIndicatorDefinition.luminaryByID[id] {
+    private func indicatorCell(for id: Int?, state: DSKYSnapshot) -> some View {
+        if let id {
             let isOn = state.indicatorIsOn(id)
+            let label = DSKYIndicatorLabel.labels[id]
             HStack(spacing: 6) {
                 Circle()
                     .frame(width: 10, height: 10)
                     .foregroundColor(state.lampTest ? .yellow : (isOn ? .yellow : .gray.opacity(0.5)))
-                    .opacity(definition.label == nil ? 0.3 : 1)
-                Text(definition.label ?? "")
+                    .opacity(label == nil ? 0.3 : 1)
+                Text(label ?? "")
                     .font(.caption2)
-                    .foregroundColor(definition.label == nil ? .secondary : .primary)
-                    .opacity(definition.label == nil ? 0.4 : 1)
+                    .foregroundColor(label == nil ? .secondary : .primary)
+                    .opacity(label == nil ? 0.4 : 1)
             }
         } else {
             Spacer(minLength: 64)
@@ -962,13 +942,15 @@ struct MissionControlRootView: View {
 }
 
 struct DSKYKey: Identifiable {
-    let label: String
-    let channel: Int
-    let value: Int
+    let code: DSKYKeyCode
     let accent: Bool
 
     var id: String {
-        "\(label)-\(channel)-\(value)"
+        code.label
+    }
+
+    var label: String {
+        code.label
     }
 
     var backgroundColor: Color {
@@ -984,137 +966,27 @@ struct DSKYKey: Identifiable {
 }
 
 struct QuickDSKYSequence: Identifiable {
-    let label: String
-    let keys: [DSKYKey]
+    let script: DSKYScript
 
-    var id: String { label }
+    var id: String { script.id }
+    var label: String { script.id }
 }
 
-struct DSKYState {
-    let channel10: Int
-    let input11: Int
-    let input13: Int
-    let output163: Int
-    let cycle: UInt64
-    let r1Text: String
-    let r2Text: String
-    let r3Text: String
-    let verbDigits: String
-    let nounDigits: String
-    let plusSign: Bool
-    let verbNounFlash: Bool
-    let proOn: Bool
-    let keyRelOn: Bool
-    let lampTest: Bool
-    let compActy: Bool
-    private let indicatorStatuses: [Int: Bool]
-
-    init(state: AGCState) {
-        channel10 = state.outputChannels[0o10]
-        input11 = state.inputChannels[0o11]
-        input13 = state.inputChannels[0o13]
-        output163 = state.dskyChannel163
-        cycle = state.cycleCounter
-
-        let digits = String(format: "%05o", channel10 & 0o77777)
-        plusSign = (channel10 & 0o40000) == 0
-        r1Text = (plusSign ? "+" : "-") + digits
-        r2Text = "—"
-        r3Text = "—"
-        verbDigits = String(digits.prefix(2))
-        nounDigits = String(digits.dropFirst(2).prefix(2))
-        verbNounFlash = (state.inputChannels[0o11] & 0o40) != 0
-        proOn = (state.inputChannels[0o13] & 0o40000) != 0
-        keyRelOn = (state.inputChannels[0o11] & 0o20) != 0
-        lampTest = (state.inputChannels[0o13] & 0o1000) != 0
-        compActy = (input11 & 0o2) != 0
-
-        var statuses: [Int: Bool] = [:]
-        for definition in DSKYIndicatorDefinition.luminaryDefinitions {
-            statuses[definition.id] = DSKYIndicatorDefinition.evaluate(definition, state: state)
-        }
-        indicatorStatuses = statuses
-    }
-
-    init(state: AGCState, dsky: DSKY) {
-        channel10 = state.outputChannels[0o10]
-        input11 = dsky.channel11
-        input13 = dsky.channel13
-        output163 = dsky.channel163
-        cycle = state.cycleCounter
-        r1Text = dsky.formatRegister(dsky.r1)
-        r2Text = dsky.formatRegister(dsky.r2)
-        r3Text = dsky.formatRegister(dsky.r3)
-        verbDigits = dsky.formatVerb()
-        nounDigits = dsky.formatNoun()
-        plusSign = dsky.r1.sign == "+"
-        verbNounFlash = dsky.verbNounFlash
-        proOn = !dsky.proKeyPressed
-        keyRelOn = dsky.indicatorIsOn(14)
-        lampTest = dsky.lampTest
-        compActy = dsky.compActy
-
-        var statuses: [Int: Bool] = [:]
-        for id in [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27] {
-            statuses[id] = dsky.indicatorIsOn(id)
-        }
-        indicatorStatuses = statuses
-    }
-
-    func indicatorIsOn(_ id: Int) -> Bool {
-        indicatorStatuses[id] ?? false
-    }
-}
-
-struct DSKYIndicatorDefinition {
-    let id: Int
-    let label: String?
-    let channel: Int
-    let bitPosition: Int
-    let polarity: Int
-    let mask: Int?
-    let match: Int?
-
-    static let luminaryDefinitions: [DSKYIndicatorDefinition] = [
-        DSKYIndicatorDefinition(id: 11, label: "UPLINK ACTY", channel: 0o11, bitPosition: 3, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 12, label: "NO ATT", channel: 0o10, bitPosition: 4, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 13, label: "STBY", channel: 0o163, bitPosition: 9, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 14, label: "KEY REL", channel: 0o163, bitPosition: 5, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 15, label: "OPER ERR", channel: 0o163, bitPosition: 7, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 16, label: nil, channel: 0o10, bitPosition: 1, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 17, label: nil, channel: 0o10, bitPosition: 2, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 21, label: "TEMP", channel: 0o163, bitPosition: 4, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 22, label: "GIMBAL LOCK", channel: 0o10, bitPosition: 6, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 23, label: "PROG", channel: 0o10, bitPosition: 9, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 24, label: "RESTART", channel: 0o163, bitPosition: 8, polarity: 0, mask: nil, match: nil),
-        DSKYIndicatorDefinition(id: 25, label: "TRACKER", channel: 0o10, bitPosition: 8, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 26, label: "ALT", channel: 0o10, bitPosition: 5, polarity: 0, mask: 0o74000, match: 0o60000),
-        DSKYIndicatorDefinition(id: 27, label: "VEL", channel: 0o10, bitPosition: 3, polarity: 0, mask: 0o74000, match: 0o60000),
+enum DSKYIndicatorLabel {
+    static let labels: [Int: String] = [
+        11: "UPLINK ACTY",
+        12: "NO ATT",
+        13: "STBY",
+        14: "KEY REL",
+        15: "OPER ERR",
+        21: "TEMP",
+        22: "GIMBAL LOCK",
+        23: "PROG",
+        24: "RESTART",
+        25: "TRACKER",
+        26: "ALT",
+        27: "VEL"
     ]
-
-    static let luminaryByID: [Int: DSKYIndicatorDefinition] = .init(uniqueKeysWithValues: luminaryDefinitions.map { ($0.id, $0) })
-
-    static func evaluate(_ definition: DSKYIndicatorDefinition, state: AGCState) -> Bool {
-        let channelValue: Int
-        if definition.channel == 0o163 {
-            channelValue = state.dskyChannel163
-        } else {
-            channelValue = state.outputChannels[definition.channel]
-        }
-
-        if let mask = definition.mask, let match = definition.match {
-            guard (channelValue & mask) == match else {
-                return false
-            }
-        }
-
-        let bitMask = 1 << (definition.bitPosition - 1)
-        var isOn = (channelValue & bitMask) != 0
-        if definition.polarity != 0 {
-            isOn.toggle()
-        }
-        return isOn
-    }
 }
 #Preview {
     MissionControlRootView(viewModel: MissionControlViewModel())

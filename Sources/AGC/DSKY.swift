@@ -2,23 +2,16 @@ import Foundation
 
 /// DSKY (Display/Keyboard) implementation for Apollo Guidance Computer
 /// Handles bidirectional communication with AGC via I/O channels
-public final class DSKY: AGCIOProtocol {
-    /// Reference to AGC engine for sending inputs
-    private weak var agcEngine: AGCEngine?
-    
-    /// Channel masks for partial updates (default: all bits writable)
-    private var channelMasks: [Int: Int] = [:]
-    
+public final class DSKY: AGCIOProtocol, @unchecked Sendable {
     private actor KeypressQueueActor {
-        var queue: [(channel: Int, value: Int)] = []
+        var queue: [AGCChannelInput] = []
 
-        func append(_ item: (channel: Int, value: Int)) {
+        func append(_ item: AGCChannelInput) {
             queue.append(item)
         }
 
         /// Returns one queued I/O event per call so multi-key sequences are not collapsed.
-        /// Merging several channel-15 writes into one dictionary per poll dropped all but the last keycode.
-        func dequeueOne() -> (channel: Int, value: Int)? {
+        func dequeueOne() -> AGCChannelInput? {
             guard !queue.isEmpty else { return nil }
             return queue.removeFirst()
         }
@@ -100,14 +93,7 @@ public final class DSKY: AGCIOProtocol {
     
     // MARK: - Initialization
     
-    public init(agcEngine: AGCEngine? = nil) {
-        self.agcEngine = agcEngine
-        
-        // Initialize channel masks (all bits writable by default)
-        for i in 0..<256 {
-            channelMasks[i] = 0o77777
-        }
-        
+    public init() {
         // Initialize indicator states
         for id in [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27] {
             indicators[id] = IndicatorState()
@@ -135,9 +121,9 @@ public final class DSKY: AGCIOProtocol {
         }
     }
     
-    public func channelInput() async -> [Int: Int]? {
+    public func channelInput() async -> [AGCChannelInput]? {
         guard let item = await keypressActor.dequeueOne() else { return nil }
-        return [item.channel: item.value]
+        return [item]
     }
     
     public func requestRadarData() {
@@ -379,14 +365,24 @@ public final class DSKY: AGCIOProtocol {
     /// Send a keypress to the AGC
     /// - Parameter keycode: Keycode value (matching yaDSKY callbacks.c)
     public func sendKeycode(_ keycode: Int) async {
-        await keypressActor.append((channel: 0o15, value: keycode & 0o77777))
+        await keypressActor.append(AGCChannelInput(channel: 0o15, value: keycode & 0o77777))
+    }
+
+    /// Send a typed DSKY key to the AGC.
+    public func send(_ key: DSKYKeyCode) async {
+        switch key {
+        case .pro:
+            await sendProKey(true)
+        default:
+            await sendKeycode(key.rawValue)
+        }
     }
     
     /// Send PRO key press state
     /// - Parameter pressed: true when pressed, false when released
     public func sendProKey(_ pressed: Bool) async {
-        await keypressActor.append((channel: 0o432, value: 0o20000))
-        await keypressActor.append((channel: 0o13, value: pressed ? 0 : 0o20000))
+        await keypressActor.append(AGCChannelInput(channel: 0o432, value: 0o20000))
+        await keypressActor.append(AGCChannelInput(channel: 0o13, value: pressed ? 0 : 0o20000))
     }
     
     // MARK: - Display Helpers
@@ -409,5 +405,30 @@ public final class DSKY: AGCIOProtocol {
 
     private func formatDigit(_ digit: Int) -> String {
         return digit >= 0 ? String(digit) : " "
+    }
+
+    public var snapshot: DSKYSnapshot {
+        var statuses: [Int: Bool] = [:]
+        for id in DSKYSnapshot.indicatorIDs {
+            statuses[id] = indicatorIsOn(id)
+        }
+
+        return DSKYSnapshot(
+            channel10Rows: channel10Rows,
+            channel11: channel11,
+            channel13: channel13,
+            channel163: channel163,
+            r1: formatRegister(r1),
+            r2: formatRegister(r2),
+            r3: formatRegister(r3),
+            verb: formatVerb(),
+            noun: formatNoun(),
+            mode: modeDigits.map(formatDigit).joined(),
+            verbNounFlash: verbNounFlash,
+            lampTest: lampTest,
+            compActy: compActy,
+            proKeyPressed: proKeyPressed,
+            indicators: statuses
+        )
     }
 }
