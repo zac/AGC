@@ -1,7 +1,7 @@
 import AGC
 import Foundation
 
-public struct LMSourceReference: Equatable, Sendable, Identifiable {
+public struct LMSourceReference: Equatable, Sendable, Identifiable, Codable {
     public let id: String
     public let title: String
     public let url: String?
@@ -15,6 +15,91 @@ public struct LMSourceReference: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct LMSourceLocator: Equatable, Sendable, Codable {
+    public let reference: LMSourceReference
+    public let section: String?
+    public let detail: String
+
+    public init(reference: LMSourceReference, section: String? = nil, detail: String) {
+        self.reference = reference
+        self.section = section
+        self.detail = detail
+    }
+}
+
+public struct LMModelingStatus: Equatable, Sendable, Codable {
+    public let isSourceBacked: Bool
+    public let detail: String
+    public let source: LMSourceLocator?
+
+    public init(isSourceBacked: Bool, detail: String, source: LMSourceLocator? = nil) {
+        self.isSourceBacked = isSourceBacked
+        self.detail = detail
+        self.source = source
+    }
+
+    public static func sourceBacked(detail: String, source: LMSourceLocator) -> LMModelingStatus {
+        LMModelingStatus(isSourceBacked: true, detail: detail, source: source)
+    }
+
+    public static func unmodeled(_ detail: String) -> LMModelingStatus {
+        LMModelingStatus(isSourceBacked: false, detail: detail)
+    }
+}
+
+public extension LMSourceReference {
+    static let luminaryIOChannels = LMSourceReference(
+        id: "luminary099-input-output-channel-bit-descriptions",
+        title: "Luminary099 input/output channel bit descriptions",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc",
+        detail: "Primary source for named AGC input/output channel bits."
+    )
+
+    static let luminaryQRCSAutopilot = LMSourceReference(
+        id: "luminary099-q-r-axis-rcs-autopilot",
+        title: "Luminary099 Q/R-axis RCS autopilot",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/Q_R-AXIS_RCS_AUTOPILOT.agc",
+        detail: "Source for channel 005 ALLJETS bit-to-jet table."
+    )
+
+    static let luminaryPRCSAutopilot = LMSourceReference(
+        id: "luminary099-p-axis-rcs-autopilot",
+        title: "Luminary099 P-axis RCS autopilot",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/P-AXIS_RCS_AUTOPILOT.agc",
+        detail: "Source for channel 006 pitch RCS group masks."
+    )
+
+    static let yaAGCRadarRequest = LMSourceReference(
+        id: "yaagc-radar-request",
+        title: "yaAGC radar request path",
+        detail: "references/yaAGC/agc_engine.c documents radar gate completion loading RNRAD with radar data."
+    )
+}
+
+public extension LMSourceLocator {
+    static let luminaryIOChannels = LMSourceLocator(
+        reference: .luminaryIOChannels,
+        detail: "Named bit mapping from INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc."
+    )
+
+    static let channel5RCSJets = LMSourceLocator(
+        reference: .luminaryQRCSAutopilot,
+        section: "ALLJETS",
+        detail: "Channel 005 bit-to-jet mapping from the ALLJETS table."
+    )
+
+    static let channel6RCSGroups = LMSourceLocator(
+        reference: .luminaryPRCSAutopilot,
+        section: "JETSALL",
+        detail: "Channel 006 pitch RCS group masks from the JETSALL table."
+    )
+
+    static let yaAGCRadarRequest = LMSourceLocator(
+        reference: .yaAGCRadarRequest,
+        detail: "Raw radar register word injection follows the yaAGC radar request hook."
+    )
+}
+
 public struct LMSourceValue<Value: Equatable & Sendable>: Equatable, Sendable {
     public let value: Value
     public let source: LMSourceReference
@@ -25,7 +110,9 @@ public struct LMSourceValue<Value: Equatable & Sendable>: Equatable, Sendable {
     }
 }
 
-public struct LMVector3D: Equatable, Sendable {
+extension LMSourceValue: Codable where Value: Codable {}
+
+public struct LMVector3D: Equatable, Sendable, Codable {
     public let x: Double
     public let y: Double
     public let z: Double
@@ -85,7 +172,7 @@ public struct LMVector3D: Equatable, Sendable {
     }
 }
 
-public struct LMQuaternion: Equatable, Sendable {
+public struct LMQuaternion: Equatable, Sendable, Codable {
     public let w: Double
     public let x: Double
     public let y: Double
@@ -136,7 +223,7 @@ public struct LMQuaternion: Equatable, Sendable {
     }
 }
 
-public struct LMMainEngineConfiguration: Equatable, Sendable {
+public struct LMMainEngineConfiguration: Equatable, Sendable, Codable {
     public let maximumRatedThrustNewtons: LMSourceValue<Double>
     public let engineOnThrustNewtons: LMSourceValue<Double>?
 
@@ -149,7 +236,7 @@ public struct LMMainEngineConfiguration: Equatable, Sendable {
     }
 }
 
-public struct LMRCSJetConfiguration: Equatable, Sendable {
+public struct LMRCSJetConfiguration: Equatable, Sendable, Codable {
     public let jet: LMRCSJet
     public let positionMeters: LMSourceValue<LMVector3D>
     public let thrustDirectionBody: LMSourceValue<LMVector3D>
@@ -168,7 +255,7 @@ public struct LMRCSJetConfiguration: Equatable, Sendable {
     }
 }
 
-public struct LMVehicleConfiguration: Equatable, Sendable {
+public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
     public let lunarGravityMetersPerSecondSquared: LMSourceValue<Double>
     public let agcCyclesPerSecond: LMSourceValue<Double>
     public let mainEngine: LMMainEngineConfiguration?
@@ -245,7 +332,7 @@ public struct LMVehicleConfiguration: Equatable, Sendable {
     )
 }
 
-public struct LMVehicleStateSnapshot: Equatable, Sendable {
+public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public let positionMeters: LMVector3D
     public let velocityMetersPerSecond: LMVector3D
     public let attitude: LMQuaternion
@@ -297,7 +384,7 @@ public struct LMSensorSnapshot: Equatable, Sendable {
     }
 }
 
-public struct LMSourceStatus: Equatable, Sendable {
+public struct LMSourceStatus: Equatable, Sendable, Codable {
     public let sources: [LMSourceReference]
     public let unmodeledItems: [String]
 
@@ -308,27 +395,33 @@ public struct LMSourceStatus: Equatable, Sendable {
 }
 
 public struct LMSimulationSnapshot: Equatable, Sendable {
+    public let timeSeconds: Double
     public let agc: AGCSnapshot
     public let vehicleState: LMVehicleStateSnapshot
     public let vehicleCommands: LMVehicleSnapshot
     public let sensorState: LMSensorSnapshot
     public let channelTrace: [AGCChannelTraceEntry]
     public let sourceStatus: LMSourceStatus
+    public let traceSample: LMSimulationTraceSample
 
     public init(
+        timeSeconds: Double,
         agc: AGCSnapshot,
         vehicleState: LMVehicleStateSnapshot,
         vehicleCommands: LMVehicleSnapshot,
         sensorState: LMSensorSnapshot,
         channelTrace: [AGCChannelTraceEntry],
-        sourceStatus: LMSourceStatus
+        sourceStatus: LMSourceStatus,
+        traceSample: LMSimulationTraceSample
     ) {
+        self.timeSeconds = timeSeconds
         self.agc = agc
         self.vehicleState = vehicleState
         self.vehicleCommands = vehicleCommands
         self.sensorState = sensorState
         self.channelTrace = channelTrace
         self.sourceStatus = sourceStatus
+        self.traceSample = traceSample
     }
 }
 
@@ -424,6 +517,9 @@ public actor LMSimulationRuntime {
     private var rhcInput = LMRotationalHandControllerInput()
     private var descentRateChannel16 = 0
     private var cycleRemainder = 0.0
+    private var elapsedTimeSeconds = 0.0
+    private var lastTraceEntryID: UInt64 = 0
+    private var traceSamples: [LMSimulationTraceSample] = []
     private var scenarioSourceStatus: LMSourceStatus?
 
     public init(
@@ -472,15 +568,23 @@ public actor LMSimulationRuntime {
         let agc = try await agcRuntime.reset()
         vehicleState = initialState
         cycleRemainder = 0
-        return makeSnapshot(agc: agc)
+        elapsedTimeSeconds = 0
+        lastTraceEntryID = 0
+        traceSamples.removeAll()
+        return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
     public func snapshot() async -> LMSimulationSnapshot {
         let agc = await agcRuntime.snapshot()
-        return makeSnapshot(agc: agc)
+        return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
     public func step(deltaTime: Double) async -> LMSimulationSnapshot {
+        await step(deltaTime: deltaTime, input: .none)
+    }
+
+    public func step(deltaTime: Double, input: LMFrameInput) async -> LMSimulationSnapshot {
+        await applyFrameInput(input)
         let safeDelta = max(0, deltaTime)
         let totalCycles = safeDelta * configuration.agcCyclesPerSecond.value + cycleRemainder
         let cycles = UInt64(totalCycles.rounded(.down))
@@ -489,6 +593,11 @@ public actor LMSimulationRuntime {
     }
 
     public func step(cycles: UInt64) async -> LMSimulationSnapshot {
+        await step(cycles: cycles, input: .none)
+    }
+
+    public func step(cycles: UInt64, input: LMFrameInput) async -> LMSimulationSnapshot {
+        await applyFrameInput(input)
         let deltaTime = Double(cycles) / configuration.agcCyclesPerSecond.value
         return await stepExact(cycles: cycles, deltaTime: deltaTime)
     }
@@ -518,7 +627,7 @@ public actor LMSimulationRuntime {
 
     public func setRadarInput(_ input: LMRadarInput?) async {
         radarInput = input
-        await agcRuntime.setRadarInput(input)
+        await agcRuntime.setRadarInput(input?.rawAGCInput)
     }
 
     public func setRotationalHandControllerInput(_ input: LMRotationalHandControllerInput) async {
@@ -527,23 +636,39 @@ public actor LMSimulationRuntime {
     }
 
     public func setDescentRateControlInput(descendPlus: Bool, descendMinus: Bool) async {
-        var value = 0
-        if descendPlus {
-            value |= 0o20000
-        }
-        if descendMinus {
-            value |= 0o40000
-        }
-        descentRateChannel16 = value
-        await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: value))
+        let input = LMDescentRateControlInput(descendPlus: descendPlus, descendMinus: descendMinus)
+        descentRateChannel16 = input.channel16Value
+        await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: input.channel16Value))
     }
 
     public func channelTrace() async -> [AGCChannelTraceEntry] {
         await agcRuntime.channelTrace()
     }
 
+    public func simulationTrace() -> [LMSimulationTraceSample] {
+        traceSamples
+    }
+
+    private func applyFrameInput(_ input: LMFrameInput) async {
+        if let radarInput = input.radarInput {
+            await setRadarInput(radarInput)
+        }
+        if let rhcInput = input.rotationalHandControllerInput {
+            await setRotationalHandControllerInput(rhcInput)
+        }
+        if !input.rawChannelInputs.isEmpty {
+            await agcRuntime.enqueueInputs(input.rawChannelInputs)
+        }
+        if let descentRateInput = input.descentRateInput {
+            descentRateChannel16 = descentRateInput.channel16Value
+            await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: descentRateInput.channel16Value))
+        }
+    }
+
     private func stepExact(cycles: UInt64, deltaTime: Double) async -> LMSimulationSnapshot {
+        elapsedTimeSeconds += deltaTime
         let agc = await agcRuntime.step(cycles: cycles)
+        let channelDeltas = traceDeltas(from: agc.channelTrace)
         let commands = LMVehicleSnapshot(agcSnapshot: agc)
         vehicleState = LMDynamics.propagate(
             state: vehicleState,
@@ -551,29 +676,49 @@ public actor LMSimulationRuntime {
             configuration: configuration,
             deltaTime: deltaTime
         )
-        return makeSnapshot(agc: agc)
+        let snapshot = makeSnapshot(agc: agc, channelDeltas: channelDeltas)
+        traceSamples.append(snapshot.traceSample)
+        if traceSamples.count > 2_048 {
+            traceSamples.removeFirst(traceSamples.count - 2_048)
+        }
+        return snapshot
     }
 
-    private func makeSnapshot(agc: AGCSnapshot) -> LMSimulationSnapshot {
+    private func makeSnapshot(agc: AGCSnapshot, channelDeltas: [AGCChannelTraceEntry]) -> LMSimulationSnapshot {
         let commands = LMVehicleSnapshot(agcSnapshot: agc)
-        return LMSimulationSnapshot(
+        let sourceStatus = makeSourceStatus(commands: commands)
+        let sensorState = LMSensorSnapshot(
+            radarInput: radarInput,
+            rotationalHandControllerInput: rhcInput,
+            descentRateChannel16: descentRateChannel16
+        )
+        let traceSample = LMSimulationTraceSample(
+            timeSeconds: elapsedTimeSeconds,
             agc: agc,
             vehicleState: vehicleState,
             vehicleCommands: commands,
-            sensorState: LMSensorSnapshot(
-                radarInput: radarInput,
-                rotationalHandControllerInput: rhcInput,
-                descentRateChannel16: descentRateChannel16
-            ),
+            sourceStatus: sourceStatus,
+            channelDeltas: channelDeltas
+        )
+        return LMSimulationSnapshot(
+            timeSeconds: elapsedTimeSeconds,
+            agc: agc,
+            vehicleState: vehicleState,
+            vehicleCommands: commands,
+            sensorState: sensorState,
             channelTrace: agc.channelTrace,
-            sourceStatus: makeSourceStatus(commands: commands)
+            sourceStatus: sourceStatus,
+            traceSample: traceSample
         )
     }
 
     private func makeSourceStatus(commands: LMVehicleSnapshot) -> LMSourceStatus {
         var unmodeled = scenarioSourceStatus?.unmodeledItems ?? []
         if commands.mainEngineOn, configuration.mainEngine?.engineOnThrustNewtons == nil {
-            unmodeled.append("DPS engine-on command is decoded, but AGC throttle-to-thrust mapping is unmodeled.")
+            unmodeled.append(commands.dps.throttleMappingStatus.detail)
+        }
+        if let radarInput, !radarInput.conversionStatus.isSourceBacked {
+            unmodeled.append(radarInput.conversionStatus.detail)
         }
         for jet in commands.rcsJets where configuration.rcsJets[jet.jet] == nil {
             unmodeled.append("RCS jet \(jet.jet.rawValue) command is decoded, but sourced geometry/thrust is missing.")
@@ -581,12 +726,23 @@ public actor LMSimulationRuntime {
         if vehicleState.massKilograms == nil {
             unmodeled.append("Vehicle mass is unknown, so non-gravity forces cannot change translation.")
         }
-        let sources = (scenarioSourceStatus?.sources ?? []) + configuration.sourceReferences
+        let sources = (scenarioSourceStatus?.sources ?? [])
+            + configuration.sourceReferences
+            + commands.sourceReferences
+            + [radarInput?.conversionStatus.source?.reference].compactMap { $0 }
         var seen = Set<String>()
         return LMSourceStatus(
             sources: sources.filter { seen.insert($0.id).inserted },
             unmodeledItems: Array(Set(unmodeled)).sorted()
         )
+    }
+
+    private func traceDeltas(from trace: [AGCChannelTraceEntry]) -> [AGCChannelTraceEntry] {
+        let deltas = trace.filter { $0.id > lastTraceEntryID }
+        if let newest = trace.last?.id {
+            lastTraceEntryID = newest
+        }
+        return deltas
     }
 }
 

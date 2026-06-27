@@ -89,7 +89,12 @@ struct MissionControlCommands: Commands {
             .disabled(!viewModel.canStep)
             .keyboardShortcut("]", modifiers: [.command, .shift])
 
-            Button("Export Channel Trace") {
+            Button("Export Trace JSON") {
+                viewModel.exportSimulationTraceJSON()
+            }
+            .disabled(viewModel.latestSimulationTrace.isEmpty)
+
+            Button("Export Channel Trace Text") {
                 viewModel.exportChannelTrace()
             }
             .disabled(viewModel.latestChannelTrace.isEmpty)

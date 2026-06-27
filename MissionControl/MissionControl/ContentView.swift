@@ -54,6 +54,8 @@ final class MissionControlViewModel {
     private(set) var recentEvents: [MissionControlEvent] = []
     private(set) var backtraceTail: [BacktraceSnapshot] = []
     private(set) var latestChannelTrace: [AGCChannelTraceEntry] = []
+    private(set) var latestSimulationTrace: [LMSimulationTraceSample] = []
+    private(set) var latestValidationResult: LMPoweredDescentValidationResult?
 
     @ObservationIgnored private var runtime: LMSimulationRuntime?
     @ObservationIgnored private var simulationTask: Task<Void, Never>?
@@ -106,6 +108,7 @@ final class MissionControlViewModel {
             lastHealthCycle = 0
             previousCycleForAdvance = 0
             smoothedCyclesPerSec = 0
+            resetValidationTrace()
             recordEvent("Loaded \(url.lastPathComponent)")
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -157,7 +160,7 @@ final class MissionControlViewModel {
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                let snapshot = await runtime.step(cycles: cyclesPerBatch)
+                let snapshot = await runtime.step(cycles: cyclesPerBatch, input: .none)
                 self.applySnapshot(snapshot)
                 await Task.yield()
             }
@@ -185,7 +188,7 @@ final class MissionControlViewModel {
         recordEvent("Running \(cycles.formatted()) cycles")
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let snapshot = await runtime.step(cycles: cycles)
+            let snapshot = await runtime.step(cycles: cycles, input: .none)
             self.isRunning = false
             self.simulationTask = nil
             self.status = .stopped
@@ -204,7 +207,7 @@ final class MissionControlViewModel {
         recordEvent("Stepping LM frame")
         simulationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let snapshot = await runtime.step(deltaTime: 1.0 / 60.0)
+            let snapshot = await runtime.step(deltaTime: 1.0 / 60.0, input: .none)
             self.isRunning = false
             self.simulationTask = nil
             self.status = .stopped
@@ -231,7 +234,7 @@ final class MissionControlViewModel {
             var snapshot = await runtime.snapshot()
             for _ in 0..<frames {
                 if Task.isCancelled { break }
-                snapshot = await runtime.step(deltaTime: frameDelta)
+                snapshot = await runtime.step(deltaTime: frameDelta, input: .none)
                 self.applySnapshot(snapshot)
                 await Task.yield()
             }
@@ -256,6 +259,7 @@ final class MissionControlViewModel {
             guard let self else { return }
             do {
                 let snapshot = try await runtime.reset()
+                self.resetValidationTrace()
                 self.isRunning = false
                 self.simulationTask = nil
                 self.status = .stopped
@@ -284,6 +288,25 @@ final class MissionControlViewModel {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(rows.joined(separator: "\n"), forType: .string)
         recordEvent("Copied \(latestChannelTrace.count) channel trace rows")
+    }
+
+    func exportSimulationTraceJSON() {
+        let export = MissionControlTraceExport(
+            program: selectedURL?.lastPathComponent ?? "No core image",
+            samples: latestSimulationTrace,
+            validation: latestValidationResult
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        do {
+            let data = try encoder.encode(export)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(String(decoding: data, as: UTF8.self), forType: .string)
+            recordEvent("Copied \(latestSimulationTrace.count) structured trace samples")
+        } catch {
+            recordEvent("Trace JSON export failed: \(error.localizedDescription)")
+        }
     }
     
     func stop() {
@@ -410,7 +433,7 @@ final class MissionControlViewModel {
                 if Task.isCancelled { break }
                 await runtime.sendDSKYKey(key)
                 if settleCycles > 0 {
-                    let snapshot = await runtime.step(cycles: settleCycles)
+                    let snapshot = await runtime.step(cycles: settleCycles, input: .none)
                     self.applySnapshot(snapshot)
                 }
             }
@@ -438,10 +461,16 @@ final class MissionControlViewModel {
 
     private func applySnapshot(_ snapshot: LMSimulationSnapshot) {
         latestLMSimulation = snapshot
+        appendTraceSample(snapshot.traceSample)
         latestSnapshot = RegisterSnapshot(snapshot: snapshot.agc)
         latestDSKY = snapshot.agc.dsky
         latestChannelTrace = Array(snapshot.channelTrace.suffix(80))
         backtraceTail = snapshot.agc.backtrace.suffix(8).map(BacktraceSnapshot.init)
+        latestValidationResult = LMPoweredDescentValidationResult(
+            scenario: poweredDescentScenario,
+            samples: latestSimulationTrace,
+            finalSnapshot: snapshot
+        )
         refreshEngineHealth(snapshot: snapshot)
     }
 
@@ -452,6 +481,20 @@ final class MissionControlViewModel {
         engineHealth = nil
         backtraceTail = []
         latestChannelTrace = []
+        resetValidationTrace()
+    }
+
+    private func appendTraceSample(_ sample: LMSimulationTraceSample) {
+        guard latestSimulationTrace.last != sample else { return }
+        latestSimulationTrace.append(sample)
+        if latestSimulationTrace.count > 2_048 {
+            latestSimulationTrace.removeFirst(latestSimulationTrace.count - 2_048)
+        }
+    }
+
+    private func resetValidationTrace() {
+        latestSimulationTrace = []
+        latestValidationResult = nil
     }
 
     private func recordEvent(_ message: String) {
@@ -512,6 +555,24 @@ struct MissionControlEvent: Identifiable, Equatable {
 
     var label: String {
         "\(timestamp.formatted(date: .omitted, time: .standard))  \(message)"
+    }
+}
+
+private struct MissionControlTraceExport: Codable {
+    let schema: String
+    let program: String
+    let samples: [LMSimulationTraceSample]
+    let validation: LMPoweredDescentValidationResult?
+
+    init(
+        program: String,
+        samples: [LMSimulationTraceSample],
+        validation: LMPoweredDescentValidationResult?
+    ) {
+        self.schema = "mission-control-lmcore-trace-v1"
+        self.program = program
+        self.samples = samples
+        self.validation = validation
     }
 }
 
@@ -952,6 +1013,7 @@ struct MissionControlRootView: View {
                         gridRow(label: "Input ch 016", value: octalWord(lm.inputChannel16))
                         gridRow(label: "Main engine", value: lm.mainEngineOn ? "ON command" : (lm.mainEngineOff ? "OFF command" : "No command"))
                         gridRow(label: "Thrust drive", value: lm.thrustDriveActive ? "Active" : "Inactive")
+                        gridRow(label: "Throttle map", value: lm.dps.throttleMappingStatus.isSourceBacked ? "source-backed" : "unmodeled")
                         gridRow(label: "Unmapped bits", value: "\(lm.unmappedBits.count)")
                     }
                     .font(.system(.caption, design: .monospaced))
@@ -1023,8 +1085,10 @@ struct MissionControlRootView: View {
                     .font(.system(.caption, design: .monospaced))
 
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
-                        gridRow(label: "Radar RNDZ", value: simulation.sensorState.radarInput?.rendezvousRadar.map(octalWord) ?? "-")
-                        gridRow(label: "Radar ALT", value: simulation.sensorState.radarInput?.altitudeMeter.map(octalWord) ?? "-")
+                        gridRow(label: "Radar RNDZ", value: rawRadarWord(simulation.sensorState.radarInput, keyPath: \.rendezvousRadarWord))
+                        gridRow(label: "Radar ALT", value: rawRadarWord(simulation.sensorState.radarInput, keyPath: \.altitudeMeterWord))
+                        gridRow(label: "Radar input", value: radarInputDescription(simulation.sensorState.radarInput))
+                        gridRow(label: "Radar conversion", value: radarStatusDescription(simulation.sensorState.radarInput))
                         gridRow(
                             label: "RHC",
                             value: "\(simulation.sensorState.rotationalHandControllerInput.pitch), \(simulation.sensorState.rotationalHandControllerInput.yaw), \(simulation.sensorState.rotationalHandControllerInput.roll)"
@@ -1059,7 +1123,12 @@ struct MissionControlRootView: View {
                     }
                     .disabled(!viewModel.canStep)
 
-                    Button("Export Trace") {
+                    Button("Export JSON") {
+                        viewModel.exportSimulationTraceJSON()
+                    }
+                    .disabled(viewModel.latestSimulationTrace.isEmpty)
+
+                    Button("Export Ch Text") {
                         viewModel.exportChannelTrace()
                     }
                     .disabled(viewModel.latestChannelTrace.isEmpty)
@@ -1455,17 +1524,40 @@ struct MissionControlRootView: View {
     }
 
     private func checkpointActualStatus(_ checkpoint: LMPoweredDescentCheckpoint) -> String {
-        let expected = checkpoint.expectedScript.keys.map(\.rawValue)
-        let channel15 = viewModel.latestChannelTrace
-            .filter { $0.direction == .input && $0.channel == 0o15 }
-            .map(\.value)
-        guard channel15.count >= expected.count else {
-            return "Expected \(checkpoint.expectedScript.id); no complete key trace yet"
+        guard let result = viewModel.latestValidationResult?.checkpointResults.first(where: { $0.id == checkpoint.id }) else {
+            return "Expected \(checkpoint.expectedScript.id); no validation samples yet"
         }
-        let suffix = Array(channel15.suffix(expected.count))
-        return suffix == expected
-            ? "Matched recent key trace"
-            : "Expected \(checkpoint.expectedScript.id); latest trace differs"
+
+        let prefix: String
+        switch result.status {
+        case .observed:
+            prefix = "Observed"
+        case .partial:
+            prefix = "Partial"
+        case .notObserved:
+            prefix = "Waiting"
+        }
+        return ([prefix] + result.evidence).joined(separator: ": ")
+    }
+
+    private func radarInputDescription(_ input: LMRadarInput?) -> String {
+        guard let input else { return "-" }
+        switch input {
+        case .raw:
+            return "raw AGC words"
+        case .measurement:
+            return "SI measurement"
+        }
+    }
+
+    private func radarStatusDescription(_ input: LMRadarInput?) -> String {
+        guard let input else { return "-" }
+        return input.conversionStatus.isSourceBacked ? "source-backed" : "unmodeled"
+    }
+
+    private func rawRadarWord(_ input: LMRadarInput?, keyPath: KeyPath<LMRadarRawInput, Int?>) -> String {
+        guard case .raw(let raw) = input else { return "-" }
+        return raw[keyPath: keyPath].map(octalWord) ?? "-"
     }
 
     private func traceEntries(limit: Int?) -> [AGCChannelTraceEntry] {

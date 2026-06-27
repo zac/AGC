@@ -1,10 +1,9 @@
 import AGC
 import Foundation
 
-public typealias LMRadarInput = AGCRadarInput
 public typealias LMRotationalHandControllerInput = AGCRotationalHandControllerInput
 
-public enum LMVehicleOutputChannel: Int, Sendable {
+public enum LMVehicleOutputChannel: Int, Sendable, Codable {
     case out0 = 0o5
     case out1 = 0o6
     case channel11 = 0o11
@@ -13,11 +12,11 @@ public enum LMVehicleOutputChannel: Int, Sendable {
     case channel14 = 0o14
 }
 
-public enum LMVehicleInputChannel: Int, Sendable {
+public enum LMVehicleInputChannel: Int, Sendable, Codable {
     case channel16 = 0o16
 }
 
-public enum LMRCSAxis: String, Sendable {
+public enum LMRCSAxis: String, Sendable, Codable {
     case positiveU = "+U"
     case negativeU = "-U"
     case positiveV = "+V"
@@ -26,7 +25,7 @@ public enum LMRCSAxis: String, Sendable {
     case negativePitch = "-P"
 }
 
-public enum LMRCSJet: Int, CaseIterable, Sendable {
+public enum LMRCSJet: Int, CaseIterable, Sendable, Codable {
     case jet1 = 1
     case jet2 = 2
     case jet3 = 3
@@ -45,14 +44,14 @@ public enum LMRCSJet: Int, CaseIterable, Sendable {
     case jet16 = 16
 }
 
-public struct LMRCSJetCommand: Equatable, Sendable {
+public struct LMRCSJetCommand: Equatable, Sendable, Codable {
     public let jet: LMRCSJet
     public let axis: LMRCSAxis
     public let channel: Int
     public let bit: Int
-    public let source: String
+    public let source: LMSourceLocator
 
-    public init(jet: LMRCSJet, axis: LMRCSAxis, channel: Int, bit: Int, source: String) {
+    public init(jet: LMRCSJet, axis: LMRCSAxis, channel: Int, bit: Int, source: LMSourceLocator) {
         self.jet = jet
         self.axis = axis
         self.channel = channel
@@ -61,13 +60,13 @@ public struct LMRCSJetCommand: Equatable, Sendable {
     }
 }
 
-public struct LMSourceBackedDiscreteGroup: Equatable, Sendable {
+public struct LMSourceBackedDiscreteGroup: Equatable, Sendable, Codable {
     public let name: String
     public let channel: Int
     public let mask: Int
-    public let source: String
+    public let source: LMSourceLocator
 
-    public init(name: String, channel: Int, mask: Int, source: String) {
+    public init(name: String, channel: Int, mask: Int, source: LMSourceLocator) {
         self.name = name
         self.channel = channel
         self.mask = mask
@@ -75,14 +74,14 @@ public struct LMSourceBackedDiscreteGroup: Equatable, Sendable {
     }
 }
 
-public struct LMVehicleDiscreteCommand: Equatable, Sendable {
+public struct LMVehicleDiscreteCommand: Equatable, Sendable, Codable {
     public let name: String
     public let channel: Int
     public let bit: Int
     public let mask: Int
-    public let source: String
+    public let source: LMSourceLocator
 
-    public init(name: String, channel: Int, bit: Int, mask: Int, source: String) {
+    public init(name: String, channel: Int, bit: Int, mask: Int, source: LMSourceLocator) {
         self.name = name
         self.channel = channel & 0o777
         self.bit = bit
@@ -91,7 +90,7 @@ public struct LMVehicleDiscreteCommand: Equatable, Sendable {
     }
 }
 
-public struct LMUnmappedDiscrete: Equatable, Sendable {
+public struct LMUnmappedDiscrete: Equatable, Sendable, Codable {
     public let channel: Int
     public let bit: Int
     public let mask: Int
@@ -103,8 +102,36 @@ public struct LMUnmappedDiscrete: Equatable, Sendable {
     }
 }
 
+public struct LMDPSCommandState: Equatable, Sendable, Codable {
+    public let engineOn: Bool
+    public let engineOff: Bool
+    public let thrustDriveActive: Bool
+    public let engineCommands: [LMVehicleDiscreteCommand]
+    public let gimbalTrimCommands: [LMVehicleDiscreteCommand]
+    public let thrustDriveCommands: [LMVehicleDiscreteCommand]
+    public let throttleMappingStatus: LMModelingStatus
+
+    public init(
+        engineOn: Bool,
+        engineOff: Bool,
+        thrustDriveActive: Bool,
+        engineCommands: [LMVehicleDiscreteCommand],
+        gimbalTrimCommands: [LMVehicleDiscreteCommand],
+        thrustDriveCommands: [LMVehicleDiscreteCommand],
+        throttleMappingStatus: LMModelingStatus
+    ) {
+        self.engineOn = engineOn
+        self.engineOff = engineOff
+        self.thrustDriveActive = thrustDriveActive
+        self.engineCommands = engineCommands
+        self.gimbalTrimCommands = gimbalTrimCommands
+        self.thrustDriveCommands = thrustDriveCommands
+        self.throttleMappingStatus = throttleMappingStatus
+    }
+}
+
 /// Last-known LM vehicle channel words plus source-backed command decoding.
-public struct LMVehicleSnapshot: Equatable, Sendable {
+public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
     public let out0: Int
     public let out1: Int
     public let outputChannel11: Int
@@ -122,6 +149,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
     public let mainEngineOn: Bool
     public let mainEngineOff: Bool
     public let thrustDriveActive: Bool
+    public let dps: LMDPSCommandState
 
     public init(agcSnapshot: AGCSnapshot) {
         self.init(
@@ -172,11 +200,30 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
         self.mainEngineOn = (self.outputChannel11 & 0o10000) != 0
         self.mainEngineOff = (self.outputChannel11 & 0o20000) != 0
         self.thrustDriveActive = (self.outputChannel14 & 0o10) != 0
+        self.dps = LMDPSCommandState(
+            engineOn: self.mainEngineOn,
+            engineOff: self.mainEngineOff,
+            thrustDriveActive: self.thrustDriveActive,
+            engineCommands: self.mainEngineCommands,
+            gimbalTrimCommands: self.gimbalTrimCommands,
+            thrustDriveCommands: self.controlCommands.filter { $0.name == "thrust drive activity" },
+            throttleMappingStatus: .unmodeled("DPS throttle command mapping from AGC output words to thrust magnitude is unmodeled.")
+        )
     }
 
-    private static let ch5Source = "Apollo-11/Luminary099/Q_R-AXIS_RCS_AUTOPILOT.agc ALLJETS table: -U 6 13, -V 2 9, +U 5 14, +V 1 10"
-    private static let ch6Source = "Apollo-11/Luminary099/P-AXIS_RCS_AUTOPILOT.agc JETSALL table: +P mask 00125, -P mask 00252"
-    private static let ioChannelSource = "Apollo-11/Luminary099/INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc"
+    public var sourceReferences: [LMSourceReference] {
+        var references = (rcsJets.map(\.source.reference)
+            + discreteGroups.map(\.source.reference)
+            + mainEngineCommands.map(\.source.reference)
+            + gimbalTrimCommands.map(\.source.reference)
+            + controlCommands.map(\.source.reference)
+            + descentRateCommands.map(\.source.reference))
+        if let source = dps.throttleMappingStatus.source?.reference {
+            references.append(source)
+        }
+        var seen = Set<String>()
+        return references.filter { seen.insert($0.id).inserted }
+    }
 
     private struct RCSBitMapping {
         let bit: Int
@@ -211,7 +258,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
                 axis: mapping.axis,
                 channel: LMVehicleOutputChannel.out0.rawValue,
                 bit: mapping.bit,
-                source: ch5Source
+                source: .channel5RCSJets
             )
         }
     }
@@ -223,7 +270,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
                 name: "positive pitch RCS command bits",
                 channel: LMVehicleOutputChannel.out1.rawValue,
                 mask: out1 & 0o125,
-                source: ch6Source
+                source: .channel6RCSGroups
             ))
         }
         if (out1 & 0o252) != 0 {
@@ -231,7 +278,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
                 name: "negative pitch RCS command bits",
                 channel: LMVehicleOutputChannel.out1.rawValue,
                 mask: out1 & 0o252,
-                source: ch6Source
+                source: .channel6RCSGroups
             ))
         }
         return groups
@@ -292,7 +339,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable {
                 channel: channel,
                 bit: mapping.bit,
                 mask: mask,
-                source: ioChannelSource
+                source: .luminaryIOChannels
             )
         }
     }

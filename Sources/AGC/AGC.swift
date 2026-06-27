@@ -8,6 +8,8 @@ public struct AGCRegisterSnapshot: Equatable, Sendable {
     public let eb: Int
     public let fb: Int
     public let bb: Int
+    public let rendezvousRadar: Int
+    public let altitudeMeter: Int
 
     public init(state: AGCState) {
         self.a = state.erasableMemory[0][Register.regA.rawValue] & 0o177777
@@ -17,6 +19,8 @@ public struct AGCRegisterSnapshot: Equatable, Sendable {
         self.eb = state.erasableMemory[0][Register.regEB.rawValue] & 0o177777
         self.fb = state.erasableMemory[0][Register.regFB.rawValue] & 0o177777
         self.bb = state.erasableMemory[0][Register.regBB.rawValue] & 0o177777
+        self.rendezvousRadar = state.erasableMemory[0][Register.regRNRAD.rawValue] & 0o177777
+        self.altitudeMeter = state.erasableMemory[0][Register.regALTM.rawValue] & 0o177777
     }
 }
 
@@ -228,6 +232,11 @@ public actor AGCRuntime {
 
     public func channelTrace() -> [AGCChannelTraceEntry] {
         components.compositeIO.channelTrace()
+    }
+
+    func integrationTestCompleteRadarSampleGate() -> AGCSnapshot {
+        components.engine.integrationTestCompleteRadarSampleGate()
+        return makeSnapshot()
     }
 
     private static func validateCoreImage(_ data: Data) throws {
