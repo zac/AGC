@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		1109D3722EBEBAF600207E5C /* AGC in Frameworks */ = {isa = PBXBuildFile; productRef = 1109D3712EBEBAF600207E5C /* AGC */; };
 		1109D3742EC0000100207E5C /* Luminary099.bin in Resources */ = {isa = PBXBuildFile; fileRef = 1109D3732EC0000100207E5C /* Luminary099.bin */; };
+		1109D3762EC0000200207E5C /* LMCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1109D3752EC0000200207E5C /* LMCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +44,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1109D3722EBEBAF600207E5C /* AGC in Frameworks */,
+				1109D3762EC0000200207E5C /* LMCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -87,6 +89,7 @@
 			name = MissionControl;
 			packageProductDependencies = (
 				1109D3712EBEBAF600207E5C /* AGC */,
+				1109D3752EC0000200207E5C /* LMCore */,
 			);
 			productName = MissionControl;
 			productReference = 1109D35E2EBEBAE200207E5C /* MissionControl.app */;
@@ -391,6 +394,10 @@
 		1109D3712EBEBAF600207E5C /* AGC */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = AGC;
+		};
+		1109D3752EC0000200207E5C /* LMCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LMCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

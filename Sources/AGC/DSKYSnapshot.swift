@@ -70,6 +70,42 @@ public struct DSKYScript: Equatable, Sendable, Identifiable {
         id: "V16N36E",
         keys: [.verb, .digit1, .digit6, .noun, .digit3, .digit6, .enter]
     )
+
+    public static func program(_ program: Int) -> DSKYScript {
+        let clamped = max(0, min(99, program))
+        return DSKYScript(
+            id: String(format: "V37E%02dE", clamped),
+            keys: [
+                .verb,
+                .digit3,
+                .digit7,
+                .enter,
+                digit(clamped / 10),
+                digit(clamped % 10),
+                .enter
+            ]
+        )
+    }
+
+    public static let v37e63e = DSKYScript.program(63)
+    public static let v37e64e = DSKYScript.program(64)
+    public static let v37e65e = DSKYScript.program(65)
+    public static let v37e66e = DSKYScript.program(66)
+
+    private static func digit(_ value: Int) -> DSKYKeyCode {
+        switch value {
+        case 0: return .digit0
+        case 1: return .digit1
+        case 2: return .digit2
+        case 3: return .digit3
+        case 4: return .digit4
+        case 5: return .digit5
+        case 6: return .digit6
+        case 7: return .digit7
+        case 8: return .digit8
+        default: return .digit9
+        }
+    }
 }
 
 /// Immutable DSKY display and annunciator state decoded from AGC output channels.

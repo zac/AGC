@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import AGC
+import LMCore
 
 @MainActor
 @Observable
@@ -46,13 +47,15 @@ final class MissionControlViewModel {
     private(set) var programSummary = "No program loaded"
     private(set) var latestSnapshot: RegisterSnapshot?
     private(set) var latestDSKY: DSKYSnapshot?
+    private(set) var latestLMSimulation: LMSimulationSnapshot?
+    private(set) var poweredDescentScenario = LMPoweredDescentScenario.apollo11SourceBacked
     private(set) var engineHealth: EngineHealthSnapshot?
     private(set) var radarHookInvocations: UInt64 = 0
     private(set) var recentEvents: [MissionControlEvent] = []
     private(set) var backtraceTail: [BacktraceSnapshot] = []
     private(set) var latestChannelTrace: [AGCChannelTraceEntry] = []
 
-    @ObservationIgnored private var runtime: AGCRuntime?
+    @ObservationIgnored private var runtime: LMSimulationRuntime?
     @ObservationIgnored private var simulationTask: Task<Void, Never>?
     @ObservationIgnored private var dskySequenceTask: Task<Void, Never>?
     @ObservationIgnored private var lastHealthWall: CFAbsoluteTime = 0
@@ -86,8 +89,10 @@ final class MissionControlViewModel {
         }
         
         do {
-            let loaded = try AGCRuntime(binFile: url)
+            let scenario = LMPoweredDescentScenario.apollo11SourceBacked
+            let loaded = try LMSimulationRuntime(binFile: url, scenario: scenario)
             runtime = loaded
+            poweredDescentScenario = scenario
 
             selectedURL = url
             let data = try Data(contentsOf: url)
@@ -163,7 +168,7 @@ final class MissionControlViewModel {
             }
             let snapshot = await runtime.snapshot()
             self.applySnapshot(snapshot)
-            self.recordEvent("Continuous run stopped at cycle \(snapshot.cycle)")
+            self.recordEvent("Continuous run stopped at cycle \(snapshot.agc.cycle)")
         }
     }
 
@@ -185,8 +190,100 @@ final class MissionControlViewModel {
             self.simulationTask = nil
             self.status = .stopped
             self.applySnapshot(snapshot)
-            self.recordEvent("Finished \(cycles.formatted()) cycles at cycle \(snapshot.cycle)")
+            self.recordEvent("Finished \(cycles.formatted()) cycles at cycle \(snapshot.agc.cycle)")
         }
+    }
+
+    func stepPoweredDescentFrame() {
+        guard canStep, let runtime else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        isRunning = true
+        status = .running
+        recordEvent("Stepping LM frame")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let snapshot = await runtime.step(deltaTime: 1.0 / 60.0)
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.applySnapshot(snapshot)
+            self.recordEvent("LM frame stepped to cycle \(snapshot.agc.cycle)")
+        }
+    }
+
+    func runPoweredDescentSegment(seconds: Double = 10) {
+        guard canStep, let runtime else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        isRunning = true
+        status = .running
+        lastHealthWall = CFAbsoluteTimeGetCurrent()
+        lastHealthCycle = latestSnapshot?.cycle ?? 0
+        previousCycleForAdvance = latestSnapshot?.cycle ?? 0
+        let frameDelta = 1.0 / 30.0
+        let frames = max(1, Int((seconds / frameDelta).rounded()))
+        recordEvent("Running LM segment \(String(format: "%.1f", seconds)) s")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var snapshot = await runtime.snapshot()
+            for _ in 0..<frames {
+                if Task.isCancelled { break }
+                snapshot = await runtime.step(deltaTime: frameDelta)
+                self.applySnapshot(snapshot)
+                await Task.yield()
+            }
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.applySnapshot(snapshot)
+            self.recordEvent("Finished LM segment at cycle \(snapshot.agc.cycle)")
+        }
+    }
+
+    func resetPoweredDescentScenario() {
+        guard let runtime else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        simulationTask = nil
+        isRunning = true
+        status = .running
+        recordEvent("Resetting powered descent scenario")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let snapshot = try await runtime.reset()
+                self.isRunning = false
+                self.simulationTask = nil
+                self.status = .stopped
+                self.applySnapshot(snapshot)
+                self.recordEvent("Powered descent reset")
+            } catch {
+                self.isRunning = false
+                self.simulationTask = nil
+                self.status = .error(error.localizedDescription)
+                self.recordEvent("Powered descent reset failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func sendPoweredDescentProgram(_ checkpoint: LMPoweredDescentCheckpoint) {
+        sendDSKYScript(
+            checkpoint.expectedScript,
+            autoRunCyclesWhenIdle: Self.idleSequenceValidationCycles
+        )
+    }
+
+    func exportChannelTrace() {
+        let rows = latestChannelTrace.map { entry in
+            "\(entry.direction.rawValue.uppercased()) \(String(format: "%03o", entry.channel)) \(String(format: "%05o", entry.value))"
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(rows.joined(separator: "\n"), forType: .string)
+        recordEvent("Copied \(latestChannelTrace.count) channel trace rows")
     }
     
     func stop() {
@@ -202,7 +299,7 @@ final class MissionControlViewModel {
                 guard let self else { return }
                 let snapshot = await runtime.snapshot()
                 self.applySnapshot(snapshot)
-                self.recordEvent("Stopped at cycle \(snapshot.cycle)")
+                self.recordEvent("Stopped at cycle \(snapshot.agc.cycle)")
             }
         }
     }
@@ -213,36 +310,39 @@ final class MissionControlViewModel {
         loadProgram(from: url)
     }
     
-    private func refreshEngineHealth(snapshot: AGCSnapshot) {
-        let batchDelta = snapshot.cycle &- previousCycleForAdvance
-        previousCycleForAdvance = snapshot.cycle
+    private func refreshEngineHealth(snapshot: LMSimulationSnapshot) {
+        let agc = snapshot.agc
+        let batchDelta = agc.cycle &- previousCycleForAdvance
+        previousCycleForAdvance = agc.cycle
         let now = CFAbsoluteTimeGetCurrent()
         if lastHealthWall == 0 {
             lastHealthWall = now
-            lastHealthCycle = snapshot.cycle
+            lastHealthCycle = agc.cycle
             engineHealth = EngineHealthSnapshot(
-                cycle: snapshot.cycle,
+                cycle: agc.cycle,
                 cyclesPerSecond: 0,
                 isAdvancing: false,
-                lmOutputs: snapshot.vehicle
+                lmOutputs: snapshot.vehicleCommands,
+                lmSimulation: snapshot
             )
             return
         }
         let dt = now - lastHealthWall
-        let delta = snapshot.cycle &- lastHealthCycle
+        let delta = agc.cycle &- lastHealthCycle
         if dt > 0.05, delta > 0 {
             let instant = Double(delta) / dt
             smoothedCyclesPerSec = smoothedCyclesPerSec == 0
                 ? instant
                 : smoothedCyclesPerSec * 0.88 + instant * 0.12
             lastHealthWall = now
-            lastHealthCycle = snapshot.cycle
+            lastHealthCycle = agc.cycle
         }
         engineHealth = EngineHealthSnapshot(
-            cycle: snapshot.cycle,
+            cycle: agc.cycle,
             cyclesPerSecond: smoothedCyclesPerSec,
             isAdvancing: isRunning && batchDelta > 0,
-            lmOutputs: snapshot.vehicle
+            lmOutputs: snapshot.vehicleCommands,
+            lmSimulation: snapshot
         )
     }
 
@@ -282,7 +382,7 @@ final class MissionControlViewModel {
                         startCycle = cycle
                     } else {
                         let currentSnapshot = await runtime.snapshot()
-                        startCycle = currentSnapshot.cycle
+                        startCycle = currentSnapshot.agc.cycle
                     }
                     await runtime.sendDSKYKey(key)
                     if settleCycles > 0 {
@@ -323,12 +423,12 @@ final class MissionControlViewModel {
         }
     }
 
-    private func waitForCycleAdvance(_ cycles: UInt64, runtime: AGCRuntime, startCycle: UInt64) async {
+    private func waitForCycleAdvance(_ cycles: UInt64, runtime: LMSimulationRuntime, startCycle: UInt64) async {
         guard cycles > 0 else { return }
         let targetCycle = startCycle &+ cycles
         while !Task.isCancelled {
             let snapshot = await runtime.snapshot()
-            if snapshot.cycle >= targetCycle {
+            if snapshot.agc.cycle >= targetCycle {
                 applySnapshot(snapshot)
                 return
             }
@@ -336,17 +436,19 @@ final class MissionControlViewModel {
         }
     }
 
-    private func applySnapshot(_ snapshot: AGCSnapshot) {
-        latestSnapshot = RegisterSnapshot(snapshot: snapshot)
-        latestDSKY = snapshot.dsky
+    private func applySnapshot(_ snapshot: LMSimulationSnapshot) {
+        latestLMSimulation = snapshot
+        latestSnapshot = RegisterSnapshot(snapshot: snapshot.agc)
+        latestDSKY = snapshot.agc.dsky
         latestChannelTrace = Array(snapshot.channelTrace.suffix(80))
-        backtraceTail = snapshot.backtrace.suffix(8).map(BacktraceSnapshot.init)
+        backtraceTail = snapshot.agc.backtrace.suffix(8).map(BacktraceSnapshot.init)
         refreshEngineHealth(snapshot: snapshot)
     }
 
     private func clearSnapshots() {
         latestSnapshot = nil
         latestDSKY = nil
+        latestLMSimulation = nil
         engineHealth = nil
         backtraceTail = []
         latestChannelTrace = []
@@ -385,6 +487,7 @@ struct EngineHealthSnapshot: Equatable {
     var cyclesPerSecond: Double
     var isAdvancing: Bool
     var lmOutputs: LMVehicleSnapshot?
+    var lmSimulation: LMSimulationSnapshot?
 }
 
 struct BacktraceSnapshot: Identifiable, Equatable {
@@ -446,6 +549,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
     case overview
     case dsky
     case telemetry
+    case lmDynamics
     case validation
     case trace
 
@@ -456,6 +560,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .overview: "Overview"
         case .dsky: "DSKY"
         case .telemetry: "Telemetry"
+        case .lmDynamics: "LM Dynamics"
         case .validation: "Validation"
         case .trace: "Channel Trace"
         }
@@ -466,6 +571,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .overview: "Runtime, DSKY, and health"
         case .dsky: "Display, lamps, and keypad"
         case .telemetry: "Cycles, LM outputs, and registers"
+        case .lmDynamics: "Vehicle state and powered descent"
         case .validation: "Smoke checks and branch trace"
         case .trace: "Ordered AGC channel traffic"
         }
@@ -476,6 +582,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .overview: "gauge.with.dots.needle.67percent"
         case .dsky: "rectangle.grid.3x2"
         case .telemetry: "waveform.path.ecg"
+        case .lmDynamics: "gyroscope"
         case .validation: "checkmark.seal"
         case .trace: "list.bullet.rectangle"
         }
@@ -659,6 +766,8 @@ struct MissionControlRootView: View {
             dskyDetailSection
         case .telemetry:
             telemetrySection
+        case .lmDynamics:
+            lmDynamicsSection
         case .validation:
             validationDetailSection
         case .trace:
@@ -672,6 +781,7 @@ struct MissionControlRootView: View {
             engineTelemetryPanel
             validationPanel
             lmVehiclePanel
+            lmDynamicsPanel
         }
     }
 
@@ -686,8 +796,21 @@ struct MissionControlRootView: View {
         LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
             engineTelemetryPanel
             lmVehiclePanel
+            lmDynamicsPanel
             processorPanel
             recentBranchesPanel
+        }
+    }
+
+    private var lmDynamicsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+                lmDynamicsPanel
+                poweredDescentPanel
+                lmVehiclePanel
+                sourceStatusPanel
+            }
+            channelTracePanel(limit: 30)
         }
     }
 
@@ -822,6 +945,13 @@ struct MissionControlRootView: View {
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
                         gridRow(label: "OUT0 / ch 005", value: octalWord(lm.out0))
                         gridRow(label: "OUT1 / ch 006", value: octalWord(lm.out1))
+                        gridRow(label: "Ch 011", value: octalWord(lm.outputChannel11))
+                        gridRow(label: "Ch 012", value: octalWord(lm.outputChannel12))
+                        gridRow(label: "Ch 013", value: octalWord(lm.outputChannel13))
+                        gridRow(label: "Ch 014", value: octalWord(lm.outputChannel14))
+                        gridRow(label: "Input ch 016", value: octalWord(lm.inputChannel16))
+                        gridRow(label: "Main engine", value: lm.mainEngineOn ? "ON command" : (lm.mainEngineOff ? "OFF command" : "No command"))
+                        gridRow(label: "Thrust drive", value: lm.thrustDriveActive ? "Active" : "Inactive")
                         gridRow(label: "Unmapped bits", value: "\(lm.unmappedBits.count)")
                     }
                     .font(.system(.caption, design: .monospaced))
@@ -853,9 +983,156 @@ struct MissionControlRootView: View {
                         }
                         .font(.system(.caption, design: .monospaced))
                     }
+
+                    let namedCommands = lm.mainEngineCommands + lm.gimbalTrimCommands + lm.controlCommands + lm.descentRateCommands
+                    if !namedCommands.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Named commands")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(Array(namedCommands.enumerated()), id: \.offset) { _, command in
+                                Text("\(command.name)  ch \(octalChannel(command.channel)) bit \(command.bit)")
+                            }
+                        }
+                        .font(.system(.caption, design: .monospaced))
+                    }
                 }
             } else {
                 Text("No vehicle output snapshot yet.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var lmDynamicsPanel: some View {
+        missionPanel(title: "LM Dynamics", systemImage: "scope") {
+            if let simulation = viewModel.latestLMSimulation {
+                let state = simulation.vehicleState
+                VStack(alignment: .leading, spacing: 12) {
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                        gridRow(label: "Altitude", value: meters(state.altitudeMeters))
+                        gridRow(label: "Vertical speed", value: metersPerSecond(state.verticalSpeedMetersPerSecond))
+                        gridRow(label: "Position", value: vector(state.positionMeters))
+                        gridRow(label: "Velocity", value: vector(state.velocityMetersPerSecond))
+                        gridRow(label: "Angular rate", value: vector(state.angularVelocityRadiansPerSecond))
+                        gridRow(label: "Attitude q", value: quaternion(state.attitude))
+                        gridRow(label: "Mass", value: state.massKilograms.map(kilograms) ?? "unmodeled")
+                        gridRow(label: "Propellant", value: state.propellantMassKilograms.map(kilograms) ?? "unmodeled")
+                        gridRow(label: "Contact", value: state.isLanded ? "landed" : "in flight")
+                    }
+                    .font(.system(.caption, design: .monospaced))
+
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                        gridRow(label: "Radar RNDZ", value: simulation.sensorState.radarInput?.rendezvousRadar.map(octalWord) ?? "-")
+                        gridRow(label: "Radar ALT", value: simulation.sensorState.radarInput?.altitudeMeter.map(octalWord) ?? "-")
+                        gridRow(
+                            label: "RHC",
+                            value: "\(simulation.sensorState.rotationalHandControllerInput.pitch), \(simulation.sensorState.rotationalHandControllerInput.yaw), \(simulation.sensorState.rotationalHandControllerInput.roll)"
+                        )
+                        gridRow(label: "Ch 016", value: octalWord(simulation.sensorState.descentRateChannel16))
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                }
+            } else {
+                Text("Load a core image to initialize LM dynamics.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var poweredDescentPanel: some View {
+        missionPanel(title: "Powered Descent", systemImage: "arrow.down.to.line.compact") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Button("Reset Scenario") {
+                        viewModel.resetPoweredDescentScenario()
+                    }
+                    .disabled(!viewModel.canReset)
+
+                    Button("Step Frame") {
+                        viewModel.stepPoweredDescentFrame()
+                    }
+                    .disabled(!viewModel.canStep)
+
+                    Button("Run 10s") {
+                        viewModel.runPoweredDescentSegment()
+                    }
+                    .disabled(!viewModel.canStep)
+
+                    Button("Export Trace") {
+                        viewModel.exportChannelTrace()
+                    }
+                    .disabled(viewModel.latestChannelTrace.isEmpty)
+                }
+                .controlSize(.small)
+
+                Text(viewModel.poweredDescentScenario.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(viewModel.poweredDescentScenario.checkpoints) { checkpoint in
+                        HStack(spacing: 10) {
+                            Button("P\(checkpoint.program)") {
+                                viewModel.sendPoweredDescentProgram(checkpoint)
+                            }
+                            .disabled(viewModel.selectedURL == nil)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(checkpoint.expectedScript.id)
+                                    .font(.system(.caption, design: .monospaced))
+                                Text(checkpointActualStatus(checkpoint))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var sourceStatusPanel: some View {
+        missionPanel(title: "Source Status", systemImage: "doc.text.magnifyingglass") {
+            if let simulation = viewModel.latestLMSimulation {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Sources")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(simulation.sourceStatus.sources.prefix(5)) { source in
+                            Text(source.title)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                        if simulation.sourceStatus.sources.count > 5 {
+                            Text("+ \(simulation.sourceStatus.sources.count - 5) more")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Unmodeled")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if simulation.sourceStatus.unmodeledItems.isEmpty {
+                            Text("No unmodeled items reported for this snapshot.")
+                                .font(.caption)
+                        } else {
+                            ForEach(Array(simulation.sourceStatus.unmodeledItems.prefix(7).enumerated()), id: \.offset) { _, item in
+                                Text(item)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text("No source status yet.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -1177,6 +1454,20 @@ struct MissionControlRootView: View {
         }
     }
 
+    private func checkpointActualStatus(_ checkpoint: LMPoweredDescentCheckpoint) -> String {
+        let expected = checkpoint.expectedScript.keys.map(\.rawValue)
+        let channel15 = viewModel.latestChannelTrace
+            .filter { $0.direction == .input && $0.channel == 0o15 }
+            .map(\.value)
+        guard channel15.count >= expected.count else {
+            return "Expected \(checkpoint.expectedScript.id); no complete key trace yet"
+        }
+        let suffix = Array(channel15.suffix(expected.count))
+        return suffix == expected
+            ? "Matched recent key trace"
+            : "Expected \(checkpoint.expectedScript.id); latest trace differs"
+    }
+
     private func traceEntries(limit: Int?) -> [AGCChannelTraceEntry] {
         guard let limit else { return viewModel.latestChannelTrace }
         return Array(viewModel.latestChannelTrace.suffix(limit))
@@ -1192,6 +1483,26 @@ struct MissionControlRootView: View {
 
     private func octalChannel(_ value: Int) -> String {
         String(format: "%03o", value)
+    }
+
+    private func meters(_ value: Double) -> String {
+        String(format: "%.2f m", value)
+    }
+
+    private func metersPerSecond(_ value: Double) -> String {
+        String(format: "%.3f m/s", value)
+    }
+
+    private func kilograms(_ value: Double) -> String {
+        String(format: "%.1f kg", value)
+    }
+
+    private func vector(_ value: LMVector3D) -> String {
+        String(format: "%.2f, %.2f, %.2f", value.x, value.y, value.z)
+    }
+
+    private func quaternion(_ value: LMQuaternion) -> String {
+        String(format: "%.3f, %.3f, %.3f, %.3f", value.w, value.x, value.y, value.z)
     }
 
     private var dashboardColumns: [GridItem] {

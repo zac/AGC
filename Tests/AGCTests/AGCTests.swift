@@ -931,10 +931,10 @@ class AGCTests {
     }
 }
 
-// MARK: - LM integration (scaler parity, vehicle I/O, composite delegate)
+// MARK: - AGC integration (scaler parity, composite delegate)
 
-@Suite("LM integration")
-struct LMIntegrationTests {
+@Suite("AGC integration")
+struct AGCIntegrationTests {
     @Test func `Scaler tick updates input channel four`() async throws {
         let state = AGCState()
         state.binFile = Data()
@@ -943,28 +943,11 @@ struct LMIntegrationTests {
         #expect(state.inputChannels[4] > 0)
     }
 
-    @Test func `LMVehicleIO captures channels five and six`() throws {
-        let state = AGCState()
-        state.binFile = Data()
-        let engine = try AGCEngine(state: state)
-        let lm = LMVehicleIO()
-        engine.ioDelegate = lm
-        engine.writeIOChannel(address: 0o5, value: 0o12121)
-        engine.writeIOChannel(address: 0o6, value: 0o06060)
-        #expect(lm.snapshot.out0 == 0o12121)
-        #expect(lm.snapshot.out1 == 0o06060)
-        #expect(lm.snapshot.rcsJets.contains { $0.jet == .jet1 && $0.channel == 0o5 })
-        #expect(lm.snapshot.unmappedBits.contains { $0.channel == 0o6 })
-    }
-
-    @Test func `LMVehicleSnapshot decodes source backed RCS and preserves unknown bits`() {
-        let snapshot = LMVehicleSnapshot(out0: 0o377, out1: 0o377)
-        let jets = Set(snapshot.rcsJets.map(\.jet))
-
-        #expect(jets == Set([.jet1, .jet2, .jet5, .jet6, .jet9, .jet10, .jet13, .jet14]))
-        #expect(snapshot.discreteGroups.contains { $0.name.contains("positive pitch") && $0.mask == 0o125 })
-        #expect(snapshot.discreteGroups.contains { $0.name.contains("negative pitch") && $0.mask == 0o252 })
-        #expect(snapshot.unmappedBits.contains { $0.channel == 0o6 && $0.bit == 1 })
+    @Test func `DSKY program scripts generate V37E program entry`() {
+        #expect(DSKYScript.program(63).keys == [.verb, .digit3, .digit7, .enter, .digit6, .digit3, .enter])
+        #expect(DSKYScript.v37e64e.keys == [.verb, .digit3, .digit7, .enter, .digit6, .digit4, .enter])
+        #expect(DSKYScript.v37e65e.id == "V37E65E")
+        #expect(DSKYScript.v37e66e.id == "V37E66E")
     }
 
     @Test func `Composite merges channel input`() async throws {
@@ -1121,12 +1104,6 @@ struct LMIntegrationTests {
         #expect(a.count == 1 && b.count == 1)
     }
 
-    @Test func `LMVehicleIO radar callback fires`() {
-        var fired = false
-        let lm = LMVehicleIO(onRequestRadarData: { fired = true })
-        lm.requestRadarData()
-        #expect(fired)
-    }
 }
 
 // MARK: - LM test helpers

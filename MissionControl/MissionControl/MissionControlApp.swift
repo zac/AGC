@@ -6,6 +6,8 @@
 //
 
 import SwiftUI
+import AGC
+import LMCore
 
 @main
 struct MissionControlApp: App {
@@ -67,6 +69,39 @@ struct MissionControlCommands: Commands {
             }
             .disabled(!viewModel.canReset)
             .keyboardShortcut("r", modifiers: [.command, .shift])
+        }
+
+        CommandMenu("LM") {
+            Button("Reset Powered Descent") {
+                viewModel.resetPoweredDescentScenario()
+            }
+            .disabled(!viewModel.canReset)
+
+            Button("Step LM Frame") {
+                viewModel.stepPoweredDescentFrame()
+            }
+            .disabled(!viewModel.canStep)
+            .keyboardShortcut("]", modifiers: [.command])
+
+            Button("Run LM Segment") {
+                viewModel.runPoweredDescentSegment()
+            }
+            .disabled(!viewModel.canStep)
+            .keyboardShortcut("]", modifiers: [.command, .shift])
+
+            Button("Export Channel Trace") {
+                viewModel.exportChannelTrace()
+            }
+            .disabled(viewModel.latestChannelTrace.isEmpty)
+
+            Divider()
+
+            ForEach(viewModel.poweredDescentScenario.checkpoints) { checkpoint in
+                Button("Enter P\(checkpoint.program)") {
+                    viewModel.sendPoweredDescentProgram(checkpoint)
+                }
+                .disabled(viewModel.selectedURL == nil)
+            }
         }
 
         CommandGroup(after: .windowArrangement) {

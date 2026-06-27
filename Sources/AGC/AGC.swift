@@ -28,7 +28,6 @@ public struct AGCSnapshot: Equatable, Sendable {
     public let interruptRequests: [Int]
     public let backtrace: [AGCBacktraceEntry]
     public let dsky: DSKYSnapshot
-    public let vehicle: LMVehicleSnapshot
     public let channelTrace: [AGCChannelTraceEntry]
 
     public init(
@@ -39,7 +38,6 @@ public struct AGCSnapshot: Equatable, Sendable {
         interruptRequests: [Int],
         backtrace: [AGCBacktraceEntry],
         dsky: DSKYSnapshot,
-        vehicle: LMVehicleSnapshot,
         channelTrace: [AGCChannelTraceEntry]
     ) {
         self.cycle = cycle
@@ -49,12 +47,11 @@ public struct AGCSnapshot: Equatable, Sendable {
         self.interruptRequests = interruptRequests
         self.backtrace = backtrace
         self.dsky = dsky
-        self.vehicle = vehicle
         self.channelTrace = channelTrace
     }
 }
 
-public struct LMRadarInput: Equatable, Sendable {
+public struct AGCRadarInput: Equatable, Sendable {
     public let rendezvousRadar: Int?
     public let altitudeMeter: Int?
 
@@ -64,7 +61,7 @@ public struct LMRadarInput: Equatable, Sendable {
     }
 }
 
-public struct LMRotationalHandControllerInput: Equatable, Sendable {
+public struct AGCRotationalHandControllerInput: Equatable, Sendable {
     public let pitch: Int
     public let yaw: Int
     public let roll: Int
@@ -78,19 +75,35 @@ public struct LMRotationalHandControllerInput: Equatable, Sendable {
 
 private final class AGCRadarInputBox: @unchecked Sendable {
     private let lock = NSLock()
-    private var input: LMRadarInput?
+    private var input: AGCRadarInput?
 
-    func set(_ input: LMRadarInput?) {
+    func set(_ input: AGCRadarInput?) {
         lock.lock()
         self.input = input
         lock.unlock()
     }
 
-    func snapshot() -> LMRadarInput? {
+    func snapshot() -> AGCRadarInput? {
         lock.lock()
         defer { lock.unlock() }
         return input
     }
+}
+
+private final class AGCRadarIO: AGCIOProtocol {
+    var onRequestRadarData: (() -> Void)?
+
+    init(onRequestRadarData: (() -> Void)? = nil) {
+        self.onRequestRadarData = onRequestRadarData
+    }
+
+    func channelOutput(channel: Int, value: Int) {}
+    func channelInput() async -> [AGCChannelInput]? { nil }
+    func requestRadarData() {
+        onRequestRadarData?()
+    }
+    func shiftToDeda(data: Int) {}
+    func channelRoutine() async {}
 }
 
 private final class AGCRuntimeInputQueue: AGCIOProtocol, @unchecked Sendable {
@@ -138,15 +151,15 @@ private struct AGCRuntimeComponents {
     let state: AGCState
     let engine: AGCEngine
     let dsky: DSKY
-    let vehicleIO: LMVehicleIO
+    let radarIO: AGCRadarIO
     let externalInput: AGCRuntimeInputQueue
     let compositeIO: CompositeAGCIO
 }
 
 /// Deterministic, frame-driven AGC runtime suitable for RealityKit/visionOS integration.
 ///
-/// The runtime owns the engine, state, DSKY, LM vehicle I/O, and peripheral routing. Drive it
-/// from a simulation/frame loop with bounded ``step(cycles:)`` calls.
+/// The runtime owns the engine, state, DSKY, raw peripheral hooks, and channel routing.
+/// Drive it from a simulation/frame loop with bounded ``step(cycles:)`` calls.
 public actor AGCRuntime {
     private let coreImage: Data
     private let radarInputBox = AGCRadarInputBox()
@@ -201,11 +214,11 @@ public actor AGCRuntime {
         await components.externalInput.enqueue(inputs)
     }
 
-    public func setRadarInput(_ input: LMRadarInput?) {
+    public func setRadarInput(_ input: AGCRadarInput?) {
         radarInputBox.set(input)
     }
 
-    public func setRotationalHandControllerInput(_ input: LMRotationalHandControllerInput) async {
+    public func setRotationalHandControllerInput(_ input: AGCRotationalHandControllerInput) async {
         await components.externalInput.enqueue([
             AGCChannelInput(channel: 0o166, value: input.pitch),
             AGCChannelInput(channel: 0o167, value: input.yaw),
@@ -231,10 +244,10 @@ public actor AGCRuntime {
         state.binFile = coreImage
         let engine = try AGCEngine(state: state)
         let dsky = DSKY()
-        let vehicleIO = LMVehicleIO()
+        let radarIO = AGCRadarIO()
         let externalInput = AGCRuntimeInputQueue()
 
-        vehicleIO.onRequestRadarData = { [weak state] in
+        radarIO.onRequestRadarData = { [weak state] in
             guard let state, let input = radarInputBox.snapshot() else { return }
             if let rendezvousRadar = input.rendezvousRadar {
                 state.erasableMemory[0][Register.regRNRAD.rawValue] = rendezvousRadar & 0o77777
@@ -244,14 +257,14 @@ public actor AGCRuntime {
             }
         }
 
-        let compositeIO = CompositeAGCIO(children: [dsky, vehicleIO, externalInput])
+        let compositeIO = CompositeAGCIO(children: [dsky, radarIO, externalInput])
         engine.ioDelegate = compositeIO
 
         return AGCRuntimeComponents(
             state: state,
             engine: engine,
             dsky: dsky,
-            vehicleIO: vehicleIO,
+            radarIO: radarIO,
             externalInput: externalInput,
             compositeIO: compositeIO
         )
@@ -259,7 +272,7 @@ public actor AGCRuntime {
 
     private func makeSnapshot() -> AGCSnapshot {
         let state = components.state
-        let monitoredChannels = [0o5, 0o6, 0o10, 0o11, 0o13, 0o15, 0o30, 0o31, 0o32, 0o33, 0o77, 0o163]
+        let monitoredChannels = [0o5, 0o6, 0o10, 0o11, 0o12, 0o13, 0o14, 0o15, 0o16, 0o30, 0o31, 0o32, 0o33, 0o77, 0o163]
         var inputChannels: [Int: Int] = [:]
         var outputChannels: [Int: Int] = [:]
         for channel in monitoredChannels {
@@ -275,7 +288,6 @@ public actor AGCRuntime {
             interruptRequests: state.interruptRequests,
             backtrace: state.backtrace,
             dsky: components.dsky.snapshot,
-            vehicle: components.vehicleIO.snapshot,
             channelTrace: components.compositeIO.channelTrace()
         )
     }
