@@ -80,10 +80,10 @@ public final class CompositeAGCIO: AGCIOProtocol {
         }
     }
 
-    public func channelInput() async -> [AGCChannelInput]? {
+    public func channelInput() -> [AGCChannelInput]? {
         var merged: [AGCChannelInput] = []
         for child in children {
-            guard let part = await child.channelInput() else { continue }
+            guard let part = child.channelInput() else { continue }
             for event in part {
                 traceRecorder.append(direction: .input, channel: event.channel, value: event.value)
                 merged.append(event)
@@ -104,9 +104,9 @@ public final class CompositeAGCIO: AGCIOProtocol {
         }
     }
 
-    public func channelRoutine() async {
+    public func channelRoutine() {
         for child in children {
-            await child.channelRoutine()
+            child.channelRoutine()
         }
     }
 

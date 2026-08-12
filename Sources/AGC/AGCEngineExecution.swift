@@ -361,7 +361,7 @@ extension AGCEngine {
     }
     
     /// Execute one simulation cycle
-    func executeCycle() async -> Bool {
+    func executeCycle() -> Bool {
         var overflow: Bool = false
 
         // For DOWNRUPT
@@ -386,9 +386,7 @@ extension AGCEngine {
         
         // Handle I/O channel communications periodically (nominally every 100ms)
         if state.channelRoutineCount == 0 {
-            if let io = ioDelegate {
-                await io.channelRoutine()
-            }
+            ioDelegate?.channelRoutine()
         }
         state.channelRoutineCount = (state.channelRoutineCount + 1) & 0o17777
         
@@ -397,7 +395,7 @@ extension AGCEngine {
         
         // Get data from input channels
         // Return immediately if an unprogrammed counter-increment was performed
-        if await channelInput() {
+        if channelInput() {
             return false
         }
         

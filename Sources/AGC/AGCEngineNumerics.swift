@@ -197,14 +197,27 @@ extension AGCEngine {
         }
     }
 
-    /// Assign a value to erasable memory at the given address
+    /// Assign a value to erasable memory at a 12-bit CPU address.
+    ///
+    /// Matches `findMemoryWord` banking: 00000–00377 bank 0, 00400–00777 bank 1,
+    /// 01000–01377 bank 2, 01400–01777 the EB-selected bank. Fixed-memory
+    /// addresses (02000–03777) are not writable.
     func assignFromPointer(_ address: Int, _ value: Int) {
-        // Only handle erasable memory (addresses 0-3777)
-        if address >= 0 && address < 0o4000 {
-            let bank = address / 0o400
-            let offset = address & 0o377
-            assign(bank: bank, offset: offset, value: value)
+        let address12 = address & 0o7777
+        guard address12 < 0o2000 else { return }
+
+        let offset = address12 & 0o377
+        let bank: Int
+        if address12 < 0o400 {
+            bank = 0
+        } else if address12 < 0o1000 {
+            bank = 1
+        } else if address12 < 0o1400 {
+            bank = 2
+        } else {
+            bank = 7 & (readRegister(.regEB) >> 8)
         }
+        assign(bank: bank, offset: offset, value: value)
     }
 
     /// Assign a value to erasable memory with editing for special registers

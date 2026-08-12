@@ -102,53 +102,44 @@ private final class AGCRadarIO: AGCIOProtocol {
     }
 
     func channelOutput(channel: Int, value: Int) {}
-    func channelInput() async -> [AGCChannelInput]? { nil }
+    func channelInput() -> [AGCChannelInput]? { nil }
     func requestRadarData() {
         onRequestRadarData?()
     }
     func shiftToDeda(data: Int) {}
-    func channelRoutine() async {}
+    func channelRoutine() {}
 }
 
 private final class AGCRuntimeInputQueue: AGCIOProtocol, @unchecked Sendable {
-    private actor QueueStorage {
-        private var queue: [AGCChannelInput] = []
+    private let lock = NSLock()
+    private var queue: [AGCChannelInput] = []
 
-        func enqueue(_ input: AGCChannelInput) {
-            queue.append(input)
-        }
-
-        func enqueue(_ inputs: [AGCChannelInput]) {
-            queue.append(contentsOf: inputs)
-        }
-
-        func drain() -> [AGCChannelInput]? {
-            guard !queue.isEmpty else { return nil }
-            let inputs = queue
-            queue.removeAll()
-            return inputs
-        }
+    func enqueue(_ input: AGCChannelInput) {
+        lock.lock()
+        queue.append(input)
+        lock.unlock()
     }
 
-    private let storage = QueueStorage()
-
-    func enqueue(_ input: AGCChannelInput) async {
-        await storage.enqueue(input)
-    }
-
-    func enqueue(_ inputs: [AGCChannelInput]) async {
-        await storage.enqueue(inputs)
+    func enqueue(_ inputs: [AGCChannelInput]) {
+        lock.lock()
+        queue.append(contentsOf: inputs)
+        lock.unlock()
     }
 
     func channelOutput(channel: Int, value: Int) {}
 
-    func channelInput() async -> [AGCChannelInput]? {
-        await storage.drain()
+    func channelInput() -> [AGCChannelInput]? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !queue.isEmpty else { return nil }
+        let inputs = queue
+        queue.removeAll()
+        return inputs
     }
 
     func requestRadarData() {}
     func shiftToDeda(data: Int) {}
-    func channelRoutine() async {}
+    func channelRoutine() {}
 }
 
 private struct AGCRuntimeComponents {
@@ -211,11 +202,11 @@ public actor AGCRuntime {
     }
 
     public func enqueueInput(_ input: AGCChannelInput) async {
-        await components.externalInput.enqueue(input)
+        components.externalInput.enqueue(input)
     }
 
     public func enqueueInputs(_ inputs: [AGCChannelInput]) async {
-        await components.externalInput.enqueue(inputs)
+        components.externalInput.enqueue(inputs)
     }
 
     public func setRadarInput(_ input: AGCRadarInput?) {
@@ -223,7 +214,7 @@ public actor AGCRuntime {
     }
 
     public func setRotationalHandControllerInput(_ input: AGCRotationalHandControllerInput) async {
-        await components.externalInput.enqueue([
+        components.externalInput.enqueue([
             AGCChannelInput(channel: 0o166, value: input.pitch),
             AGCChannelInput(channel: 0o167, value: input.yaw),
             AGCChannelInput(channel: 0o170, value: input.roll)

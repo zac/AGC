@@ -20,7 +20,7 @@ public protocol AGCIOProtocol {
     func channelOutput(channel: Int, value: Int)
     
     /// Get input from peripherals
-    func channelInput() async -> [AGCChannelInput]?
+    func channelInput() -> [AGCChannelInput]?
     
     /// Called when a radar sample gate completes (before RADARUPT). Implementations should
     /// load erasable address octal 046 (`Register.regRNRAD`) on the owning engine’s state,
@@ -31,7 +31,7 @@ public protocol AGCIOProtocol {
     func shiftToDeda(data: Int)
 
     /// Channel routine
-    func channelRoutine() async
+    func channelRoutine()
 }
 
 /// Default implementation of AGC I/O
@@ -42,7 +42,7 @@ public class AGCIO: AGCIOProtocol {
         // Default implementation - can be overridden by clients
     }
     
-    public func channelInput() async -> [AGCChannelInput]? {
+    public func channelInput() -> [AGCChannelInput]? {
         // Default implementation returns no input
         return nil
     }
@@ -55,7 +55,7 @@ public class AGCIO: AGCIOProtocol {
         // Default implementation - can be overridden by clients
     }
 
-    public func channelRoutine() async {
+    public func channelRoutine() {
         // Default implementation - can be overridden by clients
     }
 } 

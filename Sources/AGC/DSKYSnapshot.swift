@@ -21,7 +21,7 @@ public enum DSKYKeyCode: Int, CaseIterable, Sendable {
     case clear = 0o36
     case noun = 0o37
 
-    /// PRO is delivered through the channel-13 u-bit mask path, not channel 15.
+    /// PROCEED/STANDBY is inverted bit 14 of channel 032, not a channel-15 keycode.
     case pro = -1
 
     public var label: String {

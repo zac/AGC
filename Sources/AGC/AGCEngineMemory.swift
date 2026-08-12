@@ -86,14 +86,9 @@ extension AGCEngine {
         return findMemoryWord(address & 0o7777)
     }
     
-    /// Write a word to memory at the given address
+    /// Write a word to memory at the given 12-bit address, honoring EB for switched erasable.
     func writeMemory(_ address: Int, _ value: Int) {
-        if address < 0o2000 {
-            // Only erasable memory is writable
-            let bank = address / ERASABLE_BANK_SIZE
-            let offset = address % ERASABLE_BANK_SIZE
-            state.erasableMemory[bank][offset] = value & 0o37777 // Mask to 15 bits
-        }
+        assignFromPointer(address, value)
     }
     
     /// Read a word from a specific register

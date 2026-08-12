@@ -27,6 +27,20 @@ class AGCTests {
         engine.writeRegister(.regA, engine.state.accumulator)
     }
 
+    private func prepareBareInstructionRun(_ engine: AGCEngine) {
+        let state = engine.state
+        state.interruptRequests = Array(repeating: 0, count: 11)
+        state.downruptTimeValid = false
+        state.allowInterrupt = false
+        state.extraCode = false
+        state.pendFlag = false
+        state.pendDelay = 0
+        state.extraDelay = 0
+        state.indexValue = 0
+        state.substituteInstruction = false
+        state.inIsr = false
+    }
+
     private func erasableLocation(for address: Int) -> (bank: Int, offset: Int) {
         precondition(address >= 0 && address < 0o1400, "Address out of unswitched range")
         if address < 0o400 {
@@ -60,14 +74,14 @@ class AGCTests {
             outputs.append((channel, value))
         }
 
-        func channelInput() async -> [AGCChannelInput]? {
+        func channelInput() -> [AGCChannelInput]? {
             guard !pendingInputs.isEmpty else { return nil }
             return pendingInputs.removeFirst()
         }
 
         func requestRadarData() {}
         func shiftToDeda(data: Int) {}
-        func channelRoutine() async {}
+        func channelRoutine() {}
     }
 
     @Test func engineCreation() async throws {
@@ -145,6 +159,73 @@ class AGCTests {
         engine.writeRegister(.regZ, 0o1234)
         #expect(state.nextZ == 0o1234)
         #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o1234)
+    }
+
+    @Test func switchedErasableWritesUseEBBank() throws {
+        let (engine, state) = try makeEngine()
+        let switchedAddress = 0o1400
+        engine.writeRegister(.regEB, 0o2400) // EB = 5
+        state.erasableMemory[5][0] = 0o22222
+        state.erasableMemory[3][0] = 0o33333
+        setAccumulator(0o11111, engine: engine)
+
+        engine.performXCH(address10: switchedAddress)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o22222)
+        #expect(state.erasableMemory[5][0] == 0o11111, "XCH into 01400 must write the EB-selected bank")
+        #expect(state.erasableMemory[3][0] == 0o33333, "Unselected bank 3 must not be used as a stand-in for switched E")
+    }
+
+    @Test func switchedErasableCADoesNotCorruptUnselectedBank() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regEB, 0o2400) // EB = 5
+        state.erasableMemory[5][0] = 0o12345
+        state.erasableMemory[3][0] = 0
+
+        engine.performCA(address12: 0o1400)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o12345)
+        #expect(state.erasableMemory[5][0] == 0o12345)
+        #expect(state.erasableMemory[3][0] == 0, "CA of switched E must not write bank 3")
+    }
+
+    @Test func assignFromPointerDoesNotWriteFixedMemoryAsErasable() throws {
+        let (engine, state) = try makeEngine()
+        state.erasableMemory[4][0] = 0o77777
+
+        engine.assignFromPointer(0o2000, 0o11111)
+
+        #expect(state.erasableMemory[4][0] == 0o77777)
+    }
+
+    @Test func executePathCALoadsErasableThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        state.erasableMemory[0][0o60] = 0o12345
+        state.fixedMemory[2][0] = 0o30060 // CA 060 at 04000
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o12345)
+    }
+
+    @Test func executePathXCHWritesSwitchedErasableBank() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        engine.writeRegister(.regEB, 0o2400) // bank 5
+        engine.writeRegister(.regBB, 0o5)
+        state.erasableMemory[5][0] = 0o22222
+        state.erasableMemory[3][0] = 0o33333
+        setAccumulator(0o11111, engine: engine)
+        state.fixedMemory[2][0] = 0o57400 // XCH 01400
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o22222)
+        #expect(state.erasableMemory[5][0] == 0o11111)
+        #expect(state.erasableMemory[3][0] == 0o33333)
     }
 
     @Test func simulateDVMatchesHardwareFallback() throws {
@@ -360,6 +441,33 @@ class AGCTests {
 
         #expect(snapshot.interruptRequests[5] == 1)
         #expect(snapshot.inputChannels[0o15] == 0o21)
+    }
+
+    @Test func channel16RaisesKeyrupt2() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+        state.downruptTimeValid = false
+        state.allowInterrupt = false
+        io.pendingInputs = [[AGCChannelInput(channel: 0o16, value: 0o20000)]]
+
+        await engine.runEngine(for: 1)
+
+        #expect(state.interruptRequests[6] == 1)
+        #expect(state.inputChannels[0o16] == 0o20000)
+    }
+
+    @Test func proKeyClearsChannel32Bit14() async throws {
+        let runtime = try AGCRuntime(coreImage: Data())
+        let before = await runtime.snapshot()
+        #expect((before.inputChannels[0o32] ?? 0) & 0o20000 != 0)
+
+        await runtime.sendDSKYKey(.pro)
+        let snapshot = await runtime.step(cycles: 2)
+
+        #expect((snapshot.inputChannels[0o32] ?? 0) & 0o20000 == 0, "PROCEED is inverted bit 14 of channel 032")
+        #expect(snapshot.dsky.proKeyPressed)
+        #expect((snapshot.inputChannels[0o13] ?? 0) & 0o20000 == 0, "PRO must not poke channel 013")
     }
 
     @Test func luminaryPacedV35EDrivesLampTestDisplay() async throws {
@@ -953,20 +1061,20 @@ struct AGCIntegrationTests {
     @Test func `Composite merges channel input`() async throws {
         final class PartA: AGCIOProtocol, @unchecked Sendable {
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o15, value: 0o11)] }
+            func channelInput() -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o15, value: 0o11)] }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
-            func channelRoutine() async {}
+            func channelRoutine() {}
         }
         final class PartB: AGCIOProtocol, @unchecked Sendable {
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o16, value: 0o22)] }
+            func channelInput() -> [AGCChannelInput]? { [AGCChannelInput(channel: 0o16, value: 0o22)] }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
-            func channelRoutine() async {}
+            func channelRoutine() {}
         }
         let composite = CompositeAGCIO(children: [PartA(), PartB()])
-        let merged = await composite.channelInput()
+        let merged = composite.channelInput()
         #expect(merged == [
             AGCChannelInput(channel: 0o15, value: 0o11),
             AGCChannelInput(channel: 0o16, value: 0o22)
@@ -1074,10 +1182,10 @@ struct AGCIntegrationTests {
             var radars = 0
             var routines = 0
             func channelOutput(channel: Int, value: Int) { outputs += 1 }
-            func channelInput() async -> [AGCChannelInput]? { nil }
+            func channelInput() -> [AGCChannelInput]? { nil }
             func requestRadarData() { radars += 1 }
             func shiftToDeda(data: Int) {}
-            func channelRoutine() async { routines += 1 }
+            func channelRoutine() { routines += 1 }
         }
         let a = CountIO()
         let b = CountIO()
@@ -1088,19 +1196,19 @@ struct AGCIntegrationTests {
         #expect(a.radars == 1 && b.radars == 1)
     }
 
-    @Test func `Composite awaits channel routine`() async {
+    @Test func `Composite fans out channel routine`() {
         final class RoutineIO: AGCIOProtocol, @unchecked Sendable {
             var count = 0
             func channelOutput(channel: Int, value: Int) {}
-            func channelInput() async -> [AGCChannelInput]? { nil }
+            func channelInput() -> [AGCChannelInput]? { nil }
             func requestRadarData() {}
             func shiftToDeda(data: Int) {}
-            func channelRoutine() async { count += 1 }
+            func channelRoutine() { count += 1 }
         }
         let a = RoutineIO()
         let b = RoutineIO()
         let c = CompositeAGCIO(children: [a, b])
-        await c.channelRoutine()
+        c.channelRoutine()
         #expect(a.count == 1 && b.count == 1)
     }
 
@@ -1119,22 +1227,22 @@ private final class LMTestIO: AGCIOProtocol, @unchecked Sendable {
 
     func channelOutput(channel: Int, value: Int) {}
 
-    func channelInput() async -> [AGCChannelInput]? {
+    func channelInput() -> [AGCChannelInput]? {
         guard !pendingInputs.isEmpty else { return nil }
         return pendingInputs.removeFirst()
     }
 
     func requestRadarData() {}
     func shiftToDeda(data: Int) {}
-    func channelRoutine() async {}
+    func channelRoutine() {}
 }
 
 private final class RadarSpyIO: AGCIOProtocol, @unchecked Sendable {
     private(set) var radarCallCount = 0
 
     func channelOutput(channel: Int, value: Int) {}
-    func channelInput() async -> [AGCChannelInput]? { nil }
+    func channelInput() -> [AGCChannelInput]? { nil }
     func requestRadarData() { radarCallCount += 1 }
     func shiftToDeda(data: Int) {}
-    func channelRoutine() async {}
+    func channelRoutine() {}
 }

@@ -61,7 +61,7 @@ struct DSKYTests {
         await dsky.sendKeycode(0o21)  // VERB key
         
         // Check that keypress is queued
-        let input = await dsky.channelInput()
+        let input = dsky.channelInput()
         #expect(input != nil, "Keypress should be queued")
         #expect(input?.first == AGCChannelInput(channel: 0o15, value: 0o21), "Keycode should match")
     }
@@ -71,13 +71,13 @@ struct DSKYTests {
         await dsky.sendKeycode(0o21)
         await dsky.sendKeycode(3)
         await dsky.sendKeycode(0o34)
-        let first = await dsky.channelInput()
-        let second = await dsky.channelInput()
-        let third = await dsky.channelInput()
+        let first = dsky.channelInput()
+        let second = dsky.channelInput()
+        let third = dsky.channelInput()
         #expect(first?.first == AGCChannelInput(channel: 0o15, value: 0o21))
         #expect(second?.first == AGCChannelInput(channel: 0o15, value: 3))
         #expect(third?.first == AGCChannelInput(channel: 0o15, value: 0o34))
-        let empty = await dsky.channelInput()
+        let empty = dsky.channelInput()
         #expect(empty == nil)
     }
 
@@ -90,11 +90,11 @@ struct DSKYTests {
         }
 
         for keycode in sequence {
-            let next = await dsky.channelInput()
+            let next = dsky.channelInput()
             #expect(next?.first == AGCChannelInput(channel: 0o15, value: keycode))
         }
 
-        #expect(await dsky.channelInput() == nil)
+        #expect(dsky.channelInput() == nil)
     }
     
     @Test func proKey() async {
@@ -102,9 +102,10 @@ struct DSKYTests {
 
         await dsky.sendProKey(true)
 
-        let mask = await dsky.channelInput()
-        let pro = await dsky.channelInput()
+        let mask = dsky.channelInput()
+        let pro = dsky.channelInput()
         #expect(mask?.first == AGCChannelInput(channel: 0o432, value: 0o20000), "Mask should be set")
-        #expect(pro?.first == AGCChannelInput(channel: 0o13, value: 0), "PRO key value should be set")
+        #expect(pro?.first == AGCChannelInput(channel: 0o32, value: 0), "PRO writes inverted bit 14 of channel 032")
+        #expect(dsky.proKeyPressed)
     }
 }

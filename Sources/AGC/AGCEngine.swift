@@ -202,7 +202,6 @@ public final class AGCEngine {
         lastRhcRoll = 0
         imuTiming = IMUTiming()
         gyroTiming = GyroTiming()
-        IMUBurst.reset()
     }
     
 

@@ -7,6 +7,9 @@ struct IMUTiming {
 
     var cycleCount: UInt64 = 0
     var channel14: Int = 0
+    var countCDUX = 0
+    var countCDUY = 0
+    var countCDUZ = 0
     
     mutating func shouldEmitBurst(state: AGCState, currentCycle: UInt64) -> Bool {
         let imuBits = state.inputChannels[0o14] & 0o70000  // Check IMU CDU drive bits
@@ -22,22 +25,86 @@ struct IMUTiming {
             cycleCount += IMUTiming.BURST_CYCLES
             
             // Determine pulses wanted on each axis
-            channel14 = IMUBurst.burstOutput(state: state,
-                                           driveBitMask: 0o40000,
-                                           counterRegister: .regCDUXCMD,
-                                           channel: 0o174)
-            channel14 |= IMUBurst.burstOutput(state: state,
-                                            driveBitMask: 0o20000,
-                                            counterRegister: .regCDUYCMD,
-                                            channel: 0o175)
-            channel14 |= IMUBurst.burstOutput(state: state,
-                                            driveBitMask: 0o10000,
-                                            counterRegister: .regCDUZCMD,
-                                            channel: 0o176)
+            channel14 = burstOutput(state: state,
+                                    driveBitMask: 0o40000,
+                                    counterRegister: .regCDUXCMD,
+                                    channel: 0o174)
+            channel14 |= burstOutput(state: state,
+                                     driveBitMask: 0o20000,
+                                     counterRegister: .regCDUYCMD,
+                                     channel: 0o175)
+            channel14 |= burstOutput(state: state,
+                                     driveBitMask: 0o10000,
+                                     counterRegister: .regCDUZCMD,
+                                     channel: 0o176)
             return true
         }
         
         return false
+    }
+
+    /// Process burst output for one IMU CDU drive axis.
+    /// Returns non-0 if a non-zero count remains on the axis, 0 otherwise.
+    mutating func burstOutput(
+        state: AGCState,
+        driveBitMask: Int,
+        counterRegister: Register,
+        channel: Int
+    ) -> Int {
+        var driveCountSaved: Int
+        switch counterRegister {
+        case .regCDUXCMD: driveCountSaved = countCDUX
+        case .regCDUYCMD: driveCountSaved = countCDUY
+        case .regCDUZCMD: driveCountSaved = countCDUZ
+        default: return 0
+        }
+
+        var driveCount = 0
+        var direction = 0
+
+        let driveBit = state.inputChannels[0o14] & driveBitMask
+        if driveBit != 0 {
+            driveCount = state.erasableMemory[0][counterRegister.rawValue]
+            state.erasableMemory[0][counterRegister.rawValue] = 0
+        }
+
+        direction = driveCount & 0o40000
+        if direction != 0 {
+            driveCount ^= 0o77777
+            driveCountSaved -= driveCount
+        } else {
+            driveCountSaved += driveCount
+        }
+
+        if driveCountSaved < 0 {
+            driveCountSaved = -driveCountSaved
+            direction = 0o40000
+        } else {
+            direction = 0
+        }
+
+        var delta = driveCountSaved
+        if delta >= 192 / IMUTiming.COARSE_SMOOTH {
+            delta = 192 / IMUTiming.COARSE_SMOOTH
+        }
+
+        if delta > 0 {
+            state.outputChannels[channel] = direction | delta
+            driveCountSaved -= delta
+        }
+
+        if direction != 0 {
+            driveCountSaved = -driveCountSaved
+        }
+
+        switch counterRegister {
+        case .regCDUXCMD: countCDUX = driveCountSaved
+        case .regCDUYCMD: countCDUY = driveCountSaved
+        case .regCDUZCMD: countCDUZ = driveCountSaved
+        default: break
+        }
+
+        return driveCountSaved
     }
 }
 
@@ -99,89 +166,6 @@ struct GyroTiming {
         }
         
         return didOutput
-    }
-}
-
-/// Handles coarse-alignment output pulses for IMU CDU drive axes
-struct IMUBurst {
-    // Actor-protected counts for each axis (in target CPU format)
-    nonisolated(unsafe) static var countCDUX = 0
-    nonisolated(unsafe) static var countCDUY = 0
-    nonisolated(unsafe) static var countCDUZ = 0
-
-    static func reset() {
-        countCDUX = 0
-        countCDUY = 0
-        countCDUZ = 0
-    }
-    
-    /// Process burst output for one IMU CDU drive axis
-    /// Returns non-0 if a non-zero count remains on the axis, 0 otherwise
-    static func burstOutput(state: AGCState, 
-                    driveBitMask: Int, 
-                    counterRegister: Register,
-                    channel: Int) -> Int {
-        // Get the saved count for this axis
-        var driveCountSaved: Int
-        switch counterRegister {
-        case .regCDUXCMD: driveCountSaved = countCDUX
-        case .regCDUYCMD: driveCountSaved = countCDUY
-        case .regCDUZCMD: driveCountSaved = countCDUZ
-        default: return 0
-        }
-        
-        var driveCount = 0
-        var direction = 0
-        
-        // Check if driving this axis
-        let driveBit = state.inputChannels[0o14] & driveBitMask
-        if driveBit != 0 {
-            // Retrieve count from counter register
-            driveCount = state.erasableMemory[0][counterRegister.rawValue]
-            state.erasableMemory[0][counterRegister.rawValue] = 0
-        }
-        
-        // Handle negative counts
-        direction = driveCount & 0o40000
-        if direction != 0 {
-            driveCount ^= 0o77777
-            driveCountSaved -= driveCount
-        } else {
-            driveCountSaved += driveCount
-        }
-        
-        if driveCountSaved < 0 {
-            driveCountSaved = -driveCountSaved
-            direction = 0o40000
-        } else {
-            direction = 0
-        }
-        
-        // Calculate pulses to output (max 192 per burst)
-        var delta = driveCountSaved
-        if delta >= 192 / IMUTiming.COARSE_SMOOTH {
-            delta = 192 / IMUTiming.COARSE_SMOOTH
-        }
-        
-        // Output pulses if count is non-zero
-        if delta > 0 {
-            state.outputChannels[channel] = direction | delta
-            driveCountSaved -= delta
-        }
-        
-        if direction != 0 {
-            driveCountSaved = -driveCountSaved
-        }
-        
-        // Save updated count
-        switch counterRegister {
-        case .regCDUXCMD: countCDUX = driveCountSaved
-        case .regCDUYCMD: countCDUY = driveCountSaved
-        case .regCDUZCMD: countCDUZ = driveCountSaved
-        default: break
-        }
-        
-        return driveCountSaved
     }
 }
 

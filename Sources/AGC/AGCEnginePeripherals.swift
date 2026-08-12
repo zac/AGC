@@ -2,8 +2,8 @@ import Foundation
 
 extension AGCEngine {
     /// Get input from peripherals for a channel
-    func channelInput() async -> Bool {
-        guard let input = await ioDelegate?.channelInput() else {
+    func channelInput() -> Bool {
+        guard let input = ioDelegate?.channelInput() else {
             return false
         }
 
@@ -29,9 +29,11 @@ extension AGCEngine {
                 let mergedValue = (maskedInput & channelMask) | (readIO(address: normalizedChannel) & ~channelMask)
                 let storedValue = writeIO(address: normalizedChannel, value: mergedValue)
                 
-                // If this is a keystroke from the DSKY (channel 15), generate KEYRUPT interrupt
+                // If this is a keystroke from the DSKY (channel 15), generate KEYRUPT1
                 if normalizedChannel == 0o15 {
-                    state.interruptRequests[5] = 1  // KEYRUPT interrupt
+                    state.interruptRequests[5] = 1  // KEYRUPT1
+                } else if normalizedChannel == 0o16 {
+                    state.interruptRequests[6] = 1  // KEYRUPT2 (MARK / descent-rate keys)
                 } else if normalizedChannel == 0o173 {
                     state.erasableMemory[0][Register.regINLINK.rawValue] = storedValue & 0o77777
                     state.interruptRequests[7] = 1  // UPRUPT interrupt

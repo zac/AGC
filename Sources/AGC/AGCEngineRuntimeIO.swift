@@ -1,21 +1,35 @@
 import Foundation
 
 extension AGCEngine {
-    /// Start the simulation engine.
-    /// This initializes the AGC state and starts the main execution loop running at 11.7 microsecond intervals
+    /// Start the simulation engine, catching up to wall-clock AGC rate in batches.
+    ///
+    /// Individual MCTs are 11.7 µs and cannot be paced with `Task.sleep`. This
+    /// loop runs `AGC_PER_SECOND` cycles per wall-clock second, yielding between
+    /// batches. Prefer ``runEngine(for:)`` or ``AGCRuntime/step(cycles:)`` for
+    /// deterministic coupling to a frame loop.
     public func startEngine() {
         state.resetForBoot()
         resetPeripheralTiming()
         try? loadBinFile()
 
-        // Start main execution loop
         engineTask = Task.detached { [weak self] in
             guard let self = self else { return }
+            var last = CFAbsoluteTimeGetCurrent()
+            var leftover = 0.0
             while !Task.isCancelled {
-                // Run one machine cycle
-                _ = await self.executeCycle()
-                // Wait 11.7 microseconds between cycles
-                try? await Task.sleep(nanoseconds: 11_700)
+                let now = CFAbsoluteTimeGetCurrent()
+                leftover += max(0, now - last) * Double(self.AGC_PER_SECOND)
+                last = now
+                var cycles = UInt64(leftover)
+                leftover -= Double(cycles)
+                if cycles > self.AGC_PER_SECOND {
+                    cycles = self.AGC_PER_SECOND
+                }
+                for _ in 0..<cycles {
+                    if Task.isCancelled { break }
+                    _ = self.executeCycle()
+                }
+                try? await Task.sleep(for: .milliseconds(1))
             }
         }
     }
@@ -23,18 +37,30 @@ extension AGCEngine {
     /// Runs the simulation for a fixed number of cycles, or until `Task` cancellation when `cycles == UInt64.max`.
     ///
     /// For visionOS / RealityKit, prefer driving the engine from your frame loop with a bounded cycle count
-    /// (deterministic coupling to physics). Use `startEngine()` for wall-clock–paced stepping (~11.7µs/cycle).
+    /// (deterministic coupling to physics). Use `startEngine()` for wall-clock–paced stepping.
     public func runEngine(for cycles: UInt64) async {
+        let yieldEvery: UInt64 = 4_096
         if cycles == UInt64.max {
+            var iterated: UInt64 = 0
             while !Task.isCancelled {
-                _ = await self.executeCycle()
+                _ = executeCycle()
+                iterated += 1
+                if iterated > 0 && iterated.isMultiple(of: yieldEvery) {
+                    await Task.yield()
+                }
             }
         } else {
             var remaining = cycles
             while remaining > 0 {
                 if Task.isCancelled { break }
-                _ = await self.executeCycle()
-                remaining -= 1
+                let batch = min(remaining, yieldEvery)
+                for _ in 0..<batch {
+                    _ = executeCycle()
+                }
+                remaining -= batch
+                if remaining > 0 {
+                    await Task.yield()
+                }
             }
         }
     }

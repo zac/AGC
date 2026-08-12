@@ -3,23 +3,26 @@ import Foundation
 /// DSKY (Display/Keyboard) implementation for Apollo Guidance Computer
 /// Handles bidirectional communication with AGC via I/O channels
 public final class DSKY: AGCIOProtocol, @unchecked Sendable {
-    private actor KeypressQueueActor {
-        var queue: [AGCChannelInput] = []
+    private final class KeypressQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private var queue: [AGCChannelInput] = []
 
         func append(_ item: AGCChannelInput) {
+            lock.lock()
             queue.append(item)
+            lock.unlock()
         }
 
         /// Returns one queued I/O event per call so multi-key sequences are not collapsed.
         func dequeueOne() -> AGCChannelInput? {
+            lock.lock()
+            defer { lock.unlock() }
             guard !queue.isEmpty else { return nil }
             return queue.removeFirst()
         }
-
-        var isEmpty: Bool { queue.isEmpty }
     }
-    
-    private let keypressActor = KeypressQueueActor()
+
+    private let keypressQueue = KeypressQueue()
     
     // MARK: - Display State
     
@@ -64,8 +67,11 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
     /// Channel 11 status
     public var channel11: Int = 0
     
-    /// Channel 13 status (PRO key, lamp test, etc.)
+    /// Channel 13 status (lamp test, TIME6 enable, etc.)
     public var channel13: Int = 0
+
+    /// Channel 32 status (PROCEED/STANDBY is inverted bit 14)
+    public var channel32: Int = 0o20000
     
     /// Channel 10 latched values (16 rows)
     private var channel10Rows: [Int] = Array(repeating: 0, count: 16)
@@ -81,9 +87,9 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
         return (channel13 & 0o1000) != 0
     }
     
-    /// PRO key state
+    /// PRO key state (channel 032 bit 14, inverted: 0 = pressed)
     public var proKeyPressed: Bool {
-        return (channel13 & 0o40000) == 0  // Inverted: 0 = pressed
+        return (channel32 & 0o20000) == 0
     }
     
     /// COMP ACTY indicator
@@ -121,8 +127,8 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
         }
     }
     
-    public func channelInput() async -> [AGCChannelInput]? {
-        guard let item = await keypressActor.dequeueOne() else { return nil }
+    public func channelInput() -> [AGCChannelInput]? {
+        guard let item = keypressQueue.dequeueOne() else { return nil }
         return [item]
     }
     
@@ -134,7 +140,7 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
         // Not applicable for DSKY (DEDA is for AGS)
     }
     
-    public func channelRoutine() async {
+    public func channelRoutine() {
         // Periodic updates if needed
     }
     
@@ -365,7 +371,7 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
     /// Send a keypress to the AGC
     /// - Parameter keycode: Keycode value (matching yaDSKY callbacks.c)
     public func sendKeycode(_ keycode: Int) async {
-        await keypressActor.append(AGCChannelInput(channel: 0o15, value: keycode & 0o77777))
+        keypressQueue.append(AGCChannelInput(channel: 0o15, value: keycode & 0o77777))
     }
 
     /// Send a typed DSKY key to the AGC.
@@ -378,11 +384,14 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
         }
     }
     
-    /// Send PRO key press state
+    /// Send PRO key press state.
+    /// PROCEED/STANDBY is inverted bit 14 of channel 032. A 0432 mask packet
+    /// limits the write to that bit, matching yaAGC/yaDSKY.
     /// - Parameter pressed: true when pressed, false when released
     public func sendProKey(_ pressed: Bool) async {
-        await keypressActor.append(AGCChannelInput(channel: 0o432, value: 0o20000))
-        await keypressActor.append(AGCChannelInput(channel: 0o13, value: pressed ? 0 : 0o20000))
+        keypressQueue.append(AGCChannelInput(channel: 0o432, value: 0o20000))
+        keypressQueue.append(AGCChannelInput(channel: 0o32, value: pressed ? 0 : 0o20000))
+        channel32 = (channel32 & ~0o20000) | (pressed ? 0 : 0o20000)
     }
     
     // MARK: - Display Helpers
