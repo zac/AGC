@@ -343,7 +343,6 @@ extension AGCEngine {
     func performBZF(address12: Int) -> Bool {
         if state.accumulator == 0 || state.accumulator == 0o177777 {
             state.nextZ = address12
-            state.extraDelay += 1
             backtraceAdd(tag: 0, target: address12)
             return true
         }
@@ -353,7 +352,6 @@ extension AGCEngine {
     func performBZMF(address12: Int) -> Bool {
         if state.accumulator == 0 || (state.accumulator & 0o100000) != 0 {
             state.nextZ = address12
-            state.extraDelay += 1
             backtraceAdd(tag: 0, target: address12)
             return true
         }

@@ -10,6 +10,7 @@ public struct AGCRegisterSnapshot: Equatable, Sendable {
     public let bb: Int
     public let rendezvousRadar: Int
     public let altitudeMeter: Int
+    public let thrust: Int
 
     public init(state: AGCState) {
         self.a = state.erasableMemory[0][Register.regA.rawValue] & 0o177777
@@ -21,6 +22,7 @@ public struct AGCRegisterSnapshot: Equatable, Sendable {
         self.bb = state.erasableMemory[0][Register.regBB.rawValue] & 0o177777
         self.rendezvousRadar = state.erasableMemory[0][Register.regRNRAD.rawValue] & 0o177777
         self.altitudeMeter = state.erasableMemory[0][Register.regALTM.rawValue] & 0o177777
+        self.thrust = state.erasableMemory[0][Register.regTHRUST.rawValue] & 0o77777
     }
 }
 
@@ -159,6 +161,9 @@ public actor AGCRuntime {
     private let coreImage: Data
     private let radarInputBox = AGCRadarInputBox()
     private var components: AGCRuntimeComponents
+    private var breakpoints: Set<Int> = []
+    private var watchAddresses: [Int] = []
+    private var hitBreakpoint = false
 
     public init(binFile: URL) throws {
         let data = try Data(contentsOf: binFile)
@@ -185,6 +190,114 @@ public actor AGCRuntime {
 
     public func snapshot() -> AGCSnapshot {
         makeSnapshot()
+    }
+
+    public func goldenTraceSample() -> AGCGoldenTraceSample {
+        AGCGoldenTraceSample(state: components.state)
+    }
+
+    /// Step through `maxCycle` MCTs, capturing samples on the yaAGC golden-trace schedule.
+    /// Optional DSKY keys are injected so `ChannelInput` sees them when `cycleCounter` equals `event.cycle`.
+    public func collectGoldenTrace(
+        throughCycle maxCycle: UInt64 = AGCGoldenTraceSchedule.defaultHorizon,
+        keys: [AGCGoldenTraceKeyEvent] = []
+    ) async -> [AGCGoldenTraceSample] {
+        var samples: [AGCGoldenTraceSample] = []
+        var keyIndex = 0
+        var lastSampled: UInt64?
+        func captureIfNeeded(_ cycle: UInt64, force: Bool = false) {
+            guard lastSampled != cycle else { return }
+            if force || AGCGoldenTraceSchedule.shouldSample(cycle) {
+                samples.append(goldenTraceSample())
+                lastSampled = cycle
+            }
+        }
+
+        captureIfNeeded(0, force: AGCGoldenTraceSchedule.shouldSample(0))
+
+        var current = components.state.cycleCounter
+        while current < maxCycle {
+            let nextKey = keyIndex < keys.count ? keys[keyIndex].cycle : nil
+            let nextSample = AGCGoldenTraceSchedule.nextSample(after: current, through: maxCycle)
+
+            var runUntil = maxCycle
+            if let nextSample {
+                runUntil = min(runUntil, nextSample)
+            }
+            if let nextKey, nextKey > 0 {
+                runUntil = min(runUntil, nextKey - 1)
+            }
+
+            if runUntil > current {
+                await components.engine.runEngine(for: runUntil - current)
+                current = components.state.cycleCounter
+                captureIfNeeded(current, force: keys.contains(where: { $0.cycle == current }))
+                continue
+            }
+
+            if let nextKey, current + 1 == nextKey, keyIndex < keys.count {
+                await components.dsky.send(keys[keyIndex].key)
+                keyIndex += 1
+                await components.engine.runEngine(for: 1)
+                current = components.state.cycleCounter
+                captureIfNeeded(current, force: true)
+                continue
+            }
+
+            await components.engine.runEngine(for: 1)
+            current = components.state.cycleCounter
+            captureIfNeeded(current)
+        }
+        return samples
+    }
+
+    public func debuggerSnapshot() -> AGCDebuggerSnapshot {
+        makeDebuggerSnapshot()
+    }
+
+    public func setBreakpoint(_ address: Int) {
+        breakpoints.insert(address & 0o7777)
+    }
+
+    public func clearBreakpoint(_ address: Int) {
+        breakpoints.remove(address & 0o7777)
+    }
+
+    public func clearBreakpoints() {
+        breakpoints.removeAll()
+        hitBreakpoint = false
+    }
+
+    public func watchErasable(_ address: Int) {
+        let word = address & 0o1777
+        if !watchAddresses.contains(word) {
+            watchAddresses.append(word)
+        }
+    }
+
+    public func clearErasableWatches() {
+        watchAddresses.removeAll()
+    }
+
+    public func readErasable(_ address: Int) -> Int {
+        components.engine.findMemoryWord(address & 0o1777) & 0o177777
+    }
+
+    /// Run MCTs until one instruction executes, or a breakpoint on Z is hit.
+    public func stepInstruction() -> AGCSnapshot {
+        hitBreakpoint = false
+        var safety = 0
+        while safety < 128 {
+            let executed = components.engine.executeCycle()
+            safety += 1
+            let z = components.state.erasableMemory[0][Register.regZ.rawValue] & 0o7777
+            if breakpoints.contains(z) {
+                hitBreakpoint = true
+                break
+            }
+            if executed { break }
+        }
+        return makeSnapshot()
     }
 
     public func sendDSKYKey(_ key: DSKYKeyCode) async {
@@ -289,6 +402,36 @@ public actor AGCRuntime {
             backtrace: state.backtrace,
             dsky: components.dsky.snapshot,
             channelTrace: components.compositeIO.channelTrace()
+        )
+    }
+
+    private func makeDebuggerSnapshot() -> AGCDebuggerSnapshot {
+        let state = components.state
+        let z = state.erasableMemory[0][Register.regZ.rawValue] & 0o7777
+        let word = components.engine.fetchInstructionWord(at: z)
+        let current = AGCDisassembler.disassemble(word: word, at: z, extraCode: state.extraCode)
+        let listing: [AGCDisassembledInstruction] = (-4...8).compactMap { offset in
+            let address = (z + offset) & 0o7777
+            let listed = components.engine.fetchInstructionWord(at: address)
+            return AGCDisassembler.disassemble(word: listed, at: address, extraCode: offset == 0 && state.extraCode)
+        }
+        let watches = watchAddresses.map { address in
+            AGCErasableWatch(address: address, value: components.engine.findMemoryWord(address))
+        }
+        let packets = components.compositeIO.channelTrace().suffix(16).compactMap { entry -> String? in
+            guard let data = AGCPacket.encode(channel: entry.channel, value: entry.value) else { return nil }
+            let hex = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+            return "\(entry.direction.rawValue) \(hex)"
+        }
+        return AGCDebuggerSnapshot(
+            current: current,
+            extraCode: state.extraCode,
+            inIsr: state.inIsr,
+            breakpoints: breakpoints.sorted(),
+            watches: watches,
+            hitBreakpoint: hitBreakpoint,
+            listing: listing,
+            yaAGCPackets: Array(packets)
         )
     }
 }

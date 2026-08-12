@@ -37,10 +37,10 @@ struct LMCoreCommandDecodingTests {
         let snapshot = LMVehicleSnapshot(out0: 0o377, out1: 0o377)
         let jets = Set(snapshot.rcsJets.map(\.jet))
 
-        #expect(jets == Set([.jet1, .jet2, .jet5, .jet6, .jet9, .jet10, .jet13, .jet14]))
+        #expect(jets == Set(LMRCSJet.allCases))
         #expect(snapshot.discreteGroups.contains { $0.name.contains("positive pitch") && $0.mask == 0o125 })
         #expect(snapshot.discreteGroups.contains { $0.name.contains("negative pitch") && $0.mask == 0o252 })
-        #expect(snapshot.unmappedBits.contains { $0.channel == 0o6 && $0.bit == 1 })
+        #expect(!snapshot.unmappedBits.contains { $0.channel == 0o6 && $0.bit <= 8 })
     }
 
     @Test func `vehicle snapshot decodes source backed engine gimbal control and crew inputs`() {
@@ -94,8 +94,13 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(scenario.initialState.massKilograms == 33_000.0 * 0.45359237)
         #expect(scenario.checkpoints.map(\.program) == [63, 64, 65, 66])
         #expect(!scenario.sourceStatus.sources.isEmpty)
-        #expect(scenario.sourceStatus.unmodeledItems.contains("RCS jet positions, vectors, and thrust"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("RCS jet positions, vectors, and thrust"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("Channel 006 P-axis RCS per-jet geometry (JETSALL group masks only)"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("LM inertia tensor"))
         #expect(LMVehicleConfiguration.sourceBackedDefault.mainEngine?.engineOnThrustNewtons == nil)
+        #expect(LMVehicleConfiguration.sourceBackedDefault.rcsJets.count == 16)
+        #expect(LMVehicleConfiguration.sourceBackedDefault.rcsJets[.jet3] != nil)
+        #expect(LMVehicleSnapshot().dps.throttleMappingStatus.isSourceBacked)
     }
 
     @Test func `simulation runtime step advances AGC and gravity deterministically`() async throws {
@@ -227,6 +232,77 @@ struct LMCoreScenarioAndDynamicsTests {
         )
 
         #expect(commanded.velocityMetersPerSecond.z == gravityOnly.velocityMetersPerSecond.z)
+    }
+
+    @Test func `mapped DPS throttle at minimum increases vertical acceleration when engine is on`() {
+        let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 1_000)
+        let gravityOnly = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+        let powered = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(outputChannel11: 0o10000)
+                .withCommandedThrust(LMDPSThrottleMap.minimumThrustNewtons),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+
+        #expect(powered.velocityMetersPerSecond.z > gravityOnly.velocityMetersPerSecond.z)
+        #expect(LMDPSThrottleMap.onesComplement15(0o10000) == 4096)
+        #expect(abs((LMDPSThrottleMap.fmaxNewtons / LMDPSThrottleMap.fmaxPulseUnits) - LMDPSThrottleMap.newtonsPerPulse) < 1e-9)
+    }
+
+    @Test func `default channel 5 RCS geometry produces +X translation for jet 10`() {
+        let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 1_000)
+        let gravityOnly = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+        let next = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(out0: 0o40),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+
+        #expect(LMVehicleSnapshot(out0: 0o40).rcsJets.map(\.jet) == [.jet10])
+        #expect(next.velocityMetersPerSecond.z > gravityOnly.velocityMetersPerSecond.z)
+        #expect(LMVehicleConfiguration.sourceBackedDefault.rcsJets.count == 16)
+    }
+
+    @Test func `channel 6 plus-P jets produce NASA plus-X torque`() {
+        let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 1_000)
+        let gravityOnly = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+        let next = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(out1: 0o125),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+
+        #expect(Set(LMVehicleSnapshot(out1: 0o125).rcsJets.map(\.jet)) == Set([.jet3, .jet7, .jet11, .jet15]))
+        #expect(next.angularVelocityRadiansPerSecond.z > gravityOnly.angularVelocityRadiansPerSecond.z)
+    }
+
+    @Test func `1/ACCS descent inertia is finite at Apollo 11 separation mass`() {
+        let mass = 33_000.0 * 0.45359237
+        let inertia = LMInertiaMap.diagonalInertiaKilogramMetersSquared(massKilograms: mass, stage: .descent)
+        let alphaP = LMInertiaMap.oneJetAcceleration(massKilograms: mass, axis: .p, stage: .descent)
+
+        #expect(inertia.x > 0 && inertia.y > 0 && inertia.z > 0)
+        #expect(alphaP > 0)
+        #expect(abs(inertia.z * alphaP - LMInertiaMap.oneJetTorqueNewtonMeters) < 1e-6)
+        #expect(LMInertiaMap.modelingStatus.isSourceBacked)
     }
 
     @Test func `raw radar frame input is retained by simulation snapshots`() async throws {

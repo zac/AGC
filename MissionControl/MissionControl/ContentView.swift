@@ -56,6 +56,9 @@ final class MissionControlViewModel {
     private(set) var latestChannelTrace: [AGCChannelTraceEntry] = []
     private(set) var latestSimulationTrace: [LMSimulationTraceSample] = []
     private(set) var latestValidationResult: LMPoweredDescentValidationResult?
+    private(set) var latestDebugger: AGCDebuggerSnapshot?
+    var breakpointOctal = "04000"
+    var watchOctal = "00067"
 
     @ObservationIgnored private var runtime: LMSimulationRuntime?
     @ObservationIgnored private var simulationTask: Task<Void, Never>?
@@ -472,6 +475,10 @@ final class MissionControlViewModel {
             finalSnapshot: snapshot
         )
         refreshEngineHealth(snapshot: snapshot)
+        Task { @MainActor [weak self] in
+            guard let self, let runtime = self.runtime else { return }
+            self.latestDebugger = await runtime.debuggerSnapshot()
+        }
     }
 
     private func clearSnapshots() {
@@ -481,6 +488,7 @@ final class MissionControlViewModel {
         engineHealth = nil
         backtraceTail = []
         latestChannelTrace = []
+        latestDebugger = nil
         resetValidationTrace()
     }
 
@@ -495,6 +503,7 @@ final class MissionControlViewModel {
     private func resetValidationTrace() {
         latestSimulationTrace = []
         latestValidationResult = nil
+        latestDebugger = nil
     }
 
     private func recordEvent(_ message: String) {
@@ -503,6 +512,53 @@ final class MissionControlViewModel {
             recentEvents.removeLast(recentEvents.count - 12)
         }
     }
+
+    func stepInstruction() {
+        guard canStep, let runtime else { return }
+        dskySequenceTask?.cancel()
+        simulationTask?.cancel()
+        isRunning = true
+        status = .running
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let snapshot = await runtime.stepInstruction()
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.applySnapshot(snapshot)
+            self.recordEvent("Stepped instruction at \(snapshot.agc.registers.z.octal4)")
+        }
+    }
+
+    func addBreakpointFromField() {
+        guard let runtime, let address = Int(breakpointOctal, radix: 8) else { return }
+        Task { @MainActor [weak self] in
+            await runtime.setBreakpoint(address)
+            self?.latestDebugger = await runtime.debuggerSnapshot()
+            self?.recordEvent("Breakpoint \(String(format: "%04o", address & 0o7777))")
+        }
+    }
+
+    func addWatchFromField() {
+        guard let runtime, let address = Int(watchOctal, radix: 8) else { return }
+        Task { @MainActor [weak self] in
+            await runtime.watchErasable(address)
+            self?.latestDebugger = await runtime.debuggerSnapshot()
+            self?.recordEvent("Watch E\(String(format: "%04o", address & 0o1777))")
+        }
+    }
+
+    func clearDebuggerBreakpoints() {
+        guard let runtime else { return }
+        Task { @MainActor [weak self] in
+            await runtime.clearBreakpoints()
+            self?.latestDebugger = await runtime.debuggerSnapshot()
+        }
+    }
+}
+
+private extension Int {
+    var octal4: String { String(format: "%04o", self & 0o7777) }
 }
 
 struct RegisterSnapshot {
@@ -612,6 +668,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
     case telemetry
     case lmDynamics
     case validation
+    case debugger
     case trace
 
     var id: String { rawValue }
@@ -623,6 +680,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .telemetry: "Telemetry"
         case .lmDynamics: "LM Dynamics"
         case .validation: "Validation"
+        case .debugger: "Debugger"
         case .trace: "Channel Trace"
         }
     }
@@ -634,6 +692,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .telemetry: "Cycles, LM outputs, and registers"
         case .lmDynamics: "Vehicle state and powered descent"
         case .validation: "Smoke checks and branch trace"
+        case .debugger: "Disassembly, breakpoints, and watches"
         case .trace: "Ordered AGC channel traffic"
         }
     }
@@ -645,6 +704,7 @@ private enum MissionControlSection: String, CaseIterable, Identifiable, Hashable
         case .telemetry: "waveform.path.ecg"
         case .lmDynamics: "gyroscope"
         case .validation: "checkmark.seal"
+        case .debugger: "pause.circle"
         case .trace: "list.bullet.rectangle"
         }
     }
@@ -768,6 +828,13 @@ struct MissionControlRootView: View {
                 .disabled(!viewModel.canStep)
 
                 Button {
+                    viewModel.stepInstruction()
+                } label: {
+                    Label("Step instruction", systemImage: "arrow.turn.up.right")
+                }
+                .disabled(!viewModel.canStep)
+
+                Button {
                     viewModel.runCycles(100_000)
                 } label: {
                     Label("Run 100K", systemImage: "forward.end")
@@ -831,6 +898,8 @@ struct MissionControlRootView: View {
             lmDynamicsSection
         case .validation:
             validationDetailSection
+        case .debugger:
+            MissionControlDebuggerView(viewModel: viewModel)
         case .trace:
             traceDetailSection
         }
@@ -1014,6 +1083,10 @@ struct MissionControlRootView: View {
                         gridRow(label: "Main engine", value: lm.mainEngineOn ? "ON command" : (lm.mainEngineOff ? "OFF command" : "No command"))
                         gridRow(label: "Thrust drive", value: lm.thrustDriveActive ? "Active" : "Inactive")
                         gridRow(label: "Throttle map", value: lm.dps.throttleMappingStatus.isSourceBacked ? "source-backed" : "unmodeled")
+                        gridRow(
+                            label: "Commanded thrust",
+                            value: lm.dps.commandedThrustNewtons.map { String(format: "%.0f N", $0) } ?? "engine off / 0"
+                        )
                         gridRow(label: "Unmapped bits", value: "\(lm.unmappedBits.count)")
                     }
                     .font(.system(.caption, design: .monospaced))
@@ -1711,65 +1784,6 @@ struct MissionControlRootView: View {
     }
 }
 
-struct DSKYKey: Identifiable {
-    let code: DSKYKeyCode
-    let accent: Bool
-
-    var id: String {
-        code.label
-    }
-
-    var label: String {
-        code.label
-    }
-}
-
-struct DSKYKeyButtonStyle: ButtonStyle {
-    let accent: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(accent ? Color.accentColor : Color.primary)
-            .background(backgroundColor(isPressed: configuration.isPressed))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
-            )
-            .opacity(configuration.isPressed ? 0.82 : 1)
-    }
-
-    private func backgroundColor(isPressed: Bool) -> Color {
-        if accent {
-            return Color.accentColor.opacity(isPressed ? 0.35 : 0.22)
-        }
-        return Color(nsColor: .textBackgroundColor).opacity(isPressed ? 0.75 : 1)
-    }
-}
-
-struct QuickDSKYSequence: Identifiable {
-    let script: DSKYScript
-
-    var id: String { script.id }
-    var label: String { script.id }
-}
-
-enum DSKYIndicatorLabel {
-    static let labels: [Int: String] = [
-        11: "UPLINK ACTY",
-        12: "NO ATT",
-        13: "STBY",
-        14: "KEY REL",
-        15: "OPER ERR",
-        21: "TEMP",
-        22: "GIMBAL LOCK",
-        23: "PROG",
-        24: "RESTART",
-        25: "TRACKER",
-        26: "ALT",
-        27: "VEL"
-    ]
-}
 #Preview {
     MissionControlRootView(viewModel: MissionControlViewModel())
 }

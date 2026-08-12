@@ -32,7 +32,8 @@ let package = Package(
             name: "AGCTests",
             dependencies: ["AGC"],
             resources: [
-                .process("../Luminary099.bin")
+                .process("../Luminary099.bin"),
+                .copy("Fixtures")
             ]
         ),
         .testTarget(

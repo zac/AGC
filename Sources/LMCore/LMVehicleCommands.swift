@@ -23,6 +23,10 @@ public enum LMRCSAxis: String, Sendable, Codable {
     case negativeV = "-V"
     case positivePitch = "+P"
     case negativePitch = "-P"
+    case positiveY = "+Y"
+    case negativeY = "-Y"
+    case positiveZ = "+Z"
+    case negativeZ = "-Z"
 }
 
 public enum LMRCSJet: Int, CaseIterable, Sendable, Codable {
@@ -110,6 +114,7 @@ public struct LMDPSCommandState: Equatable, Sendable, Codable {
     public let gimbalTrimCommands: [LMVehicleDiscreteCommand]
     public let thrustDriveCommands: [LMVehicleDiscreteCommand]
     public let throttleMappingStatus: LMModelingStatus
+    public let commandedThrustNewtons: Double?
 
     public init(
         engineOn: Bool,
@@ -118,7 +123,8 @@ public struct LMDPSCommandState: Equatable, Sendable, Codable {
         engineCommands: [LMVehicleDiscreteCommand],
         gimbalTrimCommands: [LMVehicleDiscreteCommand],
         thrustDriveCommands: [LMVehicleDiscreteCommand],
-        throttleMappingStatus: LMModelingStatus
+        throttleMappingStatus: LMModelingStatus,
+        commandedThrustNewtons: Double? = nil
     ) {
         self.engineOn = engineOn
         self.engineOff = engineOff
@@ -127,6 +133,7 @@ public struct LMDPSCommandState: Equatable, Sendable, Codable {
         self.gimbalTrimCommands = gimbalTrimCommands
         self.thrustDriveCommands = thrustDriveCommands
         self.throttleMappingStatus = throttleMappingStatus
+        self.commandedThrustNewtons = commandedThrustNewtons
     }
 }
 
@@ -170,7 +177,8 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         outputChannel12: Int = 0,
         outputChannel13: Int = 0,
         outputChannel14: Int = 0,
-        inputChannel16: Int = 0
+        inputChannel16: Int = 0,
+        commandedThrustNewtons: Double? = nil
     ) {
         self.out0 = out0 & 0o77777
         self.out1 = out1 & 0o77777
@@ -179,7 +187,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         self.outputChannel13 = outputChannel13 & 0o77777
         self.outputChannel14 = outputChannel14 & 0o77777
         self.inputChannel16 = inputChannel16 & 0o77777
-        self.rcsJets = LMVehicleSnapshot.decodeRCSJets(out0: self.out0)
+        self.rcsJets = LMVehicleSnapshot.decodeRCSJets(out0: self.out0, out1: self.out1)
         self.discreteGroups = LMVehicleSnapshot.decodeDiscreteGroups(out1: self.out1)
         self.mainEngineCommands = LMVehicleSnapshot.decodeMainEngineCommands(channel11: self.outputChannel11)
         self.gimbalTrimCommands = LMVehicleSnapshot.decodeGimbalTrimCommands(channel12: self.outputChannel12)
@@ -207,7 +215,21 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
             engineCommands: self.mainEngineCommands,
             gimbalTrimCommands: self.gimbalTrimCommands,
             thrustDriveCommands: self.controlCommands.filter { $0.name == "thrust drive activity" },
-            throttleMappingStatus: .unmodeled("DPS throttle command mapping from AGC output words to thrust magnitude is unmodeled.")
+            throttleMappingStatus: LMDPSThrottleMap.modelingStatus,
+            commandedThrustNewtons: commandedThrustNewtons
+        )
+    }
+
+    public func withCommandedThrust(_ newtons: Double?) -> LMVehicleSnapshot {
+        LMVehicleSnapshot(
+            out0: out0,
+            out1: out1,
+            outputChannel11: outputChannel11,
+            outputChannel12: outputChannel12,
+            outputChannel13: outputChannel13,
+            outputChannel14: outputChannel14,
+            inputChannel16: inputChannel16,
+            commandedThrustNewtons: newtons
         )
     }
 
@@ -249,16 +271,43 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         RCSBitMapping(bit: 8, jet: .jet14, axis: .positiveU)
     ]
 
-    private static func decodeRCSJets(out0: Int) -> [LMRCSJetCommand] {
-        channel5Mappings.compactMap { mapping in
+    // Channel 6 is ROLLJETS in INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc.
+    // JETSALL: OCT 00125 = +P bits 1/3/5/7, OCT 00252 = −P bits 2/4/6/8,
+    // OCT 00011 = +Z bits 1/4, OCT 00006 = −Z bits 2/3,
+    // OCT 00220 = +Y bits 5/8, OCT 00140 = −Y bits 6/7.
+    // Jet numbers 3,4,7,8,11,12,15,16 are the P-axis set in P-AXIS failure
+    // policies; bit order matches ALLJETS (remaining numbers in order).
+    private static let channel6Mappings: [RCSBitMapping] = [
+        RCSBitMapping(bit: 1, jet: .jet3, axis: .positiveZ),
+        RCSBitMapping(bit: 2, jet: .jet4, axis: .negativeZ),
+        RCSBitMapping(bit: 3, jet: .jet7, axis: .negativeZ),
+        RCSBitMapping(bit: 4, jet: .jet8, axis: .positiveZ),
+        RCSBitMapping(bit: 5, jet: .jet11, axis: .positiveY),
+        RCSBitMapping(bit: 6, jet: .jet12, axis: .negativeY),
+        RCSBitMapping(bit: 7, jet: .jet15, axis: .negativeY),
+        RCSBitMapping(bit: 8, jet: .jet16, axis: .positiveY)
+    ]
+
+    private static func decodeRCSJets(out0: Int, out1: Int) -> [LMRCSJetCommand] {
+        decodeRCSJets(value: out0, mappings: channel5Mappings, channel: LMVehicleOutputChannel.out0.rawValue, source: .channel5RCSJets)
+            + decodeRCSJets(value: out1, mappings: channel6Mappings, channel: LMVehicleOutputChannel.out1.rawValue, source: .channel6RCSGroups)
+    }
+
+    private static func decodeRCSJets(
+        value: Int,
+        mappings: [RCSBitMapping],
+        channel: Int,
+        source: LMSourceLocator
+    ) -> [LMRCSJetCommand] {
+        mappings.compactMap { mapping in
             let mask = 1 << (mapping.bit - 1)
-            guard (out0 & mask) != 0 else { return nil }
+            guard (value & mask) != 0 else { return nil }
             return LMRCSJetCommand(
                 jet: mapping.jet,
                 axis: mapping.axis,
-                channel: LMVehicleOutputChannel.out0.rawValue,
+                channel: channel,
                 bit: mapping.bit,
-                source: .channel5RCSJets
+                source: source
             )
         }
     }
@@ -359,10 +408,10 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         }
         bits.append(contentsOf: unmappedBits(channel: 0o5, value: out0, mappedMask: mappedOut0Mask))
 
-        // Channel 6 group masks come from Apollo-11 Luminary099/P-AXIS_RCS_AUTOPILOT.agc:
-        // https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/P-AXIS_RCS_AUTOPILOT.agc
-        // Exact bit-to-jet names are intentionally left raw until verified from an authoritative source.
-        bits.append(contentsOf: unmappedBits(channel: 0o6, value: out1, mappedMask: 0))
+        let mappedOut1Mask = channel6Mappings.reduce(0) { partial, mapping in
+            partial | (1 << (mapping.bit - 1))
+        }
+        bits.append(contentsOf: unmappedBits(channel: 0o6, value: out1, mappedMask: mappedOut1Mask))
         bits.append(contentsOf: unmappedBits(channel: 0o11, value: channel11, mappedMask: bitsMask([13, 14])))
         bits.append(contentsOf: unmappedBits(channel: 0o12, value: channel12, mappedMask: bitsMask([9, 10, 11, 12])))
         bits.append(contentsOf: unmappedBits(channel: 0o13, value: channel13, mappedMask: bitsMask([5, 9, 10])))

@@ -66,19 +66,10 @@ extension AGCEngine {
         }
     }
     
-    /// Read a word from memory at the given address
+    /// Read a word at a 12-bit CPU address using `findMemoryWord` banking
+    /// (EB for 01400–01777, FB/superbank for 02000–03777, fixed-fixed for 04000–07777).
     func readMemory(_ address: Int) -> Int {
-        if address < 0o2000 {
-            // Erasable memory
-            let bank = address / ERASABLE_BANK_SIZE
-            let offset = address % ERASABLE_BANK_SIZE
-            return state.erasableMemory[bank][offset]
-        } else {
-            // Fixed memory
-            let bank = (address - 0o2000) / FIXED_BANK_SIZE
-            let offset = (address - 0o2000) % FIXED_BANK_SIZE
-            return state.fixedMemory[bank][offset]
-        }
+        findMemoryWord(address & 0o7777)
     }
     
     /// Fetch an instruction word using AGC bank-selection rules (test hook)

@@ -73,12 +73,6 @@ public final class AGCEngine {
     /// Task that runs the simulation engine loop.
     var engineTask: Task<Void, Never>? = nil
     
-    /// Simulated program counter.
-    public var programCounter: Int = 0
-    
-    /// Instructions loaded from the core image (each word is a 16-bit value).
-    var instructions: [UInt16] = []
-    
     // AGC instruction masks and constants
     let EXTRACODE: Int = 0o7 
     let INDEX: Int = 0o7777

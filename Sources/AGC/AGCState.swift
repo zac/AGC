@@ -17,10 +17,7 @@ public final class AGCState {
     public var parities: [Int] = Array(repeating: 0, count: 40 * 0x2000 / 32)
     
     // Registers
-    public var accumulator: Int = 0  // A register
-    public var programCounter: Int = 0 // Z register
-    public var returnAddress: Int = 0  // Q register
-    public var index: Int = 0 // B register
+    public var accumulator: Int = 0  // 16-bit working A (overflow-capable)
     
     // I/O channels
     public var inputChannels: [Int] = Array(repeating: 0, count: 512)
@@ -99,9 +96,6 @@ public final class AGCState {
         parities = Array(repeating: 0, count: 40 * 0x2000 / 32)
 
         accumulator = 0
-        programCounter = 0
-        returnAddress = 0
-        index = 0
 
         inputChannels = Array(repeating: 0, count: 512)
         outputChannels = Array(repeating: 0, count: 512)
@@ -128,9 +122,10 @@ public final class AGCState {
         outputChannel10 = Array(repeating: 0, count: 16)
         indexValue = 0
 
-        // Initialize interrupt state
+        // Initialize interrupt state. yaAGC's agc_engine_init sets DOWNRUPT and then
+        // zeros the whole InterruptRequests array; the first MCT raises DOWNRUPT
+        // because downruptTimeValid && cycleCounter >= downruptTime.
         interruptRequests = Array(repeating: 0, count: 11)
-        interruptRequests[8] = 1  // DOWNRUPT startup request
         inIsr = false
         substituteInstruction = false
 

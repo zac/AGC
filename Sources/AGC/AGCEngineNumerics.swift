@@ -45,13 +45,10 @@ extension AGCEngine {
         return findMemoryWord(address) & 0o77777
     }
     
-    /// Correct overflow in a 16-bit value
+    /// Correct overflow in a 16-bit value by moving bit 16 down to bit 15
+    /// (yaAGC `OverflowCorrected`).
     func overflowCorrected(_ value: Int) -> Int {
-        switch valueOverflowed(value) {
-        case 1:  return value & 0o37777  // Positive overflow
-        case -1: return value | 0o40000  // Negative overflow
-        default: return value
-        }
+        return (value & 0o37777) | ((value >> 1) & 0o40000)
     }
     
     /// Find the memory word for a given 12-bit address, taking bank selection into account

@@ -66,7 +66,7 @@ public extension LMSourceReference {
         id: "luminary099-p-axis-rcs-autopilot",
         title: "Luminary099 P-axis RCS autopilot",
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/P-AXIS_RCS_AUTOPILOT.agc",
-        detail: "Source for channel 006 pitch RCS group masks."
+        detail: "Source for channel 006 JETSALL bit groups and P-axis jet numbers."
     )
 
     static let yaAGCRadarRequest = LMSourceReference(
@@ -93,6 +93,27 @@ public extension LMSourceReference {
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/LANDING_RADAR_RUPT.agc",
         detail: "Landing radar low-scale altitude is 1.079 feet per bit."
     )
+
+    static let luminaryThrottleConstants = LMSourceReference(
+        id: "luminary099-throttle-control-routines",
+        title: "Luminary099 throttle control routines and controlled constants",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/THROTTLE_CONTROL_ROUTINES.agc",
+        detail: "THRUST/CHAN14 pulse interface, 10%–94% throttle region, FMAXPOS 3467 = 4.34546769e4 N, FRATE 32 units/cs."
+    )
+
+    static let luminaryRCSGeometry = LMSourceReference(
+        id: "luminary099-rcs-alljets-torkjet",
+        title: "Luminary099 ALLJETS/TYPEPOLY/JETSALL RCS geometry and TORKJET1 arm",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/Q_R-AXIS_RCS_AUTOPILOT.agc",
+        detail: "Channel 005 ALLJETS U/V jets, TYPEPOLY ±X, channel 006 JETSALL ±P/±Y/±Z, FRCS4 400 lbf/4 jets, TORKJET1 550 ft-lbf → 5.5 ft arm, clusters at 45°."
+    )
+
+    static let luminary1ACCS = LMSourceReference(
+        id: "luminary099-aostask-1accs",
+        title: "Luminary099 1/ACCS INERCON jet-acceleration curve fits",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/AOSTASK_AND_AOSJOB.agc",
+        detail: "1JACC = A/(MASS+C)+B; I = TORKJET1/1JACC. A scaled at π/4 rad/s²·2^16 kg, B at π/4 rad/s², C at 2^16 kg. NASA P/Q/R map to sim Z/X/Y."
+    )
 }
 
 public extension LMSourceLocator {
@@ -110,7 +131,7 @@ public extension LMSourceLocator {
     static let channel6RCSGroups = LMSourceLocator(
         reference: .luminaryPRCSAutopilot,
         section: "JETSALL",
-        detail: "Channel 006 pitch RCS group masks from the JETSALL table."
+        detail: "Channel 006 JETSALL ±P/±Y/±Z bit groups and P-axis jet numbers 3,4,7,8,11,12,15,16."
     )
 
     static let yaAGCRadarRequest = LMSourceLocator(
@@ -131,6 +152,21 @@ public extension LMSourceLocator {
     static let luminaryLandingRadarScale = LMSourceLocator(
         reference: .luminaryLandingRadarScale,
         detail: "SI altitude is converted at 1.079 feet per bit (low scale)."
+    )
+
+    static let luminaryThrottleConstants = LMSourceLocator(
+        reference: .luminaryThrottleConstants,
+        detail: "DPS thrust from THRUST pulse units via FMAXPOS and the 10%–94% throttle region."
+    )
+
+    static let luminaryRCSGeometry = LMSourceLocator(
+        reference: .luminaryRCSGeometry,
+        detail: "Channel 005/006 jet force/position from ALLJETS, TYPEPOLY, JETSALL, FRCS4, and TORKJET1."
+    )
+
+    static let luminary1ACCS = LMSourceLocator(
+        reference: .luminary1ACCS,
+        detail: "Diagonal inertia from 1/ACCS INERCON curve fits and TORKJET1."
     )
 }
 
@@ -323,6 +359,7 @@ public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
     public let agcCyclesPerSecond: LMSourceValue<Double>
     public let mainEngine: LMMainEngineConfiguration?
     public let rcsJets: [LMRCSJet: LMRCSJetConfiguration]
+    public let inertiaStage: LMInertiaStage
     public let diagonalInertiaKilogramMetersSquared: LMSourceValue<LMVector3D>?
 
     public init(
@@ -330,12 +367,14 @@ public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
         agcCyclesPerSecond: LMSourceValue<Double>,
         mainEngine: LMMainEngineConfiguration? = nil,
         rcsJets: [LMRCSJet: LMRCSJetConfiguration] = [:],
+        inertiaStage: LMInertiaStage = .descent,
         diagonalInertiaKilogramMetersSquared: LMSourceValue<LMVector3D>? = nil
     ) {
         self.lunarGravityMetersPerSecondSquared = lunarGravityMetersPerSecondSquared
         self.agcCyclesPerSecond = agcCyclesPerSecond
         self.mainEngine = mainEngine
         self.rcsJets = rcsJets
+        self.inertiaStage = inertiaStage
         self.diagonalInertiaKilogramMetersSquared = diagonalInertiaKilogramMetersSquared
     }
 
@@ -352,6 +391,8 @@ public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
         }
         if let inertia = diagonalInertiaKilogramMetersSquared {
             references.append(inertia.source)
+        } else {
+            references.append(LMInertiaMap.source)
         }
         for jet in rcsJets.values.sorted(by: { $0.jet.rawValue < $1.jet.rawValue }) {
             references.append(jet.positionMeters.source)
@@ -391,7 +432,8 @@ public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
                 )
             ),
             engineOnThrustNewtons: nil
-        )
+        ),
+        rcsJets: LMRCSGeometry.sourceBackedJets
     )
 }
 
@@ -560,10 +602,7 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                 sources: [dpsSource, guidanceSource] + configuration.sourceReferences,
                 unmodeledItems: [
                     "Apollo 11 powered-descent initial velocity",
-                    "Apollo 11 powered-descent initial attitude and angular velocity",
-                    "LM inertia tensor",
-                    "RCS jet positions, vectors, and thrust",
-                    "DPS throttle command mapping from AGC channels to thrust magnitude"
+                    "Apollo 11 powered-descent initial attitude and angular velocity"
                 ]
             )
         )
@@ -585,6 +624,7 @@ public actor LMSimulationRuntime {
     private var scenarioSourceStatus: LMSourceStatus?
     private var sensorFeedback = LMSensorFeedbackState()
     private var lastSpecificForceBody = LMVector3D.zero
+    private var throttleState = LMDPSThrottleState()
 
     public init(
         binFile: URL,
@@ -637,6 +677,7 @@ public actor LMSimulationRuntime {
         traceSamples.removeAll()
         sensorFeedback.reset()
         lastSpecificForceBody = .zero
+        throttleState.reset()
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -670,6 +711,32 @@ public actor LMSimulationRuntime {
 
     public func sendDSKYKey(_ key: DSKYKeyCode) async {
         await agcRuntime.sendDSKYKey(key)
+    }
+
+    public func debuggerSnapshot() async -> AGCDebuggerSnapshot {
+        await agcRuntime.debuggerSnapshot()
+    }
+
+    public func setBreakpoint(_ address: Int) async {
+        await agcRuntime.setBreakpoint(address)
+    }
+
+    public func clearBreakpoints() async {
+        await agcRuntime.clearBreakpoints()
+    }
+
+    public func watchErasable(_ address: Int) async {
+        await agcRuntime.watchErasable(address)
+    }
+
+    public func clearErasableWatches() async {
+        await agcRuntime.clearErasableWatches()
+    }
+
+    public func stepInstruction() async -> LMSimulationSnapshot {
+        _ = await agcRuntime.stepInstruction()
+        let agc = await agcRuntime.snapshot()
+        return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
     @discardableResult
@@ -743,7 +810,14 @@ public actor LMSimulationRuntime {
         elapsedTimeSeconds += deltaTime
         let agc = await agcRuntime.step(cycles: cycles)
         let channelDeltas = traceDeltas(from: agc.channelTrace)
-        let commands = LMVehicleSnapshot(agcSnapshot: agc)
+        var commands = LMVehicleSnapshot(agcSnapshot: agc)
+        throttleState.advance(
+            thrustRegister: agc.registers.thrust,
+            driveActive: commands.thrustDriveActive,
+            deltaTime: deltaTime
+        )
+        let engineOn = commands.mainEngineOn && !commands.mainEngineOff
+        commands = commands.withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
         lastSpecificForceBody = LMDynamics.specificForceBody(
             state: vehicleState,
             commands: commands,
@@ -764,7 +838,12 @@ public actor LMSimulationRuntime {
     }
 
     private func makeSnapshot(agc: AGCSnapshot, channelDeltas: [AGCChannelTraceEntry]) -> LMSimulationSnapshot {
+        let engineOn = {
+            let raw = LMVehicleSnapshot(agcSnapshot: agc)
+            return raw.mainEngineOn && !raw.mainEngineOff
+        }()
         let commands = LMVehicleSnapshot(agcSnapshot: agc)
+            .withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
         let sourceStatus = makeSourceStatus(commands: commands)
         let sensorState = LMSensorSnapshot(
             radarInput: radarInput,
@@ -793,9 +872,6 @@ public actor LMSimulationRuntime {
 
     private func makeSourceStatus(commands: LMVehicleSnapshot) -> LMSourceStatus {
         var unmodeled = scenarioSourceStatus?.unmodeledItems ?? []
-        if commands.mainEngineOn, configuration.mainEngine?.engineOnThrustNewtons == nil {
-            unmodeled.append(commands.dps.throttleMappingStatus.detail)
-        }
         if let radarInput, !radarInput.conversionStatus.isSourceBacked {
             unmodeled.append(radarInput.conversionStatus.detail)
         }
@@ -809,7 +885,7 @@ public actor LMSimulationRuntime {
             + configuration.sourceReferences
             + commands.sourceReferences
             + [radarInput?.conversionStatus.source?.reference].compactMap { $0 }
-            + [.luminaryPIPAScale, .agcCDUEncoding]
+            + [.luminaryPIPAScale, .agcCDUEncoding, .luminaryThrottleConstants, .luminaryRCSGeometry, .luminary1ACCS]
         var seen = Set<String>()
         return LMSourceStatus(
             sources: sources.filter { seen.insert($0.id).inserted },
@@ -840,7 +916,7 @@ enum LMDynamics {
 
         if commands.mainEngineOn,
            !commands.mainEngineOff,
-           let thrust = configuration.mainEngine?.engineOnThrustNewtons?.value {
+           let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
             forceWorld = forceWorld + state.attitude.rotated(LMVector3D(z: thrust))
         }
 
@@ -860,7 +936,16 @@ enum LMDynamics {
         var position = state.positionMeters + velocity * deltaTime
         var angularVelocity = state.angularVelocityRadiansPerSecond
 
-        if let inertia = configuration.diagonalInertiaKilogramMetersSquared?.value {
+        let inertia = configuration.diagonalInertiaKilogramMetersSquared?.value
+            ?? state.massKilograms.flatMap { mass in
+                mass > 0
+                    ? LMInertiaMap.diagonalInertiaKilogramMetersSquared(
+                        massKilograms: mass,
+                        stage: configuration.inertiaStage
+                    )
+                    : nil
+            }
+        if let inertia {
             let angularAcceleration = LMVector3D(
                 x: inertia.x == 0 ? 0 : torqueBody.x / inertia.x,
                 y: inertia.y == 0 ? 0 : torqueBody.y / inertia.y,
@@ -903,7 +988,7 @@ enum LMDynamics {
         var forceBody = LMVector3D.zero
         if commands.mainEngineOn,
            !commands.mainEngineOff,
-           let thrust = configuration.mainEngine?.engineOnThrustNewtons?.value {
+           let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
             forceBody = forceBody + LMVector3D(z: thrust)
         }
         for command in commands.rcsJets {

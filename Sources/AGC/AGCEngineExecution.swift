@@ -332,9 +332,11 @@ extension AGCEngine {
         }
         
         let product = agc2cpu(signExtend(operand1)) * agc2cpu(signExtend(operand2))
-        let agcProduct = cpu2agc2(product)
-        
-        // Convert to double precision
+        var agcProduct = cpu2agc2(product)
+        // Sign-extend the 29-bit 1's-complement product for DecentToSp (yaAGC MP).
+        if (agcProduct & 0o2000000000) != 0 {
+            agcProduct |= 0o4000000000
+        }
         let wordPair = decentToSp(agcProduct)
         return (wordPair.0, wordPair.1)
     }
@@ -596,7 +598,11 @@ extension AGCEngine {
                 completeRadarSampleGate()
             }
             
-            // Handle triggered alarms
+            // Handle triggered alarms. GOJAM matches yaAGC agc_engine.c (MAS 01/03/24):
+            // ExtraDelay += 2, Q ← Z, Z ← 04000, clear ISR/interrupts/traps, zero
+            // channels 5/6/10–14, set CH33 UPLINK TOO FAST, clear CH34/35 without
+            // downrupt, clear IndexValue/ExtraCode/Pend/BZF, light RESTART, push CH77.
+            // Hardware GOJAM does not zero A or L; yaAGC does not either.
             if triggeredAlarm || state.parityFail {
                 // Simulate GOJAM sequence
                 
@@ -654,7 +660,9 @@ extension AGCEngine {
                 channelOutput(channel: 0o77, value: state.inputChannels[0o77])
             }
 
-            // Handle extra delay
+            // ExtraDelay after scaler/GOJAM returns from this MCT, matching yaAGC
+            // agc_engine.c:2145–2149. Remaining scaler ticks and the instruction
+            // wait for later cycles; changing this to continue would diverge.
             if state.extraDelay > 0 {
                 state.extraDelay -= 1
                 return false

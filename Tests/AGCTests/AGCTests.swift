@@ -99,7 +99,7 @@ class AGCTests {
         #expect(snapshot.inputChannels[0o31] == 0o77777)
         #expect(snapshot.inputChannels[0o32] == 0o77777)
         #expect(snapshot.inputChannels[0o33] == 0o77777)
-        #expect(snapshot.interruptRequests[8] == 1, "DOWNRUPT startup behavior should be explicit")
+        #expect(snapshot.interruptRequests[8] == 0, "yaAGC clears InterruptRequests at init; first MCT raises DOWNRUPT")
     }
 
     @Test func repeatedRuntimeResetProducesIdenticalSnapshots() async throws {
@@ -196,6 +196,53 @@ class AGCTests {
         engine.assignFromPointer(0o2000, 0o11111)
 
         #expect(state.erasableMemory[4][0] == 0o77777)
+    }
+
+    @Test func readMemoryUsesEBForSwitchedErasable() throws {
+        let (engine, state) = try makeEngine()
+        engine.writeRegister(.regEB, 0o2400) // bank 5
+        state.erasableMemory[5][0] = 0o12345
+        state.erasableMemory[3][0] = 0o33333
+
+        #expect(engine.readMemory(0o1400) == 0o12345)
+        #expect(engine.readMemory(0o1400) != 0o33333)
+    }
+
+    @Test func gojamMatchesYaAGCRestartState() throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        engine.writeRegister(.regZ, 0o1234)
+        engine.cpuWriteIO(address: 0o5, value: 0o377)
+        engine.cpuWriteIO(address: 0o6, value: 0o125)
+        state.indexValue = 0o77
+        state.extraCode = true
+        state.substituteInstruction = true
+        state.pendFlag = true
+        state.tookBZF = true
+        state.tookBZMF = true
+        state.interruptRequests[5] = 1
+        state.parityFail = true
+        state.scalerCounter = 80
+
+        let executed = engine.executeCycle()
+
+        #expect(!executed)
+        #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o4000)
+        #expect(state.erasableMemory[0][Register.regQ.rawValue] == 0o1234)
+        #expect(state.indexValue == 0)
+        #expect(!state.extraCode)
+        #expect(!state.substituteInstruction)
+        #expect(!state.pendFlag)
+        #expect(!state.tookBZF)
+        #expect(!state.tookBZMF)
+        #expect(!state.parityFail)
+        #expect(!state.inIsr)
+        #expect(state.allowInterrupt)
+        #expect(state.interruptRequests[5] == 0)
+        #expect(state.outputChannels[0o5] == 0)
+        #expect(state.outputChannels[0o6] == 0)
+        #expect(state.extraDelay == 1)
+        #expect(state.restartLight)
     }
 
     @Test func executePathCALoadsErasableThroughFetch() async throws {
@@ -740,6 +787,32 @@ class AGCTests {
         #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o6)
     }
+
+    @Test func mpNegativeZeroTimesPositiveYieldsNegativeZero() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o177777, engine: engine)
+        let address = 0o261
+        let loc = erasableLocation(for: address)
+        state.erasableMemory[loc.bank][loc.offset] = 0o1
+
+        engine.performMP(address12: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o177777)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o177777)
+    }
+
+    @Test func mpNegativeTimesPositiveSignExtendsProduct() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(signExtend(0o77775), engine: engine) // -2
+        let address = 0o262
+        let loc = erasableLocation(for: address)
+        state.erasableMemory[loc.bank][loc.offset] = 0o3
+
+        engine.performMP(address12: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o77777))
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == signExtend(0o77771)) // -6
+    }
     @Test func qxchZeroClearsQRegister() throws {
         let (engine, state) = try makeEngine()
         engine.writeRegister(.regQ, 0o12345)
@@ -896,7 +969,6 @@ class AGCTests {
 
         #expect(engine.performBZF(address12: 0o321))
         #expect(state.nextZ == 0o321)
-        #expect(state.extraDelay > 0)
     }
 
     @Test func bzmfBranchesOnNegativeAccumulator() throws {
@@ -1037,6 +1109,21 @@ class AGCTests {
         engine.performDIM(address10: reg)
         #expect(state.erasableMemory[0][reg] == 0)
     }
+
+    @Test func `runtime instruction step and erasable watch`() async throws {
+        let runtime = try makeRuntime()
+        await runtime.watchErasable(Register.regZ.rawValue)
+        await runtime.setBreakpoint(0o4000)
+        let before = await runtime.snapshot()
+        let after = await runtime.stepInstruction()
+        let debug = await runtime.debuggerSnapshot()
+
+        #expect(after.cycle > before.cycle)
+        #expect(!debug.current.mnemonic.isEmpty)
+        #expect(!debug.listing.isEmpty)
+        #expect(debug.watches.contains { $0.address == Register.regZ.rawValue })
+        #expect(debug.breakpoints.contains(0o4000))
+    }
 }
 
 // MARK: - AGC integration (scaler parity, composite delegate)
@@ -1056,6 +1143,13 @@ struct AGCIntegrationTests {
         #expect(DSKYScript.v37e64e.keys == [.verb, .digit3, .digit7, .enter, .digit6, .digit4, .enter])
         #expect(DSKYScript.v37e65e.id == "V37E65E")
         #expect(DSKYScript.v37e66e.id == "V37E66E")
+    }
+
+    @Test func `disassembler names EXTEND RELINT and TC`() {
+        #expect(AGCDisassembler.disassemble(word: 0o00006, at: 0o4000, extraCode: false).mnemonic == "EXTEND")
+        #expect(AGCDisassembler.disassemble(word: 0o00003, at: 0, extraCode: false).mnemonic == "RELINT")
+        #expect(AGCDisassembler.disassemble(word: 0o02000, at: 0o4000, extraCode: false).mnemonic == "TC")
+        #expect(AGCDisassembler.disassemble(word: 0o01015, at: 0, extraCode: true).mnemonic == "WRITE")
     }
 
     @Test func `Composite merges channel input`() async throws {
