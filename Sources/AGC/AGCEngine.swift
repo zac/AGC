@@ -52,6 +52,8 @@ public enum Register: Int {
     case regCDUZCMD = 0o52  // CDU Z Command
     case regOPTYCMD = 0o53  // Optics Y Command
     case regOPTXCMD = 0o54  // Optics X Command
+    case regTHRUST = 0o55   // DPS throttle command counter
+    case regLEMONM = 0o56   // Landing radar altimeter
     case regOUTLINK = 0o57  // Downlink Output
     case regALTM = 0o60     // Altitude Meter
     

@@ -251,14 +251,48 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(raw.conversionStatus.source?.reference == .yaAGCRadarRequest)
     }
 
-    @Test func `SI radar frame input reports conversion unmodeled`() async throws {
+    @Test func `SI radar frame input converts altitude at landing-radar low scale`() async throws {
         let runtime = try LMSimulationRuntime(coreImage: Data())
         let snapshot = await runtime.step(deltaTime: 0.001, input: LMFrameInput(
             radarInput: .measurement(LMRadarMeasurementInput(rangeMeters: 100, altitudeMeters: 80))
         ))
 
-        #expect(snapshot.sensorState.radarInput?.conversionStatus.isSourceBacked == false)
-        #expect(snapshot.sourceStatus.unmodeledItems.contains("SI radar measurement conversion into AGC raw words is unmodeled."))
+        #expect(snapshot.sensorState.radarInput?.conversionStatus.isSourceBacked == true)
+        #expect(snapshot.sensorState.radarInput?.rawAGCInput?.altitudeMeter == Int((80.0 / (1.079 * 0.3048)).rounded()))
+        #expect(snapshot.sourceStatus.sources.contains(.luminaryLandingRadarScale))
+        #expect(!snapshot.sourceStatus.unmodeledItems.contains("SI radar measurement conversion into AGC raw words is unmodeled."))
+    }
+
+    @Test func `PIPA pulses accumulate from body specific force`() {
+        var feedback = LMSensorFeedbackState()
+        let inputs = feedback.increments(
+            specificForceBody: LMVector3D(z: 2),
+            attitude: .identity,
+            deltaTime: 1
+        )
+        let pipaz = inputs.filter { $0.channel == (0o200 | Register.regPIPAZ.rawValue) }
+        #expect(pipaz.count == Int((2.0 / 0.0585).rounded(.towardZero)))
+        #expect(pipaz.allSatisfy { $0.value == 0 })
+        #expect(inputs.filter { $0.channel == (0o200 | Register.regPIPAX.rawValue) }.isEmpty)
+    }
+
+    @Test func `CDU pulses catch up after the first attitude sample`() {
+        var feedback = LMSensorFeedbackState()
+        let first = feedback.increments(
+            specificForceBody: .zero,
+            attitude: .identity,
+            deltaTime: 0.1
+        )
+        #expect(first.filter { $0.channel == (0o200 | Register.regCDUX.rawValue) }.isEmpty)
+
+        let tilted = LMQuaternion(w: cos(.pi / 8), x: 0, y: sin(.pi / 8), z: 0)
+        let second = feedback.increments(
+            specificForceBody: .zero,
+            attitude: tilted,
+            deltaTime: 0.1
+        )
+        let cduy = second.filter { $0.channel == (0o200 | Register.regCDUY.rawValue) }
+        #expect(!cduy.isEmpty)
     }
 
     @Test func `RCS commands use only sourced jet geometry`() {

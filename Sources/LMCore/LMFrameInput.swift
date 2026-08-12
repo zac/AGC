@@ -38,8 +38,8 @@ public enum LMRadarInput: Equatable, Sendable, Codable {
                 rendezvousRadar: input.rendezvousRadarWord,
                 altitudeMeter: input.altitudeMeterWord
             )
-        case .measurement:
-            return nil
+        case .measurement(let measurement):
+            return LMRadarConversion.rawInput(from: measurement)
         }
     }
 
@@ -51,7 +51,10 @@ public enum LMRadarInput: Equatable, Sendable, Codable {
                 source: .yaAGCRadarRequest
             )
         case .measurement:
-            return .unmodeled("SI radar measurement conversion into AGC raw words is unmodeled.")
+            return .sourceBacked(
+                detail: "SI altitude/range converted at 1.079 feet per bit (landing radar low scale).",
+                source: .luminaryLandingRadarScale
+            )
         }
     }
 }

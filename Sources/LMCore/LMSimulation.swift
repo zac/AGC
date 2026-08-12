@@ -74,6 +74,25 @@ public extension LMSourceReference {
         title: "yaAGC radar request path",
         detail: "references/yaAGC/agc_engine.c documents radar gate completion loading RNRAD with radar data."
     )
+
+    static let luminaryPIPAScale = LMSourceReference(
+        id: "nasa-r567-luminary-pipa-scale",
+        title: "NASA R-567 Luminary GSOP PIPA scale",
+        detail: "LM PIPA scale factor is 5.85 cm/s per pulse."
+    )
+
+    static let agcCDUEncoding = LMSourceReference(
+        id: "agc-cdu-15bit-encoding",
+        title: "AGC CDU 15-bit encoding",
+        detail: "CDUX/Y/Z are 15-bit counters wrapping at 32768 counts per revolution (360 degrees)."
+    )
+
+    static let luminaryLandingRadarScale = LMSourceReference(
+        id: "luminary099-landing-radar-low-scale",
+        title: "Luminary099 landing radar low-scale altitude",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/LANDING_RADAR_RUPT.agc",
+        detail: "Landing radar low-scale altitude is 1.079 feet per bit."
+    )
 }
 
 public extension LMSourceLocator {
@@ -97,6 +116,21 @@ public extension LMSourceLocator {
     static let yaAGCRadarRequest = LMSourceLocator(
         reference: .yaAGCRadarRequest,
         detail: "Raw radar register word injection follows the yaAGC radar request hook."
+    )
+
+    static let luminaryPIPAScale = LMSourceLocator(
+        reference: .luminaryPIPAScale,
+        detail: "PIPA pulse generation uses 5.85 cm/s per pulse."
+    )
+
+    static let agcCDUEncoding = LMSourceLocator(
+        reference: .agcCDUEncoding,
+        detail: "CDU catch-up pulses use 32768 counts per revolution."
+    )
+
+    static let luminaryLandingRadarScale = LMSourceLocator(
+        reference: .luminaryLandingRadarScale,
+        detail: "SI altitude is converted at 1.079 feet per bit (low scale)."
     )
 }
 
@@ -206,6 +240,35 @@ public struct LMQuaternion: Equatable, Sendable, Codable {
         let qVector = LMVector3D(x: x, y: y, z: z)
         let t = 2 * qVector.cross(vector)
         return vector + w * t + qVector.cross(t)
+    }
+
+    public var conjugated: LMQuaternion {
+        LMQuaternion(w: w, x: -x, y: -y, z: -z)
+    }
+
+    public func inverseRotated(_ vector: LMVector3D) -> LMVector3D {
+        conjugated.rotated(vector)
+    }
+
+    /// 3-2-1 yaw-pitch-roll (Z, Y, X) in radians, used as a stand-in for IMU gimbal angles.
+    public var yawPitchRollRadians: LMVector3D {
+        let q = normalized()
+        let sinr = 2 * (q.w * q.x + q.y * q.z)
+        let cosr = 1 - 2 * (q.x * q.x + q.y * q.y)
+        let roll = atan2(sinr, cosr)
+
+        let sinp = 2 * (q.w * q.y - q.z * q.x)
+        let pitch: Double
+        if abs(sinp) >= 1 {
+            pitch = copysign(.pi / 2, sinp)
+        } else {
+            pitch = asin(sinp)
+        }
+
+        let siny = 2 * (q.w * q.z + q.x * q.y)
+        let cosy = 1 - 2 * (q.y * q.y + q.z * q.z)
+        let yaw = atan2(siny, cosy)
+        return LMVector3D(x: roll, y: pitch, z: yaw)
     }
 
     public func integrated(angularVelocityRadiansPerSecond: LMVector3D, deltaTime: Double) -> LMQuaternion {
@@ -500,8 +563,7 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                     "Apollo 11 powered-descent initial attitude and angular velocity",
                     "LM inertia tensor",
                     "RCS jet positions, vectors, and thrust",
-                    "DPS throttle command mapping from AGC channels to thrust magnitude",
-                    "Landing radar scale conversion into AGC raw channel/counter units"
+                    "DPS throttle command mapping from AGC channels to thrust magnitude"
                 ]
             )
         )
@@ -521,6 +583,8 @@ public actor LMSimulationRuntime {
     private var lastTraceEntryID: UInt64 = 0
     private var traceSamples: [LMSimulationTraceSample] = []
     private var scenarioSourceStatus: LMSourceStatus?
+    private var sensorFeedback = LMSensorFeedbackState()
+    private var lastSpecificForceBody = LMVector3D.zero
 
     public init(
         binFile: URL,
@@ -571,6 +635,8 @@ public actor LMSimulationRuntime {
         elapsedTimeSeconds = 0
         lastTraceEntryID = 0
         traceSamples.removeAll()
+        sensorFeedback.reset()
+        lastSpecificForceBody = .zero
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -666,10 +732,23 @@ public actor LMSimulationRuntime {
     }
 
     private func stepExact(cycles: UInt64, deltaTime: Double) async -> LMSimulationSnapshot {
+        let sensorPulses = sensorFeedback.increments(
+            specificForceBody: lastSpecificForceBody,
+            attitude: vehicleState.attitude,
+            deltaTime: deltaTime
+        )
+        if !sensorPulses.isEmpty {
+            await agcRuntime.enqueueInputs(sensorPulses)
+        }
         elapsedTimeSeconds += deltaTime
         let agc = await agcRuntime.step(cycles: cycles)
         let channelDeltas = traceDeltas(from: agc.channelTrace)
         let commands = LMVehicleSnapshot(agcSnapshot: agc)
+        lastSpecificForceBody = LMDynamics.specificForceBody(
+            state: vehicleState,
+            commands: commands,
+            configuration: configuration
+        )
         vehicleState = LMDynamics.propagate(
             state: vehicleState,
             commands: commands,
@@ -730,6 +809,7 @@ public actor LMSimulationRuntime {
             + configuration.sourceReferences
             + commands.sourceReferences
             + [radarInput?.conversionStatus.source?.reference].compactMap { $0 }
+            + [.luminaryPIPAScale, .agcCDUEncoding]
         var seen = Set<String>()
         return LMSourceStatus(
             sources: sources.filter { seen.insert($0.id).inserted },
@@ -812,5 +892,25 @@ enum LMDynamics {
             propellantMassKilograms: state.propellantMassKilograms,
             isLanded: landed
         )
+    }
+
+    /// Non-gravitational acceleration in the body frame (what the PIPAs measure).
+    static func specificForceBody(
+        state: LMVehicleStateSnapshot,
+        commands: LMVehicleSnapshot,
+        configuration: LMVehicleConfiguration
+    ) -> LMVector3D {
+        var forceBody = LMVector3D.zero
+        if commands.mainEngineOn,
+           !commands.mainEngineOff,
+           let thrust = configuration.mainEngine?.engineOnThrustNewtons?.value {
+            forceBody = forceBody + LMVector3D(z: thrust)
+        }
+        for command in commands.rcsJets {
+            guard let jet = configuration.rcsJets[command.jet] else { continue }
+            forceBody = forceBody + jet.thrustDirectionBody.value.normalized() * jet.thrustNewtons.value
+        }
+        guard let mass = state.massKilograms, mass > 0 else { return .zero }
+        return forceBody / mass
     }
 }
