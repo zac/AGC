@@ -106,40 +106,70 @@ public enum LMPoweredDescentPanel {
     }
 }
 
-/// Crew response to P63's V99 engine-enable request (`BURNBABY` `*PROCEED` sets ASTNFLAG).
+/// Crew responses that P63 still needs after IGNALG: skip R51 fine-align,
+/// enable the R60 burn-attitude maneuver, then enable the engine at V99.
 ///
-/// T4RUPT samples CH32 bit 14 every 120 ms, so PRO is held longer than one sample.
-public struct LMV99Handshake: Equatable, Sendable {
-    public static let holdSeconds = 0.15
+/// From `THE_LUNAR_LANDING.agc`: R51P63 PROCEED fine-aligns, ENTER returns
+/// to P63SPOT2. R60 flashes V50N18. `BURNBABY` pastes V99 at TIG-5.
+/// T4RUPT samples inverted CH32 bit 14 every 120 ms, so PRO is held longer
+/// than one sample. ENTER is a one-shot CH15 keycode.
+public struct LMP63CrewHandshake: Equatable, Sendable {
+    public static let proHoldSeconds = 0.15
 
-    public enum Phase: Equatable, Sendable {
-        case idle
-        case holding
-        case done
+    public enum Action: Equatable, Sendable {
+        case enter
+        case pro(pressed: Bool)
     }
 
-    public private(set) var phase: Phase = .idle
+    private enum Prompt: String, Equatable, Hashable, Sendable {
+        case fineAlignSkip
+        case autoManeuver
+        case engineEnable
+    }
+
+    private var activePRO: Prompt?
     private var holdRemaining = 0.0
+    private var completed: Set<Prompt> = []
 
     public init() {}
 
-    /// Returns `true` to press PRO, `false` to release, `nil` for no change.
-    public mutating func advance(verb: String, deltaTime: Double) -> Bool? {
-        switch phase {
-        case .idle:
-            guard verb == "99" else { return nil }
-            phase = .holding
-            holdRemaining = Self.holdSeconds
-            return true
-        case .holding:
+    public mutating func advance(verb: String, noun: String, deltaTime: Double) -> Action? {
+        if let prompt = activePRO {
             holdRemaining -= deltaTime
             guard holdRemaining <= 0 else { return nil }
-            phase = .done
-            return false
-        case .done:
-            if verb != "99" && verb != "  " {
-                phase = .idle
-            }
+            activePRO = nil
+            completed.insert(prompt)
+            return .pro(pressed: false)
+        }
+
+        guard verb != "  " else { return nil }
+
+        guard let prompt = Self.prompt(verb: verb, noun: noun) else {
+            completed.removeAll()
+            return nil
+        }
+        guard !completed.contains(prompt) else { return nil }
+
+        switch prompt {
+        case .fineAlignSkip:
+            completed.insert(prompt)
+            return .enter
+        case .autoManeuver, .engineEnable:
+            activePRO = prompt
+            holdRemaining = Self.proHoldSeconds
+            return .pro(pressed: true)
+        }
+    }
+
+    private static func prompt(verb: String, noun: String) -> Prompt? {
+        switch (verb, noun) {
+        case ("50", "25"):
+            return .fineAlignSkip
+        case ("50", "18"):
+            return .autoManeuver
+        case ("99", _):
+            return .engineEnable
+        default:
             return nil
         }
     }

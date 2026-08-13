@@ -308,23 +308,26 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect((snapshot.agc.inputChannels[0o30]! & 0o20) == 0)
     }
 
-    @Test func `V99 handshake holds PROCEED across one T4RUPT then releases`() {
-        var handshake = LMV99Handshake()
-        #expect(handshake.advance(verb: "06", deltaTime: 0.016) == nil)
-        #expect(handshake.phase == .idle)
+    @Test func `P63 crew handshake skips fine-align then holds PROCEED for R60 and V99`() {
+        var handshake = LMP63CrewHandshake()
+        #expect(handshake.advance(verb: "06", noun: "63", deltaTime: 0.016) == nil)
 
-        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == true)
-        #expect(handshake.phase == .holding)
-        #expect(handshake.advance(verb: "  ", deltaTime: 0.12) == nil)
-        #expect(handshake.advance(verb: "99", deltaTime: 0.04) == false)
-        #expect(handshake.phase == .done)
+        #expect(handshake.advance(verb: "50", noun: "25", deltaTime: 0.016) == .enter)
+        #expect(handshake.advance(verb: "50", noun: "25", deltaTime: 0.016) == nil)
+        #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.016) == nil)
 
-        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == nil)
-        #expect(handshake.advance(verb: "  ", deltaTime: 0.016) == nil)
-        #expect(handshake.phase == .done)
-        #expect(handshake.advance(verb: "06", deltaTime: 0.016) == nil)
-        #expect(handshake.phase == .idle)
-        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == true)
+        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.016) == .pro(pressed: true))
+        #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.12) == nil)
+        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.04) == .pro(pressed: false))
+        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.016) == nil)
+
+        #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.016) == .pro(pressed: true))
+        #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.16) == .pro(pressed: false))
+        #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.016) == nil)
+        #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.016) == nil)
+
+        #expect(handshake.advance(verb: "06", noun: "63", deltaTime: 0.016) == nil)
+        #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.016) == .pro(pressed: true))
     }
 
     @Test func `PROCEED press and release drive inverted channel 32 bit 14`() async throws {

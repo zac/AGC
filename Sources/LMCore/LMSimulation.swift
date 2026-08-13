@@ -171,7 +171,7 @@ public extension LMSourceReference {
         id: "luminary099-the-lunar-landing-guiddurn",
         title: "Luminary099 THE_LUNAR_LANDING GUIDDURN",
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/THE_LUNAR_LANDING.agc",
-        detail: "GUIDDURN 2DEC +66440 is 664.40 s from IGNALG to landing. P63SPOT3 waits for CH33 LR POS1."
+        detail: "GUIDDURN 2DEC +66440 is 664.40 s from IGNALG to landing. P63SPOT3 waits for CH33 LR POS1. R51P63 ENTER skips fine-align and returns to P63SPOT2."
     )
 
     static let luminaryBurnBaby = LMSourceReference(
@@ -284,7 +284,7 @@ public extension LMSourceLocator {
 
     static let luminaryBurnBaby = LMSourceLocator(
         reference: .luminaryBurnBaby,
-        detail: "Auto-PRO holds inverted CH32 bit 14 for 150 ms when the DSKY verb is 99."
+        detail: "Auto-PRO holds inverted CH32 bit 14 for 150 ms on V50N18 and V99; ENTER skips V50N25 fine-align."
     )
 
     static let luminaryIOChannelsModeControl = LMSourceLocator(
@@ -794,8 +794,9 @@ public actor LMSimulationRuntime {
     private var sensorFeedback = LMSensorFeedbackState()
     private var lastSpecificForceBody = LMVector3D.zero
     private var throttleState = LMDPSThrottleState()
-    private var v99Handshake = LMV99Handshake()
+    private var p63CrewHandshake = LMP63CrewHandshake()
     private var lastDSKYVerb = "  "
+    private var lastDSKYNoun = "  "
 
     public init(
         binFile: URL,
@@ -849,8 +850,9 @@ public actor LMSimulationRuntime {
         sensorFeedback.reset()
         lastSpecificForceBody = .zero
         throttleState.reset()
-        v99Handshake = LMV99Handshake()
+        p63CrewHandshake = LMP63CrewHandshake()
         lastDSKYVerb = "  "
+        lastDSKYNoun = "  "
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -1016,8 +1018,13 @@ public actor LMSimulationRuntime {
     }
 
     private func stepExact(cycles: UInt64, deltaTime: Double) async -> LMSimulationSnapshot {
-        if let pressed = v99Handshake.advance(verb: lastDSKYVerb, deltaTime: deltaTime) {
-            await agcRuntime.sendPRO(pressed: pressed)
+        if let action = p63CrewHandshake.advance(verb: lastDSKYVerb, noun: lastDSKYNoun, deltaTime: deltaTime) {
+            switch action {
+            case .enter:
+                await agcRuntime.sendDSKYKey(.enter)
+            case .pro(let pressed):
+                await agcRuntime.sendPRO(pressed: pressed)
+            }
         }
         let sensorPulses = sensorFeedback.increments(
             specificForceBody: lastSpecificForceBody,
@@ -1050,6 +1057,7 @@ public actor LMSimulationRuntime {
             deltaTime: deltaTime
         )
         lastDSKYVerb = agc.dsky.verb
+        lastDSKYNoun = agc.dsky.noun
         let snapshot = makeSnapshot(agc: agc, channelDeltas: channelDeltas)
         traceSamples.append(snapshot.traceSample)
         if traceSamples.count > 2_048 {

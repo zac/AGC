@@ -10,7 +10,7 @@ A cycle-accurate Swift simulation of the Apollo Guidance Computer, driven as `AG
 - Sourced DPS throttle, all 16 RCS jets, PIPA/CDU pulses, landing-radar low-scale conversion, and 1/ACCS diagonal inertia.
 - Sourced Apollo 11 PDI kinematics from NASA TN D-6846 Table I (5560 fps inertial, −4 fps altitude rate, 48,814 ft) and TN D-4131 (95° pitch from local vertical). Channel 12 gimbal trim slews DPS thrust at 0.2 deg/s within ±6 deg.
 
-After idle boot, `bootAndEnterP63` loads NASA Luminary 99 landing-guidance pad-loads (TLAND through TAUVERT), a PDI-relative GET clock (`TLAND − GUIDDURN − ZOOMTIME`), the modeled moon-centered RN/VN/RLS/REFSMMAT/MASS, and MODE CONTROL AUTO / auto-throttle / LR POS1. When the DSKY shows V99, the frame loop holds PROCEED on inverted CH32 bit 14 for 150 ms so `BURNBABY` can set ASTNFLAG. That is still not a real Apollo ephemeris or PDI range-to-go. Body angular rates, IGNALG convergence with the modeled state, and the DPS engine-to-CG moment arm are still unmodeled. Do not invent those just to animate a landing.
+After idle boot, `bootAndEnterP63` loads NASA Luminary 99 landing-guidance pad-loads (TLAND through TAUVERT), a PDI-relative GET clock (`TLAND − GUIDDURN − ZOOMTIME`), the modeled moon-centered RN/VN/RLS/REFSMMAT/MASS, and MODE CONTROL AUTO / auto-throttle / LR POS1. The frame loop answers P63’s remaining crew flashes: ENTER on V50N25 skips R51 fine-align, and PROCEED is held 150 ms on V50N18 and V99. That is still not a real Apollo ephemeris or PDI range-to-go. Body angular rates, IGNALG convergence with the modeled state, and the DPS engine-to-CG moment arm are still unmodeled. Do not invent those just to animate a landing.
 
 ## Run
 
