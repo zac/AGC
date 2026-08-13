@@ -1,12 +1,6 @@
 import Foundation
 
 extension AGCEngine {
-    /// Convert AGC-format word to internal format
-    func convertToAGCWord(_ word: Int) -> Int {
-        // AGC words are 15 bits, right-aligned
-        return (word >> 1) & 0o37777
-    }
-    
     func loadBinFile() throws {
         guard let data = state.binFile else {
             throw AGCError.invalidBinFile // File not found
@@ -77,11 +71,6 @@ extension AGCEngine {
         return findMemoryWord(address & 0o7777)
     }
     
-    /// Write a word to memory at the given 12-bit address, honoring EB for switched erasable.
-    func writeMemory(_ address: Int, _ value: Int) {
-        assignFromPointer(address, value)
-    }
-    
     /// Read a word from a specific register
     func readRegister(_ register: Register) -> Int {
         return readMemory(register.rawValue)
@@ -100,11 +89,6 @@ extension AGCEngine {
     /// Check if address is the Q register 
     func isQ(_ address: Int) -> Bool {
         return address == Register.regQ.rawValue
-    }
-    
-    /// Check if address is the EB register
-    func isEB(_ address: Int) -> Bool {
-        return address == Register.regEB.rawValue
     }
     
     /// Check if address is the Z register
@@ -188,6 +172,4 @@ extension AGCEngine {
             state.downlink = 0
         }
     }
-        
-    /// Execute an extended instruction based on the opcode
 }

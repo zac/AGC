@@ -1,4 +1,3 @@
-import AGC
 import Foundation
 
 /// Sourced DPS throttle and RCS geometry. Pulse/force scales come from Luminary099

@@ -18,11 +18,6 @@ extension AGCEngine {
         completeRadarSampleGate()
     }
 
-    /// Shift data to DEDA display
-    func shiftToDeda(_ data: Int) {
-        ioDelegate?.shiftToDeda(data: data)
-    }
-
     /// Read a value from an I/O channel or register
     func readIO(address: Int) -> Int {
         // Validate address range

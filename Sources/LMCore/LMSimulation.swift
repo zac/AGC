@@ -41,10 +41,6 @@ public struct LMModelingStatus: Equatable, Sendable, Codable {
     public static func sourceBacked(detail: String, source: LMSourceLocator) -> LMModelingStatus {
         LMModelingStatus(isSourceBacked: true, detail: detail, source: source)
     }
-
-    public static func unmodeled(_ detail: String) -> LMModelingStatus {
-        LMModelingStatus(isSourceBacked: false, detail: detail)
-    }
 }
 
 public extension LMSourceReference {
@@ -729,10 +725,6 @@ public actor LMSimulationRuntime {
         await agcRuntime.watchErasable(address)
     }
 
-    public func clearErasableWatches() async {
-        await agcRuntime.clearErasableWatches()
-    }
-
     public func stepInstruction() async -> LMSimulationSnapshot {
         _ = await agcRuntime.stepInstruction()
         let agc = await agcRuntime.snapshot()
@@ -772,10 +764,6 @@ public actor LMSimulationRuntime {
         let input = LMDescentRateControlInput(descendPlus: descendPlus, descendMinus: descendMinus)
         descentRateChannel16 = input.channel16Value
         await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: input.channel16Value))
-    }
-
-    public func channelTrace() async -> [AGCChannelTraceEntry] {
-        await agcRuntime.channelTrace()
     }
 
     public func simulationTrace() -> [LMSimulationTraceSample] {

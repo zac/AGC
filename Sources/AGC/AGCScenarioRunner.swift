@@ -20,14 +20,6 @@ public struct AGCScenarioRunner: Sendable {
         self.runtime = runtime
     }
 
-    public func boot(cycles: UInt64 = 0) async throws -> AGCSnapshot {
-        _ = try await runtime.reset()
-        guard cycles > 0 else {
-            return await runtime.snapshot()
-        }
-        return await runtime.step(cycles: cycles)
-    }
-
     public func run(_ script: DSKYScript, cyclesPerKey: UInt64 = 50_000) async -> AGCScenarioResult {
         let initialSnapshot = await runtime.snapshot()
         let finalSnapshot = await runtime.sendDSKYScript(script, cyclesPerKey: cyclesPerKey)

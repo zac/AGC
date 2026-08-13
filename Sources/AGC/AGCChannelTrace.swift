@@ -50,13 +50,6 @@ private final class AGCChannelTraceRecorder: @unchecked Sendable {
         defer { lock.unlock() }
         return entries
     }
-
-    func reset() {
-        lock.lock()
-        entries.removeAll()
-        nextID = 0
-        lock.unlock()
-    }
 }
 
 /// Forwards all ``AGCIOProtocol`` messages to multiple delegates while recording ordered channel traffic.
@@ -112,9 +105,5 @@ public final class CompositeAGCIO: AGCIOProtocol {
 
     public func channelTrace() -> [AGCChannelTraceEntry] {
         traceRecorder.snapshot()
-    }
-
-    public func resetTrace() {
-        traceRecorder.reset()
     }
 }

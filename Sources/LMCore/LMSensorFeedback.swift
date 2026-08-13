@@ -20,9 +20,6 @@ public enum LMSensorScale {
         1.079 * 0.3048,
         source: .luminaryLandingRadarScale
     )
-
-    /// Landing radar range uses the same low-scale bit weight as a first sourced map.
-    public static let landingRadarRangeMetersPerBit = landingRadarAltitudeMetersPerBit
 }
 
 struct LMSensorFeedbackState {

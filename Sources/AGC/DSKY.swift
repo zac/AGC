@@ -56,7 +56,6 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
     /// Indicator light states
     public struct IndicatorState {
         var isOn: Bool = false
-        var isFlashing: Bool = false
     }
     
     public var indicators: [Int: IndicatorState] = [:]
@@ -358,7 +357,7 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
             indicator.isOn = isOn
             indicators[id] = indicator
         } else {
-            indicators[id] = IndicatorState(isOn: isOn, isFlashing: false)
+            indicators[id] = IndicatorState(isOn: isOn)
         }
     }
     

@@ -275,6 +275,106 @@ class AGCTests {
         #expect(state.erasableMemory[3][0] == 0o33333)
     }
 
+    @Test func executePathMASKUsesErasableThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        setAccumulator(0o76543, engine: engine)
+        state.erasableMemory[0][0o60] = 0o12345
+        state.fixedMemory[2][0] = 0o70060 // MASK 060
+        state.fixedMemory[2][1] = 0o4001 // TC 04001
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o12141)
+    }
+
+    @Test func executePathADAddsErasableThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        setAccumulator(0o1000, engine: engine)
+        let target = 0o205
+        let (bank, offset) = erasableLocation(for: target)
+        state.erasableMemory[bank][offset] = 0o7000
+        state.fixedMemory[2][0] = 0o60205 // AD 0205
+        state.fixedMemory[2][1] = 0o4001 // TC 04001
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend(0o10000))
+    }
+
+    @Test func executePathCSComplementsRegisterThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        engine.writeRegister(.regL, 0o12345)
+        state.fixedMemory[2][0] = 0o40001 // CS L
+        state.fixedMemory[2][1] = 0o4001 // TC 04001
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == signExtend((~0o12345) & 0o77777))
+    }
+
+    @Test func executePathINCRAddsOneThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        engine.writeRegister(.regL, 0o10)
+        state.fixedMemory[2][0] = 0o24001 // INCR L
+        state.fixedMemory[2][1] = 0o4001 // TC 04001
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o11)
+    }
+
+    @Test func executePathADSAddsAndStoresThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        setAccumulator(0o5000, engine: engine)
+        engine.writeRegister(.regL, 0o3000)
+        state.fixedMemory[2][0] = 0o26001 // ADS L
+        state.fixedMemory[2][1] = 0o4001 // TC 04001
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0o10000)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o10000)
+    }
+
+    @Test func executePathTCFBranchesThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        state.backtrace.removeAll()
+        state.fixedMemory[2][0] = 0o14567 // TCF 04567
+        state.fixedMemory[2][0o567] = 0o4567 // TC 04567
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o4567)
+        #expect(state.backtrace.contains { $0.target == 0o4567 })
+    }
+
+    @Test func executePathBZFBranchesThroughFetch() async throws {
+        let (engine, state) = try makeEngine()
+        prepareBareInstructionRun(engine)
+        setAccumulator(0, engine: engine)
+        state.fixedMemory[2][0] = 0o6 // EXTEND
+        state.fixedMemory[2][1] = 0o14321 // BZF 04321
+        state.fixedMemory[2][0o321] = 0o4321 // TC 04321
+        engine.writeRegister(.regZ, 0o4000)
+
+        await engine.runEngine(for: 16)
+
+        #expect(state.erasableMemory[0][Register.regZ.rawValue] == 0o4321)
+        #expect(!state.extraCode)
+    }
+
     @Test func simulateDVMatchesHardwareFallback() throws {
         let (engine, state) = try makeEngine()
 
@@ -1258,16 +1358,18 @@ struct AGCIntegrationTests {
     }
 
     @Test func `Run engine UInt64 max respects task cancellation`() async throws {
-        let state = AGCState()
-        state.binFile = Data()
-        let engine = try AGCEngine(state: state)
-        await withTaskGroup(of: Void.self) { group in
+        let cycles = await withTaskGroup(of: UInt64.self) { group in
             group.addTask {
+                let state = AGCState()
+                state.binFile = Data()
+                let engine = try! AGCEngine(state: state)
                 await engine.runEngine(for: UInt64.max)
+                return engine.state.cycleCounter
             }
             group.cancelAll()
+            return await group.next() ?? 0
         }
-        #expect(state.cycleCounter < 200_000)
+        #expect(cycles < 200_000)
     }
 
     @Test func `Composite fans out channel output and radar`() {

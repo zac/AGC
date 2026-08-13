@@ -12,10 +12,6 @@ public enum LMVehicleOutputChannel: Int, Sendable, Codable {
     case channel14 = 0o14
 }
 
-public enum LMVehicleInputChannel: Int, Sendable, Codable {
-    case channel16 = 0o16
-}
-
 public enum LMRCSAxis: String, Sendable, Codable {
     case positiveU = "+U"
     case negativeU = "-U"

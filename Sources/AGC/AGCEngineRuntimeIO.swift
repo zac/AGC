@@ -1,43 +1,10 @@
 import Foundation
 
 extension AGCEngine {
-    /// Start the simulation engine, catching up to wall-clock AGC rate in batches.
-    ///
-    /// Individual MCTs are 11.7 µs and cannot be paced with `Task.sleep`. This
-    /// loop runs `AGC_PER_SECOND` cycles per wall-clock second, yielding between
-    /// batches. Prefer ``runEngine(for:)`` or ``AGCRuntime/step(cycles:)`` for
-    /// deterministic coupling to a frame loop.
-    public func startEngine() {
-        state.resetForBoot()
-        resetPeripheralTiming()
-        try? loadBinFile()
-
-        engineTask = Task.detached { [weak self] in
-            guard let self = self else { return }
-            var last = CFAbsoluteTimeGetCurrent()
-            var leftover = 0.0
-            while !Task.isCancelled {
-                let now = CFAbsoluteTimeGetCurrent()
-                leftover += max(0, now - last) * Double(self.AGC_PER_SECOND)
-                last = now
-                var cycles = UInt64(leftover)
-                leftover -= Double(cycles)
-                if cycles > self.AGC_PER_SECOND {
-                    cycles = self.AGC_PER_SECOND
-                }
-                for _ in 0..<cycles {
-                    if Task.isCancelled { break }
-                    _ = self.executeCycle()
-                }
-                try? await Task.sleep(for: .milliseconds(1))
-            }
-        }
-    }
-
     /// Runs the simulation for a fixed number of cycles, or until `Task` cancellation when `cycles == UInt64.max`.
     ///
     /// For visionOS / RealityKit, prefer driving the engine from your frame loop with a bounded cycle count
-    /// (deterministic coupling to physics). Use `startEngine()` for wall-clock–paced stepping.
+    /// (deterministic coupling to physics).
     public func runEngine(for cycles: UInt64) async {
         let yieldEvery: UInt64 = 4_096
         if cycles == UInt64.max {
@@ -65,11 +32,6 @@ extension AGCEngine {
         }
     }
 
-    /// Stop the simulation engine
-    public func stopEngine() {
-        engineTask?.cancel()
-    }
-    
     /// Updates the DSKY display and status lights
     func updateDSKY() {
         let lastChannel163 = state.dskyChannel163

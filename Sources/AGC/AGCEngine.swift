@@ -2,7 +2,6 @@ import Foundation
 
 public enum AGCError: Error {
     case invalidBinFile
-    case memoryError
 }
 
 /// AGC Register addresses (in octal)
@@ -56,11 +55,6 @@ public enum Register: Int {
     case regLEMONM = 0o56   // Landing radar altimeter
     case regOUTLINK = 0o57  // Downlink Output
     case regALTM = 0o60     // Altitude Meter
-    
-    // Memory regions
-    static let ramStart = 0o60       // Start of general-purpose RAM
-    static let coreStart = 0o4000    // Start of ROM (core memory)
-    static let end = 0o120000        // End of memory space
 }
 
 public final class AGCEngine {
@@ -69,16 +63,6 @@ public final class AGCEngine {
     
     /// The I/O delegate (using the protocol defined in AGCIO.swift).
     public var ioDelegate: AGCIOProtocol?
-    
-    /// Task that runs the simulation engine loop.
-    var engineTask: Task<Void, Never>? = nil
-    
-    // AGC instruction masks and constants
-    let EXTRACODE: Int = 0o7 
-    let INDEX: Int = 0o7777
-    let BASIC: Int = 0o7777
-    let FIXED_BANK_SIZE = 0o2000
-    let ERASABLE_BANK_SIZE = 0o400
     
     /// Instruction timing tables (cycles needed minus 1)
     let instructionTiming: [Int] = [
@@ -161,17 +145,9 @@ public final class AGCEngine {
     var lastRhcYaw = 0
     var lastRhcRoll = 0
     
-    // Add these constants to AGCEngine:
-    let MASK9 = 0o777        // 9-bit mask
     let MASK10 = 0o1777      // 10-bit mask
     let MASK12 = 0o7777      // 12-bit mask
     let REG16 = 0o3          // A, L, and Q are the 16-bit registers
-    
-    // Number of interrupt types supported by the AGC
-    let NUM_INTERRUPT_TYPES = 10
-    
-    // ** NEW constant added for I/O channels **
-    let NUM_CHANNELS = 512   // Total number of channels
     
     // AGC numerical constants in AGC 1's complement format
     let AGC_P0 = 0                // Positive zero
@@ -199,8 +175,4 @@ public final class AGCEngine {
         imuTiming = IMUTiming()
         gyroTiming = GyroTiming()
     }
-    
-
 }
-
-extension AGCEngine: @unchecked Sendable { } 

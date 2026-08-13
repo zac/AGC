@@ -1,6 +1,5 @@
 import SwiftUI
 import AGC
-import LMCore
 
 struct MissionControlDebuggerView: View {
     @Bindable var viewModel: MissionControlViewModel

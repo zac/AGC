@@ -341,27 +341,6 @@ extension AGCEngine {
         return (wordPair.0, wordPair.1)
     }
     
-    /// Get the number of extra machine cycles needed for an instruction
-    func getInstructionTiming(instruction: Int, isExtracode: Bool) -> Int {
-        // Get the upper 5 bits of the instruction
-        let index = (instruction >> 10) & 0o37
-        
-        // Add special handling for EDRUPT and BZF/BZMF
-        if isExtracode {
-            // EDRUPT needs special handling
-            if (instruction & 0o7777) == 0o1704 {
-                return 2  // EDRUPT timing
-            }
-            return extracodeTiming[Int(index)]
-        } else {
-            // BZF/BZMF need special handling
-            if (instruction & 0o7000) == 0o6000 && (instruction & 0o1400) != 0 {
-                return 1  // BZF/BZMF timing
-            }
-            return instructionTiming[Int(index)]
-        }
-    }
-    
     /// Execute one simulation cycle
     func executeCycle() -> Bool {
         var overflow: Bool = false

@@ -33,29 +33,4 @@ public protocol AGCIOProtocol {
     /// Channel routine
     func channelRoutine()
 }
-
-/// Default implementation of AGC I/O
-public class AGCIO: AGCIOProtocol {
-    public init() {}
-    
-    public func channelOutput(channel: Int, value: Int) {
-        // Default implementation - can be overridden by clients
-    }
-    
-    public func channelInput() -> [AGCChannelInput]? {
-        // Default implementation returns no input
-        return nil
-    }
-    
-    public func requestRadarData() {
-        // Default implementation - can be overridden by clients
-    }
-    
-    public func shiftToDeda(data: Int) {
-        // Default implementation - can be overridden by clients
-    }
-
-    public func channelRoutine() {
-        // Default implementation - can be overridden by clients
-    }
-} 
+ 

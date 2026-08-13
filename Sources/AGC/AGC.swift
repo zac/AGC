@@ -148,7 +148,6 @@ private struct AGCRuntimeComponents {
     let state: AGCState
     let engine: AGCEngine
     let dsky: DSKY
-    let radarIO: AGCRadarIO
     let externalInput: AGCRuntimeInputQueue
     let compositeIO: CompositeAGCIO
 }
@@ -184,7 +183,7 @@ public actor AGCRuntime {
     }
 
     public func step(cycles: UInt64) async -> AGCSnapshot {
-        await components.engine.runEngine(for: cycles)
+        await runCycles(cycles)
         return makeSnapshot()
     }
 
@@ -229,7 +228,7 @@ public actor AGCRuntime {
             }
 
             if runUntil > current {
-                await components.engine.runEngine(for: runUntil - current)
+                await runCycles(runUntil - current)
                 current = components.state.cycleCounter
                 captureIfNeeded(current, force: keys.contains(where: { $0.cycle == current }))
                 continue
@@ -238,13 +237,13 @@ public actor AGCRuntime {
             if let nextKey, current + 1 == nextKey, keyIndex < keys.count {
                 await components.dsky.send(keys[keyIndex].key)
                 keyIndex += 1
-                await components.engine.runEngine(for: 1)
+                await runCycles(1)
                 current = components.state.cycleCounter
                 captureIfNeeded(current, force: true)
                 continue
             }
 
-            await components.engine.runEngine(for: 1)
+            await runCycles(1)
             current = components.state.cycleCounter
             captureIfNeeded(current)
         }
@@ -259,10 +258,6 @@ public actor AGCRuntime {
         breakpoints.insert(address & 0o7777)
     }
 
-    public func clearBreakpoint(_ address: Int) {
-        breakpoints.remove(address & 0o7777)
-    }
-
     public func clearBreakpoints() {
         breakpoints.removeAll()
         hitBreakpoint = false
@@ -273,14 +268,6 @@ public actor AGCRuntime {
         if !watchAddresses.contains(word) {
             watchAddresses.append(word)
         }
-    }
-
-    public func clearErasableWatches() {
-        watchAddresses.removeAll()
-    }
-
-    public func readErasable(_ address: Int) -> Int {
-        components.engine.findMemoryWord(address & 0o1777) & 0o177777
     }
 
     /// Run MCTs until one instruction executes, or a breakpoint on Z is hit.
@@ -308,7 +295,7 @@ public actor AGCRuntime {
     public func sendDSKYScript(_ script: DSKYScript, cyclesPerKey: UInt64 = 50_000) async -> AGCSnapshot {
         for key in script.keys {
             await components.dsky.send(key)
-            await components.engine.runEngine(for: cyclesPerKey)
+            await runCycles(cyclesPerKey)
             if Task.isCancelled { break }
         }
         return makeSnapshot()
@@ -334,13 +321,25 @@ public actor AGCRuntime {
         ])
     }
 
-    public func channelTrace() -> [AGCChannelTraceEntry] {
-        components.compositeIO.channelTrace()
-    }
-
     func integrationTestCompleteRadarSampleGate() -> AGCSnapshot {
         components.engine.integrationTestCompleteRadarSampleGate()
         return makeSnapshot()
+    }
+
+    private func runCycles(_ cycles: UInt64) async {
+        let yieldEvery: UInt64 = 4_096
+        var remaining = cycles
+        while remaining > 0 {
+            if Task.isCancelled { break }
+            let batch = min(remaining, yieldEvery)
+            for _ in 0..<batch {
+                _ = components.engine.executeCycle()
+            }
+            remaining -= batch
+            if remaining > 0 {
+                await Task.yield()
+            }
+        }
     }
 
     private static func validateCoreImage(_ data: Data) throws {
@@ -377,7 +376,6 @@ public actor AGCRuntime {
             state: state,
             engine: engine,
             dsky: dsky,
-            radarIO: radarIO,
             externalInput: externalInput,
             compositeIO: compositeIO
         )
