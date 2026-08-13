@@ -1,29 +1,76 @@
-# Apollo Guidance Computer (AGC) Engine
+# Apollo Guidance Computer (AGC)
 
-A cycle-accurate simulation of the Apollo Guidance Computer's core instruction set and timing written in Swift.
+A cycle-accurate Swift simulation of the Apollo Guidance Computer, driven as `AGCRuntime` rather than by poking `AGCEngine` directly. Luminary 099 boot and keyed DSKY sequences match yaAGC. `LMCore` closes a sourced LM vehicle loop around that runtime. `MissionControl` is a macOS operator console.
 
-## Features
+## What’s proven
 
-- Complete implementation of the AGC instruction set
-- Accurate instruction timing and cycle counting
-- Interrupt handling and vectoring
-- Memory banking and addressing
-- I/O channel simulation
-- Support for Counter registers (TIME1-4, CDUX/Y/Z)
+- Idle Luminary 099 from `Z=04000` through 1,000,000 MCTs against a committed yaAGC JSONL fixture (391 samples). Live compare runs when `Tools/yaagc-trace` is built.
+- Keyed `V35E` and `V37E63E` after a 1e6-MCT boot at 50,000 MCT/key.
+- Instruction fetch/execute for `CA`, switched-E `XCH`, `MASK`, `AD`, `CS`, `INCR`, `ADS`, `TCF`, and `BZF` (via `EXTEND`).
+- Sourced DPS throttle, all 16 RCS jets, PIPA/CDU pulses, landing-radar low-scale conversion, and 1/ACCS diagonal inertia.
 
-## Usage
+Apollo 11 powered-descent **initial velocity, attitude, and angular velocity** are still unmodeled. Do not invent those just to animate a landing.
 
-The engine provides a low-level simulation of the AGC processor, including:
+## Run
 
-- Instruction execution and timing
-- Memory access and banking
-- I/O operations
-- Interrupt processing
-- Counter register updates
+```bash
+swift test
+```
+
+Open `MissionControl/MissionControl.xcodeproj` in Xcode and run the MissionControl scheme (macOS 14+). Load `Tests/AGCTests/Luminary099.bin` from the app, or use **AGC → Load Luminary099**.
+
+Integration entry points:
+
+- `AGCRuntime` — bounded `step(cycles:)`, DSKY scripts, debugger, golden-trace capture
+- `LMSimulationRuntime` — frame steps that enqueue sensors, step the AGC, then apply DPS/RCS
+
+## Opcode coverage
+
+Parity with yaAGC by instruction group (octal opcodes). Golden traces are the live-mix proof; named tests below are unit checks.
+
+| Opcode(s) | Mnemonic(s) | Status | Notes |
+|-----------|-------------|--------|-------|
+| `00kk` | `TC`, `RELINT`, `INHINT`, `EXTEND` | ✅ | Core TC path logs backtraces; `EXTEND` used by fetch-path `BZF` |
+| `010-011` | `CCS` | ✅ | `ccsAdjustsNextZ…` |
+| `012-017` | `TCF` | ✅ | `executePathTCFBranchesThroughFetch`, `tcfAddsBacktraceEntry` |
+| `020-021` | `DAS` / `DDOUBL` | ✅ | `dasDouble…` |
+| `022-023` | `LXCH` | ✅ | `lxchZeroClearsL` / `lxchSwapsWithErasable…` |
+| `024-025` | `INCR` | ✅ | `executePathINCRAddsOneThroughFetch`, `incrAddsOneToRegister` |
+| `026-027` | `ADS` | ✅ | `executePathADSAddsAndStoresThroughFetch`, `adsAddsAndStoresResult` |
+| `030-037` | `CA` | ✅ | `executePathCALoadsErasableThroughFetch`, `caLoadsRegisterIntoAccumulator` |
+| `040-047` | `CS` | ✅ | `executePathCSComplementsRegisterThroughFetch`, `csComplementsRegisterValue` |
+| `050-051`, `150-157` | `INDEX`, `RESUME` | ✅ | `indexInstructionLoads…`, `extracodeIndex…`, resume |
+| `052-053` | `DXCH` | ✅ | `dxchSwapsDoublePrecisionWords` |
+| `054-055` | `TS` (`OVSK`, `TCAA`) | ✅ | `tsOvsk…` / `tsTCAA…` |
+| `056-057` | `XCH` | ✅ | `executePathXCHWritesSwitchedErasableBank`, `xchSwapsWithMemory…` |
+| `060-067` | `AD` / `DOUBLE` | ✅ | `executePathADAddsErasableThroughFetch`, `adAddsErasable…` |
+| `070-077` | `MASK` | ✅ | `executePathMASKUsesErasableThroughFetch`, `maskInstructionUsesErasableMemory` |
+| `100` | `READ` | ✅ | `readAndWriteIoChannels` |
+| `101` | `WRITE` | ✅ | `readAndWriteIoChannels` |
+| `102` | `RAND` | ✅ | `randAndWandCombine…` |
+| `103` | `WAND` | ✅ | `randAndWandCombine…` |
+| `104` | `ROR` | ✅ | `rorCombinesAccumulator…` |
+| `105` | `WOR` | ✅ | `worWritesBackToRegister` |
+| `106` | `RXOR` | ✅ | `rxorCombinesWithIoChannel` |
+| `107` | `EDRUPT` | ✅ | `edruptVectorsToAddressZero` |
+| `110-111` | `DV` | ✅ | Hardware fallback plus edge cases |
+| `112-117` | `BZF` | ✅ | `executePathBZFBranchesThroughFetch`; helper branch/backtrace tests |
+| `120-121` | `MSU` | ✅ | `msuWith…` |
+| `122-123` | `QXCH` | ✅ | ZQ and register swapping |
+| `124-125` | `AUG` | ✅ | `augIncrementsPositiveValues` |
+| `126-127` | `DIM` | ✅ | `dimDecrementsUntilZero` |
+| `130-137` | `DCA` | ✅ | `dcaLoadsDoublePrecision…` |
+| `140-147` | `DCS` | ✅ | `dcsComplementsDouble…` |
+| `160-161` | `SU` | ✅ | `suSubtractsUnit…` |
+| `162-167` | `BZMF` | ✅ | Branch logic and backtrace |
+| `170-177` | `MP` | ✅ | `mpZeroOperand…` / `mpMultipliesPositive…` |
+| Counter opcodes | `PINC`, `MINC`, `DINC`, `PCDU/MCDU`, `SHINC/SHANC` | ✅ | Helper parity + DINC test |
+
+Legend: ✅ = parity verified by unit tests and/or yaAGC golden traces.
 
 ## Acknowledgements
 
-Special thanks to the Virtual AGC project for their yaAGC implementation. The Swift implementation was made possible by the following resources:
-- Website: https://virtualagc.github.io/
-- GitHub: https://github.com/virtualagc/virtualagc
+Special thanks to the Virtual AGC project for yaAGC:
 
+- https://virtualagc.github.io/
+- https://github.com/virtualagc/virtualagc

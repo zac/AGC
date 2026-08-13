@@ -1,5 +1,12 @@
 import Foundation
 
+public struct AGCBacktraceEntry: Equatable, Sendable {
+    public let cycle: UInt64
+    public let source: Int
+    public let target: Int
+    public let tag: Int
+}
+
 /// AGC simulation state
 public final class AGCState {
     // Memory banks
@@ -10,10 +17,7 @@ public final class AGCState {
     public var parities: [Int] = Array(repeating: 0, count: 40 * 0x2000 / 32)
     
     // Registers
-    public var accumulator: Int = 0  // A register
-    public var programCounter: Int = 0 // Z register
-    public var returnAddress: Int = 0  // Q register
-    public var index: Int = 0 // B register
+    public var accumulator: Int = 0  // 16-bit working A (overflow-capable)
     
     // I/O channels
     public var inputChannels: [Int] = Array(repeating: 0, count: 512)
@@ -61,13 +65,14 @@ public final class AGCState {
     public var standby: Bool = false
     public var sbyPressed: Bool = false
     public var sbyStillPressed: Bool = false
+    public var backtrace: [AGCBacktraceEntry] = []
     
     // Misc state
     public var nextZ: Int = 0
     public var scalerCounter: Int = 0
     public var channelRoutineCount: Int = 0
     public var dskyTimer: Int = 0
-    public var dskyFlash: Bool = false
+    public var dskyFlash: Int = 0
     public var dskyChannel163: Int = 0
     public var tookBZF: Bool = false
     public var tookBZMF: Bool = false
@@ -80,51 +85,55 @@ public final class AGCState {
     public var binFile: Data?
     
     public init() {
-        // Clear I/O channels
-        for i in 0..<inputChannels.count {
-            inputChannels[i] = 0
-        }
-        
+        resetForBoot()
+    }
+
+    public func resetForBoot(preservingCoreImage: Bool = true) {
+        let coreImage = binFile
+
+        erasableMemory = Array(repeating: Array(repeating: 0, count: 0x400), count: 8)
+        fixedMemory = Array(repeating: Array(repeating: 0, count: 0x2000), count: 40)
+        parities = Array(repeating: 0, count: 40 * 0x2000 / 32)
+
+        accumulator = 0
+
+        inputChannels = Array(repeating: 0, count: 512)
+        outputChannels = Array(repeating: 0, count: 512)
+
         // Set specific input channels
         inputChannels[0o30] = 0o37777
         inputChannels[0o31] = 0o77777
         inputChannels[0o32] = 0o77777
         inputChannels[0o33] = 0o77777
-        
-        // Clear erasable memory
-        for bank in 0..<8 {
-            for addr in 0..<0o400 {
-                erasableMemory[bank][addr] = 0
-            }
-        }
-        
+
         // Set initial program counter (RegZ)
-        erasableMemory[0][0o7] = 0o4000  // RegZ = 04000
-        
+        erasableMemory[0][Register.regZ.rawValue] = 0o4000  // RegZ = 04000
+
         // Initialize CPU state
         cycleCounter = 0
         extraCode = false
         allowInterrupt = true  // The GOJAM sequence enables interrupts
-        interruptRequests[8] = 1  // DOWNRUPT
         pendFlag = false
         pendDelay = 0
         extraDelay = 0
-        
+
         // Initialize I/O state
         outputChannel7 = 0
         outputChannel10 = Array(repeating: 0, count: 16)
         indexValue = 0
-        
-        // Initialize interrupt state
+
+        // Initialize interrupt state. yaAGC's agc_engine_init sets DOWNRUPT and then
+        // zeros the whole InterruptRequests array; the first MCT raises DOWNRUPT
+        // because downruptTimeValid && cycleCounter >= downruptTime.
         interruptRequests = Array(repeating: 0, count: 11)
         inIsr = false
         substituteInstruction = false
-        
+
         // Initialize downlink state
         downruptTimeValid = true
         downruptTime = 0
         downlink = 0
-        
+
         // Initialize night watchman
         nightWatchman = 0
         nightWatchmanTripped = false
@@ -133,23 +142,24 @@ public final class AGCState {
         tcTrap = false
         noTC = false
         parityFail = false
-        
+        checkParity = false
+
         // Initialize warning state
         warningFilter = 0
         generatedWarning = false
-        
+
         // Initialize display/standby state
         restartLight = false
         standby = false
         sbyPressed = false
         sbyStillPressed = false
-        
+
         // Initialize misc state
         nextZ = 0
         scalerCounter = 0
         channelRoutineCount = 0
         dskyTimer = 0
-        dskyFlash = false
+        dskyFlash = 0
         dskyChannel163 = 0
         tookBZF = false
         tookBZMF = false
@@ -157,5 +167,12 @@ public final class AGCState {
         trap31B = false
         trap32 = false
         radarGateCounter = 0
+        backtrace = []
+
+        if preservingCoreImage {
+            binFile = coreImage
+        } else {
+            binFile = nil
+        }
     }
-} 
+}

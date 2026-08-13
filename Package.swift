@@ -13,23 +13,32 @@ let package = Package(
         .visionOS("1.0")
     ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "AGC",
             targets: ["AGC"]),
+        .library(
+            name: "LMCore",
+            targets: ["LMCore"]),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "AGC"
+        ),
+        .target(
+            name: "LMCore",
+            dependencies: ["AGC"]
         ),
         .testTarget(
             name: "AGCTests",
             dependencies: ["AGC"],
             resources: [
-                .process("../Luminary099.bin")
+                .copy("Luminary099.bin"),
+                .copy("Fixtures")
             ]
+        ),
+        .testTarget(
+            name: "LMCoreTests",
+            dependencies: ["AGC", "LMCore"]
         ),
     ]
 )
