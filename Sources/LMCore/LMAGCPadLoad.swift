@@ -14,6 +14,14 @@ public enum Luminary99LandingPadLoad {
     public static let guidDurnCentiseconds = 66_440.0
     /// NASA ZOOMTIME, 26 s of DPS throttle-up, B14 centiseconds.
     public static let zoomTimeCentiseconds = 2_600.0
+    /// NASA RIGNX, meters B24. Modeled as sim +X (crossrange, north).
+    public static let rignXMeters = -39_782.453328
+    /// NASA RIGNZ, meters B24. Modeled as sim +Y (downrange, east). PDI starts here, uprange of RLS.
+    public static let rignZMeters = -436_655.657
+
+    public static var pdiGroundRangeMeters: Double {
+        hypot(rignXMeters, rignZMeters)
+    }
 
     public static var pdiClockCentiseconds: Double {
         tlandCentiseconds - guidDurnCentiseconds - zoomTimeCentiseconds
@@ -46,8 +54,8 @@ public enum Luminary99LandingPadLoad {
         words.append(sp(Luminary099Erasable.tcgfAppr, 3_000, scale: 17))
         words.append(sp(Luminary099Erasable.tcgiAppr, 20_000, scale: 17))
         words.append(contentsOf: dp(Luminary099Erasable.vign, 16.90256208, scale: 10))
-        words.append(contentsOf: dp(Luminary099Erasable.rignx, -39_782.453328, scale: 24))
-        words.append(contentsOf: dp(Luminary099Erasable.rignz, -436_655.657, scale: 24))
+        words.append(contentsOf: dp(Luminary099Erasable.rignx, rignXMeters, scale: 24))
+        words.append(contentsOf: dp(Luminary099Erasable.rignz, rignZMeters, scale: 24))
         words.append(contentsOf: dp(Luminary099Erasable.kignx, -0.617631, scale: 4))
         words.append(contentsOf: dp(Luminary099Erasable.kigny, -2.4770341207e-6, scale: -16))
         words.append(contentsOf: dp(Luminary099Erasable.kignv, -41_000, scale: 18))

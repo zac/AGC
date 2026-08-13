@@ -27,6 +27,7 @@ struct DSKYTests {
         #expect(dsky.verbDigits == [0, 1])
         #expect(dsky.nounDigits == [2, 3])
         #expect(dsky.modeDigits == [4, 5])
+        #expect(dsky.snapshot.programNumber == 45)
     }
 
     @Test func channel10DecodesRegisterDigitsAndBlanks() {

@@ -96,9 +96,10 @@ public enum Luminary099NavScale {
 /// RLS is the NASA Luminary 99 moon-fixed landing site. The tabletop vehicle
 /// is attached in a modeled local-vertical at that site: +Z along RLS,
 /// +Y selenographic east (modeled downrange), +X north. Identity REFSMMAT
-/// keeps SM aligned with that modeled frame. PDI still starts over the site
-/// rather than ~260 nmi uprange. RN/VN stay moon-fixed; IGNALG’s `RP-TO-R`
-/// rotates RLS into Basic Reference.
+/// keeps SM aligned with that modeled frame. PDI starts at the NASA RIGN
+/// offset (RIGNX crossrange, RIGNZ downrange) plus TN D-6846 altitude, not
+/// over the site. RN/VN stay moon-fixed; IGNALG’s `RP-TO-R` rotates RLS
+/// into Basic Reference.
 public enum LMAGCNavState {
     public static func moonCenteredPositionMeters(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
         let (north, east, up) = moonFixedSiteBasis()

@@ -90,7 +90,10 @@ struct LMCoreScenarioAndDynamicsTests {
     @Test func `source backed scenario exposes sources and unknowns`() {
         let scenario = LMPoweredDescentScenario.apollo11SourceBacked
 
+        #expect(abs(scenario.initialState.positionMeters.x - Luminary99LandingPadLoad.rignXMeters) < 1e-6)
+        #expect(abs(scenario.initialState.positionMeters.y - Luminary99LandingPadLoad.rignZMeters) < 1e-6)
         #expect(abs(scenario.initialState.altitudeMeters - 48_814.0 * 0.3048) < 1e-9)
+        #expect(abs(scenario.initialState.groundRangeMeters - Luminary99LandingPadLoad.pdiGroundRangeMeters) < 1)
         #expect(scenario.initialState.massKilograms == 33_000.0 * 0.45359237)
         #expect(abs(scenario.initialState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1e-9)
         #expect(abs(scenario.initialState.velocityMetersPerSecond.z + 4.0 * 0.3048) < 1e-9)
@@ -103,7 +106,8 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent initial attitude and angular velocity"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent body angular rates"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("AGC erasable state vector (RN/VN), REFSMMAT, and Average-G at PDI"))
-        #expect(scenario.sourceStatus.unmodeledItems.contains("PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 braking-phase pad loads (TLAND, RBRFG, and related targets)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("P63 IGNALG convergence with modeled (not flown) state vector"))
@@ -268,8 +272,9 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(await runtime.readErasable(ecadr: 0o1422) == 0)
         #expect(await runtime.readErasable(ecadr: 0o2222) == 0)
 
-        let site = Luminary99CoordinatePadLoad.landingSiteMeters
-        let expectedRN = site.magnitude + 48_814.0 * 0.3048
+        let expectedRN = LMAGCNavState.moonCenteredPositionMeters(
+            from: LMPoweredDescentScenario.apollo11SourceBacked.initialState
+        )
         let rnX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn)
         let rnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 2)
         let rnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
@@ -278,7 +283,9 @@ struct LMCoreScenarioAndDynamicsTests {
             y: rnY.decoded(scale: Luminary099NavScale.positionScale),
             z: rnZ.decoded(scale: Luminary099NavScale.positionScale)
         )
-        #expect(abs(rn.magnitude - expectedRN) < 2)
+        #expect(abs(rn.x - expectedRN.x) < 2)
+        #expect(abs(rn.y - expectedRN.y) < 2)
+        #expect(abs(rn.z - expectedRN.z) < 2)
 
         let vnX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn)
         let vnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn + 2)
@@ -325,6 +332,10 @@ struct LMCoreScenarioAndDynamicsTests {
         let rlsX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls)
         #expect(rlsX.high == 0o00301)
         #expect(rlsX.low == 0o34760)
+
+        let rignX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rignx)
+        #expect(rignX.high == 0o77731)
+        #expect(rignX.low == 0o44630)
 
         let snapshot = await runtime.snapshot()
         #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)

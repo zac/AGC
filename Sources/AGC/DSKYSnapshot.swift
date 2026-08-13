@@ -165,4 +165,11 @@ public struct DSKYSnapshot: Equatable, Sendable {
     public func indicatorIsOn(_ id: Int) -> Bool {
         indicators[id] ?? false
     }
+
+    /// PROG two-digit display, or `nil` when the digits are blank.
+    public var programNumber: Int? {
+        let digits = mode.filter(\.isNumber)
+        guard digits.count == 2 else { return nil }
+        return Int(digits)
+    }
 }

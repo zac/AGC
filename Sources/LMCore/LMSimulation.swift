@@ -609,6 +609,11 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         positionMeters.z
     }
 
+    /// Horizontal distance from the landing-site origin in the modeled local-vertical.
+    public var groundRangeMeters: Double {
+        hypot(positionMeters.x, positionMeters.y)
+    }
+
     public var verticalSpeedMetersPerSecond: Double {
         velocityMetersPerSecond.z
     }
@@ -732,7 +737,11 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
             radians: 95.0 * .pi / 180.0
         )
         let initialState = LMVehicleStateSnapshot(
-            positionMeters: LMVector3D(z: pdiAltitudeMeters),
+            positionMeters: LMVector3D(
+                x: Luminary99LandingPadLoad.rignXMeters,
+                y: Luminary99LandingPadLoad.rignZMeters,
+                z: pdiAltitudeMeters
+            ),
             velocityMetersPerSecond: LMVector3D(
                 y: pdiHorizontalMetersPerSecond,
                 z: pdiAltitudeRateMetersPerSecond
@@ -769,7 +778,7 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                 ] + configuration.sourceReferences,
                 unmodeledItems: [
                     "Apollo 11 powered-descent body angular rates",
-                    "PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference",
+                    "RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference",
                     "P63 IGNALG convergence with modeled (not flown) state vector",
                     "DPS engine-to-CG gimbal moment arm"
                 ]
