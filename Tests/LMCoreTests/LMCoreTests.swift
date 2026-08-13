@@ -103,7 +103,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent initial attitude and angular velocity"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent body angular rates"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("AGC erasable state vector (RN/VN), REFSMMAT, and Average-G at PDI"))
-        #expect(scenario.sourceStatus.unmodeledItems.contains("Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 braking-phase pad loads (TLAND, RBRFG, and related targets)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("P63 IGNALG convergence with modeled (not flown) state vector"))
@@ -258,22 +258,41 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(abs(snapshot.vehicleState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1)
     }
 
-    @Test func `PDI nav load writes moon-centered RN VN RLS and identity REFSMMAT`() async throws {
+    @Test func `PDI nav load writes NASA RLS at ECADR 02022 and identity REFSMMAT`() async throws {
         let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
         await runtime.loadPDINavState()
 
-        let rnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
-        let vnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn + 2)
-        let rlsZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls + 4)
-        let ref00 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.refsmmat)
-        let expectedRadius = Luminary099NavScale.moonRadiusMeters + 48_814.0 * 0.3048
-        let expectedVN = 5_560.0 * 0.3048 / 100.0
-
-        #expect(abs(rnZ.decoded(scale: Luminary099NavScale.positionScale) - expectedRadius) < 1)
-        #expect(abs(vnY.decoded(scale: Luminary099NavScale.velocityScale) - expectedVN) < 1e-6)
-        #expect(abs(rlsZ.decoded(scale: Luminary099NavScale.positionScale) - Luminary099NavScale.moonRadiusMeters) < 1)
-        #expect(ref00.high == 0o20000)
+        let rlsX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls)
+        #expect(rlsX.high == 0o00301)
+        #expect(rlsX.low == 0o34760)
         #expect(await runtime.readErasable(ecadr: 0o1422) == 0)
+        #expect(await runtime.readErasable(ecadr: 0o2222) == 0)
+
+        let site = Luminary99CoordinatePadLoad.landingSiteMeters
+        let expectedRN = site.magnitude + 48_814.0 * 0.3048
+        let rnX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn)
+        let rnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 2)
+        let rnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
+        let rn = LMVector3D(
+            x: rnX.decoded(scale: Luminary099NavScale.positionScale),
+            y: rnY.decoded(scale: Luminary099NavScale.positionScale),
+            z: rnZ.decoded(scale: Luminary099NavScale.positionScale)
+        )
+        #expect(abs(rn.magnitude - expectedRN) < 2)
+
+        let vnX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn)
+        let vnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn + 2)
+        let vnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn + 4)
+        let vn = LMVector3D(
+            x: vnX.decoded(scale: Luminary099NavScale.velocityScale),
+            y: vnY.decoded(scale: Luminary099NavScale.velocityScale),
+            z: vnZ.decoded(scale: Luminary099NavScale.velocityScale)
+        )
+        let expectedSpeed = hypot(5_560.0 * 0.3048, 4.0 * 0.3048) / 100.0
+        #expect(abs(vn.magnitude - expectedSpeed) < 1e-6)
+
+        let ref00 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.refsmmat)
+        #expect(ref00.high == 0o20000)
 
         let moonflag = await runtime.readErasable(ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.moonflag))
         let moonBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.moonflag) - 1)
@@ -300,6 +319,12 @@ struct LMCoreScenarioAndDynamicsTests {
 
         let clock = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.time2)
         #expect(abs(clock.decoded(scale: 28) - Luminary99LandingPadLoad.pdiClockCentiseconds) < 1)
+
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.tephem + 1) == 0o20017)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.azo) == 0o30624)
+        let rlsX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls)
+        #expect(rlsX.high == 0o00301)
+        #expect(rlsX.low == 0o34760)
 
         let snapshot = await runtime.snapshot()
         #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)

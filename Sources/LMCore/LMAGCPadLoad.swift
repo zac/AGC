@@ -60,6 +60,7 @@ public enum Luminary99LandingPadLoad {
         words.append(sp(Luminary099Erasable.tendappr, 1_200, scale: 17))
         words.append(sp(Luminary099Erasable.delttfap, -11_000, scale: 17))
         words.append(sp(Luminary099Erasable.leadtime, -220, scale: 17))
+        words.append(contentsOf: Luminary99CoordinatePadLoad.erasableWords())
         return words
     }
 
@@ -84,6 +85,43 @@ public enum Luminary99LandingPadLoad {
             words.append(contentsOf: dp(ecadr + index * 2, component, scale: scale))
         }
         return words
+    }
+}
+
+/// Launch-tape lunar orientation and landing-site vector from the same NASA
+/// table as the landing-guidance overlay. IGNALG’s `RP-TO-R` needs TEPHEM,
+/// AZO/−AYO/AXO, 504LM, and RLS. NASA octal is stored as truth.
+public enum Luminary99CoordinatePadLoad {
+    public static let landingSiteMeters = LMVector3D(
+        x: 1_588_471.994,
+        y: 697_547.4954,
+        z: 21_616.9998
+    )
+
+    public static func erasableWords() -> [AGCErasableWord] {
+        [
+            AGCErasableWord(ecadr: Luminary099Erasable.tephem, value: 0o00000),
+            AGCErasableWord(ecadr: Luminary099Erasable.tephem + 1, value: 0o20017),
+            AGCErasableWord(ecadr: Luminary099Erasable.tephem + 2, value: 0o20500),
+            AGCErasableWord(ecadr: Luminary099Erasable.azo, value: 0o30624),
+            AGCErasableWord(ecadr: Luminary099Erasable.azo + 1, value: 0o01636),
+            AGCErasableWord(ecadr: Luminary099Erasable.negAyo, value: 0o77777),
+            AGCErasableWord(ecadr: Luminary099Erasable.negAyo + 1, value: 0o53172),
+            AGCErasableWord(ecadr: Luminary099Erasable.axo, value: 0o00000),
+            AGCErasableWord(ecadr: Luminary099Erasable.axo + 1, value: 0o26056),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504, value: 0o77775),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504 + 1, value: 0o46355),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504 + 2, value: 0o77766),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504 + 3, value: 0o72372),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504 + 4, value: 0o77777),
+            AGCErasableWord(ecadr: Luminary099Erasable.lm504 + 5, value: 0o52552),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls, value: 0o00301),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls + 1, value: 0o34760),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls + 2, value: 0o00125),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls + 3, value: 0o04627),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls + 4, value: 0o00002),
+            AGCErasableWord(ecadr: Luminary099Erasable.rls + 5, value: 0o24342)
+        ]
     }
 }
 

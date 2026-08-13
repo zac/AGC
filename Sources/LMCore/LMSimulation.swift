@@ -164,7 +164,7 @@ public extension LMSourceReference {
         id: "nasa-sna-8-d-027-luminary99-pad-loads",
         title: "NASA SNA-8-D-027(II) LM Data Book Luminary 99 prelaunch erasable load",
         url: "https://www.ibiblio.org/apollo/Documents/Luminary99PadLoads.pdf",
-        detail: "Table LM5/4.5.1-1: TLAND 100:50:49.20 GET, braking/approach aimpoints RBRFG–JAPFG*, VIGN/RIGNX/RIGNZ, V2FG −3 ft/s, TAUVERT 10 s, ZOOMTIME 26 s."
+        detail: "Table LM5/4.5.1-1: TLAND 100:50:49.20 GET, braking/approach aimpoints, VIGN/RIGNX/RIGNZ, NASA RLS, TEPHEM/AZO/504LM, V2FG −3 ft/s, ZOOMTIME 26 s."
     )
 
     static let luminaryP63GUIDDURN = LMSourceReference(
@@ -274,7 +274,7 @@ public extension LMSourceLocator {
     static let nasaSNA8D027Luminary99PadLoads = LMSourceLocator(
         reference: .nasaSNA8D027Luminary99PadLoads,
         section: "Table LM5/4.5.1-1",
-        detail: "Landing-guidance overlay TLAND through TAUVERT, plus ZOOMTIME and phase-switch times."
+        detail: "Landing-guidance overlay TLAND through TAUVERT, launch-tape TEPHEM/AZO/504LM, and NASA RLS at ECADR 02022."
     )
 
     static let luminaryP63GUIDDURN = LMSourceLocator(
@@ -769,7 +769,7 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                 ] + configuration.sourceReferences,
                 unmodeledItems: [
                     "Apollo 11 powered-descent body angular rates",
-                    "Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)",
+                    "PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference",
                     "P63 IGNALG convergence with modeled (not flown) state vector",
                     "DPS engine-to-CG gimbal moment arm"
                 ]

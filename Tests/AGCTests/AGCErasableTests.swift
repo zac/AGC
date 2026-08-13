@@ -27,10 +27,11 @@ struct AGCErasableTests {
 
     @Test func `ECADR write uses the bank in the high bits not current EB`() async throws {
         let runtime = try AGCRuntime(coreImage: Data())
-        await runtime.writeErasable(ecadr: 0o2222, value: 0o12345)
+        await runtime.writeErasable(ecadr: 0o2022, value: 0o12345)
 
-        #expect(await runtime.readErasable(ecadr: 0o2222) == 0o12345)
+        #expect(await runtime.readErasable(ecadr: 0o2022) == 0o12345)
         #expect(await runtime.readErasable(ecadr: 0o1422) == 0)
+        #expect(await runtime.readErasable(ecadr: 0o2222) == 0)
     }
 
     @Test func `setErasableBit ORs without clearing neighbors`() async throws {

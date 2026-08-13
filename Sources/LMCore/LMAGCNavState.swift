@@ -18,8 +18,14 @@ public enum Luminary099Erasable {
     public static let rRectLEM = 0o1626
     public static let vRectLEM = 0o1634
     public static let tetLEM = 0o1642
+    public static let tephem = 0o1706
+    public static let azo = 0o1711
+    public static let negAyo = 0o1713
+    public static let axo = 0o1715
     public static let refsmmat = 0o1733
-    public static let rls = 0o2222
+    public static let lm504 = 0o2012
+    /// E4,1422 with `SETLOC 2000` → ECADR 02022, not CPU address 01422 or 02222.
+    public static let rls = 0o2022
     public static let tland = 0o2400
     public static let rbrfg = 0o2402
     public static let vbrfg = 0o2410
@@ -87,32 +93,38 @@ public enum Luminary099NavScale {
 
 /// Builds a Luminary-loadable nav state from LMCore vehicle kinematics.
 ///
-/// The Basic Reference (and, via identity REFSMMAT, the Stable Member) is a
-/// **modeled** moon-centered local-vertical frame, not a real Apollo
-/// selenographic ephemeris:
-///
-/// - origin at the moon’s center of mass
-/// - +Z through the landing site (local vertical; tabletop sim +Z)
-/// - +Y downrange (sim +Y, NASA +Z)
-/// - +X completes the right-handed set (sim +X, NASA +Y)
-///
-/// RLS sits on +Z at `504RM`. The vehicle’s RN is that site vector plus the
-/// sim position, so PDI starts over the site rather than ~260 nmi uprange.
+/// RLS is the NASA Luminary 99 moon-fixed landing site. The tabletop vehicle
+/// is attached in a modeled local-vertical at that site: +Z along RLS,
+/// +Y selenographic east (modeled downrange), +X north. Identity REFSMMAT
+/// keeps SM aligned with that modeled frame. PDI still starts over the site
+/// rather than ~260 nmi uprange. RN/VN stay moon-fixed; IGNALG’s `RP-TO-R`
+/// rotates RLS into Basic Reference.
 public enum LMAGCNavState {
     public static func moonCenteredPositionMeters(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
-        LMVector3D(
-            x: vehicle.positionMeters.x,
-            y: vehicle.positionMeters.y,
-            z: Luminary099NavScale.moonRadiusMeters + vehicle.positionMeters.z
-        )
+        let (north, east, up) = moonFixedSiteBasis()
+        return Luminary99CoordinatePadLoad.landingSiteMeters
+            + north * vehicle.positionMeters.x
+            + east * vehicle.positionMeters.y
+            + up * vehicle.positionMeters.z
     }
 
     public static func landingSiteMeters() -> LMVector3D {
-        LMVector3D(z: Luminary099NavScale.moonRadiusMeters)
+        Luminary99CoordinatePadLoad.landingSiteMeters
     }
 
     public static func velocityMetersPerCentisecond(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
-        vehicle.velocityMetersPerSecond / 100.0
+        let (north, east, up) = moonFixedSiteBasis()
+        let velocity = vehicle.velocityMetersPerSecond
+        return (north * velocity.x + east * velocity.y + up * velocity.z) / 100.0
+    }
+
+    /// Selenographic east is polar × radial. Tranquility is near the equator,
+    /// so that cross product is well defined.
+    public static func moonFixedSiteBasis() -> (north: LMVector3D, east: LMVector3D, up: LMVector3D) {
+        let up = Luminary99CoordinatePadLoad.landingSiteMeters.normalized()
+        let east = LMVector3D(z: 1).cross(up).normalized()
+        let north = up.cross(east).normalized()
+        return (north, east, up)
     }
 
     public static func erasableWords(
