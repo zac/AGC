@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 "$ROOT/Tools/yaagc-trace/build.sh"
 mkdir -p "$ROOT/Tests/AGCTests/Fixtures"
-ROM="$ROOT/Tests/Luminary099.bin"
+ROM="$ROOT/Tests/AGCTests/Luminary099.bin"
 TRACE="$ROOT/Tools/yaagc-trace/yaagc-trace"
 
 "$TRACE" "$ROM" 1000000 \

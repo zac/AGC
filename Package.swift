@@ -32,7 +32,7 @@ let package = Package(
             name: "AGCTests",
             dependencies: ["AGC"],
             resources: [
-                .process("../Luminary099.bin"),
+                .copy("Luminary099.bin"),
                 .copy("Fixtures")
             ]
         ),

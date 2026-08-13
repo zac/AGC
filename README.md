@@ -17,7 +17,7 @@ Apollo 11 powered-descent **initial velocity, attitude, and angular velocity** a
 swift test
 ```
 
-Open `MissionControl/MissionControl.xcodeproj` in Xcode and run the MissionControl scheme (macOS 14+). Load `Tests/Luminary099.bin` from the app, or use **AGC → Load Luminary099**.
+Open `MissionControl/MissionControl.xcodeproj` in Xcode and run the MissionControl scheme (macOS 14+). Load `Tests/AGCTests/Luminary099.bin` from the app, or use **AGC → Load Luminary099**.
 
 Integration entry points:
 

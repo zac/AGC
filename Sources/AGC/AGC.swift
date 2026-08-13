@@ -405,16 +405,24 @@ public actor AGCRuntime {
 
     private func makeDebuggerSnapshot() -> AGCDebuggerSnapshot {
         let state = components.state
+        let engine = components.engine
+        let extraCode = state.extraCode
         let z = state.erasableMemory[0][Register.regZ.rawValue] & 0o7777
-        let word = components.engine.fetchInstructionWord(at: z)
-        let current = AGCDisassembler.disassemble(word: word, at: z, extraCode: state.extraCode)
-        let listing: [AGCDisassembledInstruction] = (-4...8).compactMap { offset in
+        let word = engine.fetchInstructionWord(at: z)
+        let current = AGCDisassembler.disassemble(word: word, at: z, extraCode: extraCode)
+        var listing: [AGCDisassembledInstruction] = []
+        listing.reserveCapacity(13)
+        for offset in -4...8 {
             let address = (z + offset) & 0o7777
-            let listed = components.engine.fetchInstructionWord(at: address)
-            return AGCDisassembler.disassemble(word: listed, at: address, extraCode: offset == 0 && state.extraCode)
+            let listed = engine.fetchInstructionWord(at: address)
+            listing.append(
+                AGCDisassembler.disassemble(word: listed, at: address, extraCode: offset == 0 && extraCode)
+            )
         }
-        let watches = watchAddresses.map { address in
-            AGCErasableWatch(address: address, value: components.engine.findMemoryWord(address))
+        var watches: [AGCErasableWatch] = []
+        watches.reserveCapacity(watchAddresses.count)
+        for address in watchAddresses {
+            watches.append(AGCErasableWatch(address: address, value: engine.findMemoryWord(address)))
         }
         let packets = components.compositeIO.channelTrace().suffix(16).compactMap { entry -> String? in
             guard let data = AGCPacket.encode(channel: entry.channel, value: entry.value) else { return nil }
@@ -423,7 +431,7 @@ public actor AGCRuntime {
         }
         return AGCDebuggerSnapshot(
             current: current,
-            extraCode: state.extraCode,
+            extraCode: extraCode,
             inIsr: state.inIsr,
             breakpoints: breakpoints.sorted(),
             watches: watches,

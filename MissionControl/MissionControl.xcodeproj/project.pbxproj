@@ -14,7 +14,7 @@
 
 /* Begin PBXFileReference section */
 		1109D35E2EBEBAE200207E5C /* MissionControl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MissionControl.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		1109D3732EC0000100207E5C /* Luminary099.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; name = Luminary099.bin; path = ../Tests/Luminary099.bin; sourceTree = "<group>"; };
+		1109D3732EC0000100207E5C /* Luminary099.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; name = Luminary099.bin; path = ../Tests/AGCTests/Luminary099.bin; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
