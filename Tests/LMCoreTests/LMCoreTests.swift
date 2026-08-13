@@ -105,7 +105,8 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!scenario.sourceStatus.unmodeledItems.contains("AGC erasable state vector (RN/VN), REFSMMAT, and Average-G at PDI"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 braking-phase pad loads (TLAND, RBRFG, and related targets)"))
-        #expect(scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("P63 IGNALG convergence with modeled (not flown) state vector"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("RCS jet positions, vectors, and thrust"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Channel 006 P-axis RCS per-jet geometry (JETSALL group masks only)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("LM inertia tensor"))
@@ -305,6 +306,41 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(snapshot.agc.inputChannels[0o30] == LMPoweredDescentPanel.channel30)
         #expect((snapshot.agc.inputChannels[0o31]! & 0o20000) == 0)
         #expect((snapshot.agc.inputChannels[0o30]! & 0o20) == 0)
+    }
+
+    @Test func `V99 handshake holds PROCEED across one T4RUPT then releases`() {
+        var handshake = LMV99Handshake()
+        #expect(handshake.advance(verb: "06", deltaTime: 0.016) == nil)
+        #expect(handshake.phase == .idle)
+
+        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == true)
+        #expect(handshake.phase == .holding)
+        #expect(handshake.advance(verb: "  ", deltaTime: 0.12) == nil)
+        #expect(handshake.advance(verb: "99", deltaTime: 0.04) == false)
+        #expect(handshake.phase == .done)
+
+        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == nil)
+        #expect(handshake.advance(verb: "  ", deltaTime: 0.016) == nil)
+        #expect(handshake.phase == .done)
+        #expect(handshake.advance(verb: "06", deltaTime: 0.016) == nil)
+        #expect(handshake.phase == .idle)
+        #expect(handshake.advance(verb: "99", deltaTime: 0.016) == true)
+    }
+
+    @Test func `PROCEED press and release drive inverted channel 32 bit 14`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
+        let before = await runtime.step(cycles: 1)
+        #expect((before.agc.inputChannels[0o32]! & 0o20000) != 0)
+
+        await runtime.sendPRO(pressed: true)
+        let pressed = await runtime.step(cycles: 10)
+        #expect((pressed.agc.inputChannels[0o32]! & 0o20000) == 0)
+        #expect(pressed.agc.dsky.proKeyPressed)
+
+        await runtime.sendPRO(pressed: false)
+        let released = await runtime.step(cycles: 10)
+        #expect((released.agc.inputChannels[0o32]! & 0o20000) != 0)
+        #expect(!released.agc.dsky.proKeyPressed)
     }
 
     @Test func `unsourced DPS engine command does not change vertical acceleration`() {

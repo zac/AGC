@@ -291,6 +291,11 @@ public actor AGCRuntime {
         await components.dsky.send(key)
     }
 
+    /// PROCEED is inverted CH32 bit 14. Hold `pressed` across at least one T4RUPT (~120 ms).
+    public func sendPRO(pressed: Bool) async {
+        await components.dsky.sendProKey(pressed)
+    }
+
     @discardableResult
     public func sendDSKYScript(_ script: DSKYScript, cyclesPerKey: UInt64 = 50_000) async -> AGCSnapshot {
         for key in script.keys {

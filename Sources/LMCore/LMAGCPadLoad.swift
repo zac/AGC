@@ -105,3 +105,42 @@ public enum LMPoweredDescentPanel {
         ]
     }
 }
+
+/// Crew response to P63's V99 engine-enable request (`BURNBABY` `*PROCEED` sets ASTNFLAG).
+///
+/// T4RUPT samples CH32 bit 14 every 120 ms, so PRO is held longer than one sample.
+public struct LMV99Handshake: Equatable, Sendable {
+    public static let holdSeconds = 0.15
+
+    public enum Phase: Equatable, Sendable {
+        case idle
+        case holding
+        case done
+    }
+
+    public private(set) var phase: Phase = .idle
+    private var holdRemaining = 0.0
+
+    public init() {}
+
+    /// Returns `true` to press PRO, `false` to release, `nil` for no change.
+    public mutating func advance(verb: String, deltaTime: Double) -> Bool? {
+        switch phase {
+        case .idle:
+            guard verb == "99" else { return nil }
+            phase = .holding
+            holdRemaining = Self.holdSeconds
+            return true
+        case .holding:
+            holdRemaining -= deltaTime
+            guard holdRemaining <= 0 else { return nil }
+            phase = .done
+            return false
+        case .done:
+            if verb != "99" && verb != "  " {
+                phase = .idle
+            }
+            return nil
+        }
+    }
+}

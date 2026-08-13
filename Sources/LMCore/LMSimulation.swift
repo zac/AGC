@@ -173,6 +173,13 @@ public extension LMSourceReference {
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/THE_LUNAR_LANDING.agc",
         detail: "GUIDDURN 2DEC +66440 is 664.40 s from IGNALG to landing. P63SPOT3 waits for CH33 LR POS1."
     )
+
+    static let luminaryBurnBaby = LMSourceReference(
+        id: "luminary099-burn-baby",
+        title: "Luminary099 BURN, BABY, BURN -- MASTER IGNITION ROUTINE",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/BURN,_BABY,_BURN_--_MASTER_IGNITION_ROUTINE.agc",
+        detail: "V99 at TIG-5 via CLOCPLAY; PROCEED sets ASTNFLAG; IGNYET? lights the engine at TIG."
+    )
 }
 
 public extension LMSourceLocator {
@@ -273,6 +280,11 @@ public extension LMSourceLocator {
     static let luminaryP63GUIDDURN = LMSourceLocator(
         reference: .luminaryP63GUIDDURN,
         detail: "AGC clock set to TLAND − GUIDDURN − ZOOMTIME so IGNALG starts at a PDI-relative GET."
+    )
+
+    static let luminaryBurnBaby = LMSourceLocator(
+        reference: .luminaryBurnBaby,
+        detail: "Auto-PRO holds inverted CH32 bit 14 for 150 ms when the DSKY verb is 99."
     )
 
     static let luminaryIOChannelsModeControl = LMSourceLocator(
@@ -752,12 +764,13 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                     .luminaryFlagwordAssignments,
                     .nasaR567NavScales,
                     .nasaSNA8D027Luminary99PadLoads,
-                    .luminaryP63GUIDDURN
+                    .luminaryP63GUIDDURN,
+                    .luminaryBurnBaby
                 ] + configuration.sourceReferences,
                 unmodeledItems: [
                     "Apollo 11 powered-descent body angular rates",
                     "Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)",
-                    "P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)",
+                    "P63 IGNALG convergence with modeled (not flown) state vector",
                     "DPS engine-to-CG gimbal moment arm"
                 ]
             )
@@ -781,6 +794,8 @@ public actor LMSimulationRuntime {
     private var sensorFeedback = LMSensorFeedbackState()
     private var lastSpecificForceBody = LMVector3D.zero
     private var throttleState = LMDPSThrottleState()
+    private var v99Handshake = LMV99Handshake()
+    private var lastDSKYVerb = "  "
 
     public init(
         binFile: URL,
@@ -834,6 +849,8 @@ public actor LMSimulationRuntime {
         sensorFeedback.reset()
         lastSpecificForceBody = .zero
         throttleState.reset()
+        v99Handshake = LMV99Handshake()
+        lastDSKYVerb = "  "
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -867,6 +884,10 @@ public actor LMSimulationRuntime {
 
     public func sendDSKYKey(_ key: DSKYKeyCode) async {
         await agcRuntime.sendDSKYKey(key)
+    }
+
+    public func sendPRO(pressed: Bool) async {
+        await agcRuntime.sendPRO(pressed: pressed)
     }
 
     public func debuggerSnapshot() async -> AGCDebuggerSnapshot {
@@ -995,6 +1016,9 @@ public actor LMSimulationRuntime {
     }
 
     private func stepExact(cycles: UInt64, deltaTime: Double) async -> LMSimulationSnapshot {
+        if let pressed = v99Handshake.advance(verb: lastDSKYVerb, deltaTime: deltaTime) {
+            await agcRuntime.sendPRO(pressed: pressed)
+        }
         let sensorPulses = sensorFeedback.increments(
             specificForceBody: lastSpecificForceBody,
             attitude: vehicleState.attitude,
@@ -1025,6 +1049,7 @@ public actor LMSimulationRuntime {
             configuration: configuration,
             deltaTime: deltaTime
         )
+        lastDSKYVerb = agc.dsky.verb
         let snapshot = makeSnapshot(agc: agc, channelDeltas: channelDeltas)
         traceSamples.append(snapshot.traceSample)
         if traceSamples.count > 2_048 {
