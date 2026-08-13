@@ -53,6 +53,52 @@ public enum LMDPSThrottleMap {
     }
 }
 
+/// DPS trim-gimbal kinematics. Drive rate and stops come from NASA TN D-4131
+/// and R-567 GSOP §3 (0.2 deg/s, ±6 deg). Channel 12 bits 9–12 select the
+/// pitch/roll direction. Engine-to-CG lever arm is unmodeled: only the force
+/// direction through the vehicle origin is tilted.
+public enum LMDPSGimbalMap {
+    public static let degreesPerSecond = 0.2
+    public static let stopDegrees = 6.0
+
+    public static var radiansPerSecond: Double {
+        degreesPerSecond * .pi / 180.0
+    }
+
+    public static var stopRadians: Double {
+        stopDegrees * .pi / 180.0
+    }
+
+    public static var modelingStatus: LMModelingStatus {
+        .sourceBacked(
+            detail: "Channel 12 ±pitch/±roll bits slew DPS gimbals at 0.2 deg/s within ±6 deg stops.",
+            source: .nasaR567GimbalTrim
+        )
+    }
+
+    public static func command(plusBit: Bool, minusBit: Bool) -> Double {
+        (plusBit ? 1 : 0) - (minusBit ? 1 : 0)
+    }
+
+    public static func integrated(current: Double, command: Double, deltaTime: Double) -> Double {
+        guard deltaTime > 0, command != 0 else { return current }
+        return min(max(current + command * radiansPerSecond * deltaTime, -stopRadians), stopRadians)
+    }
+
+    /// Body thrust direction after pitch about sim +X (NASA Q) and roll about sim +Y (NASA R).
+    public static func thrustDirectionBody(pitchRadians: Double, rollRadians: Double) -> LMVector3D {
+        let sinPitch = sin(pitchRadians)
+        let cosPitch = cos(pitchRadians)
+        let sinRoll = sin(rollRadians)
+        let cosRoll = cos(rollRadians)
+        return LMVector3D(
+            x: sinRoll * cosPitch,
+            y: -sinPitch,
+            z: cosRoll * cosPitch
+        ).normalized()
+    }
+}
+
 struct LMDPSThrottleState {
     var pulsePosition = 0.0
     var pendingPulses = 0.0

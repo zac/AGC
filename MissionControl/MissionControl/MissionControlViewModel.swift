@@ -277,6 +277,25 @@ final class MissionControlViewModel {
         )
     }
 
+    func bootAndEnterP63() {
+        guard let runtime else { return }
+        dskySequenceTask?.cancel()
+        dskySequenceTask = nil
+        simulationTask?.cancel()
+        isRunning = true
+        status = .running
+        recordEvent("Booting Luminary and keying V37E63E")
+        simulationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let snapshot = await runtime.bootAndEnterP63()
+            self.isRunning = false
+            self.simulationTask = nil
+            self.status = .stopped
+            self.applySnapshot(snapshot)
+            self.recordEvent("Boot + P63 finished at cycle \(snapshot.agc.cycle)")
+        }
+    }
+
     func exportChannelTrace() {
         let rows = latestChannelTrace.map { entry in
             "\(entry.direction.rawValue.uppercased()) \(String(format: "%03o", entry.channel)) \(String(format: "%05o", entry.value))"

@@ -307,6 +307,11 @@ struct MissionControlDashboard: View {
                     }
                     .disabled(!viewModel.canReset)
 
+                    Button("Boot + P63") {
+                        viewModel.bootAndEnterP63()
+                    }
+                    .disabled(viewModel.selectedURL == nil || viewModel.isRunning)
+
                     Button("Step Frame") {
                         viewModel.stepPoweredDescentFrame()
                     }

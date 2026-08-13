@@ -90,10 +90,22 @@ struct LMCoreScenarioAndDynamicsTests {
     @Test func `source backed scenario exposes sources and unknowns`() {
         let scenario = LMPoweredDescentScenario.apollo11SourceBacked
 
-        #expect(scenario.initialState.altitudeMeters == 15_240)
+        #expect(abs(scenario.initialState.altitudeMeters - 48_814.0 * 0.3048) < 1e-9)
         #expect(scenario.initialState.massKilograms == 33_000.0 * 0.45359237)
+        #expect(abs(scenario.initialState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1e-9)
+        #expect(abs(scenario.initialState.velocityMetersPerSecond.z + 4.0 * 0.3048) < 1e-9)
+        let thrust = scenario.initialState.attitude.rotated(LMVector3D(z: 1))
+        #expect(thrust.y < -0.98)
+        #expect(thrust.z < 0)
         #expect(scenario.checkpoints.map(\.program) == [63, 64, 65, 66])
         #expect(!scenario.sourceStatus.sources.isEmpty)
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent initial velocity"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent initial attitude and angular velocity"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent body angular rates"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("AGC erasable state vector (RN/VN), REFSMMAT, and Average-G at PDI"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 braking-phase pad loads (TLAND, RBRFG, and related targets)"))
+        #expect(scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("RCS jet positions, vectors, and thrust"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Channel 006 P-axis RCS per-jet geometry (JETSALL group masks only)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("LM inertia tensor"))
@@ -214,6 +226,85 @@ struct LMCoreScenarioAndDynamicsTests {
         )
 
         #expect(powered.velocityMetersPerSecond.z > gravityOnly.velocityMetersPerSecond.z)
+    }
+
+    @Test func `plus pitch gimbal trim tilts DPS thrust off the body Z axis`() {
+        let source = LMSourceReference(id: "test-source", title: "Test source", detail: "Unit test")
+        let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 1_000)
+        let config = LMVehicleConfiguration(
+            lunarGravityMetersPerSecondSquared: LMVehicleConfiguration.sourceBackedDefault.lunarGravityMetersPerSecondSquared,
+            agcCyclesPerSecond: LMVehicleConfiguration.sourceBackedDefault.agcCyclesPerSecond,
+            mainEngine: LMMainEngineConfiguration(
+                maximumRatedThrustNewtons: LMSourceValue(2_000, source: source),
+                engineOnThrustNewtons: LMSourceValue(2_000, source: source)
+            )
+        )
+        let next = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(outputChannel11: 0o10000, outputChannel12: 0o1000),
+            configuration: config,
+            deltaTime: 1
+        )
+        #expect(abs(next.dpsPitchGimbalRadians - LMDPSGimbalMap.radiansPerSecond) < 1e-12)
+        #expect(next.dpsRollGimbalRadians == 0)
+        #expect(next.velocityMetersPerSecond.y < 0)
+    }
+
+    @Test func `boot and enter P63 keys V37E63E after the boot horizon`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
+        let snapshot = await runtime.bootAndEnterP63(bootCycles: 100, cyclesPerKey: 10)
+        #expect(snapshot.agc.cycle >= 100 + UInt64(DSKYScript.v37e63e.keys.count) * 10)
+        #expect(abs(snapshot.vehicleState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1)
+    }
+
+    @Test func `PDI nav load writes moon-centered RN VN RLS and identity REFSMMAT`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
+        await runtime.loadPDINavState()
+
+        let rnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
+        let vnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vn + 2)
+        let rlsZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls + 4)
+        let ref00 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.refsmmat)
+        let expectedRadius = Luminary099NavScale.moonRadiusMeters + 48_814.0 * 0.3048
+        let expectedVN = 5_560.0 * 0.3048 / 100.0
+
+        #expect(abs(rnZ.decoded(scale: Luminary099NavScale.positionScale) - expectedRadius) < 1)
+        #expect(abs(vnY.decoded(scale: Luminary099NavScale.velocityScale) - expectedVN) < 1e-6)
+        #expect(abs(rlsZ.decoded(scale: Luminary099NavScale.positionScale) - Luminary099NavScale.moonRadiusMeters) < 1)
+        #expect(ref00.high == 0o20000)
+        #expect(await runtime.readErasable(ecadr: 0o1422) == 0)
+
+        let moonflag = await runtime.readErasable(ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.moonflag))
+        let moonBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.moonflag) - 1)
+        #expect((moonflag & moonBit) != 0)
+    }
+
+    @Test func `P63 pad load matches NASA Luminary 99 octal and asserts MODE CONTROL AUTO`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
+        await runtime.loadP63PadLoads()
+        await runtime.applyPoweredDescentPanel()
+        _ = await runtime.step(cycles: 1)
+
+        let tland = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.tland)
+        #expect(tland.high == 0o04247)
+        #expect(tland.low == 0o34030)
+
+        let rbrfgX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rbrfg)
+        #expect(rbrfgX.high == 0o00000)
+        #expect(rbrfgX.low == 0o01506)
+
+        let v2fgX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.v2fg)
+        #expect(v2fgX.high == 0o77777)
+        #expect(v2fgX.low == 0o73242)
+
+        let clock = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.time2)
+        #expect(abs(clock.decoded(scale: 28) - Luminary99LandingPadLoad.pdiClockCentiseconds) < 1)
+
+        let snapshot = await runtime.snapshot()
+        #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)
+        #expect(snapshot.agc.inputChannels[0o30] == LMPoweredDescentPanel.channel30)
+        #expect((snapshot.agc.inputChannels[0o31]! & 0o20000) == 0)
+        #expect((snapshot.agc.inputChannels[0o30]! & 0o20) == 0)
     }
 
     @Test func `unsourced DPS engine command does not change vertical acceleration`() {

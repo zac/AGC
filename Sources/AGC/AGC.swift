@@ -313,6 +313,42 @@ public actor AGCRuntime {
         radarInputBox.set(input)
     }
 
+    /// Write a 15-bit word at an 11-bit ECADR (direct bank, not the current EB).
+    public func writeErasable(ecadr: Int, value: Int) {
+        components.engine.writeErasableECADR(ecadr, value)
+    }
+
+    public func writeErasable(_ words: [AGCErasableWord]) {
+        for word in words {
+            components.engine.writeErasableECADR(word.ecadr, word.value)
+        }
+    }
+
+    public func writeDoublePrecision(ecadr: Int, _ value: AGCDoublePrecision) {
+        components.engine.writeErasableECADR(ecadr, value.high)
+        components.engine.writeErasableECADR(ecadr + 1, value.low)
+    }
+
+    public func readErasable(ecadr: Int) -> Int {
+        components.engine.readErasableECADR(ecadr)
+    }
+
+    public func readDoublePrecision(ecadr: Int) -> AGCDoublePrecision {
+        AGCDoublePrecision(
+            high: components.engine.readErasableECADR(ecadr),
+            low: components.engine.readErasableECADR(ecadr + 1)
+        )
+    }
+
+    /// Set bit `bit` (AGC numbering, 1 = LSB … 15 = sign) at `ecadr` without clearing other bits.
+    public func setErasableBit(ecadr: Int, bit: Int) {
+        let clampedBit = min(max(bit, 1), 15)
+        let mask = 1 << (clampedBit - 1)
+        let current = components.engine.readErasableECADR(ecadr)
+        components.engine.writeErasableECADR(ecadr, current | mask)
+    }
+
+
     public func setRotationalHandControllerInput(_ input: AGCRotationalHandControllerInput) async {
         components.externalInput.enqueue([
             AGCChannelInput(channel: 0o166, value: input.pitch),

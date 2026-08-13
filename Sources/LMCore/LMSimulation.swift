@@ -110,6 +110,69 @@ public extension LMSourceReference {
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/AOSTASK_AND_AOSJOB.agc",
         detail: "1JACC = A/(MASS+C)+B; I = TORKJET1/1JACC. A scaled at π/4 rad/s²·2^16 kg, B at π/4 rad/s², C at 2^16 kg. NASA P/Q/R map to sim Z/X/Y."
     )
+
+    static let nasaTN6846PoweredDescent = LMSourceReference(
+        id: "nasa-tn-d-6846-powered-descent",
+        title: "NASA TN D-6846 Apollo Experience Report: Mission Planning for Lunar Module Descent and Ascent",
+        url: "https://ntrs.nasa.gov/api/citations/19720018205/downloads/19720018205.pdf",
+        detail: "Table I Apollo 11 premission powered-descent event summary: PDI inertial velocity 5560 fps, altitude rate -4 fps, altitude 48,814 ft."
+    )
+
+    static let nasaTN4131PDIAttitude = LMSourceReference(
+        id: "nasa-tn-d-4131-pdi-attitude",
+        title: "NASA TN D-4131 Lunar Module Pilot Control Considerations",
+        url: "https://ibiblio.org/apollo/Documents/TN-D-4131%20Lunar%20Module%20Pilot%20Control%20Considerations.pdf",
+        detail: "PDI pitch is approximately 95° back from local vertical; DPS trim gimbals drive at 0.2 deg/s."
+    )
+
+    static let nasaR567GimbalTrim = LMSourceReference(
+        id: "nasa-r567-descent-engine-trim-gimbal",
+        title: "NASA R-567 Luminary GSOP Section 3 Digital Autopilot",
+        url: "https://www.ibiblio.org/apollo/Documents/j2-80-R-567-SEC3-REV8_text.pdf",
+        detail: "Descent-engine trim gimbals: 0.2 deg/s drive, stops at -6 deg, then timed drive to the N48 trim angles."
+    )
+
+    static let luminaryErasableAssignments = LMSourceReference(
+        id: "luminary099-erasable-assignments",
+        title: "Luminary099 erasable assignments",
+        url: "https://ibiblio.org/apollo/listings/Luminary099/ERASABLE_ASSIGNMENTS.agc.html",
+        detail: "yaYUL listing: RN 01220, VN 01226, PIPTIME 01234, MASS 01244, REFSMMAT E3,1733, RLS E4,1422 (ECADR 02222)."
+    )
+
+    static let luminaryControlledConstants = LMSourceReference(
+        id: "luminary099-controlled-constants-504rm",
+        title: "Luminary099 controlled constants 504RM",
+        url: "https://ibiblio.org/apollo/listings/Luminary099/CONTROLLED_CONSTANTS.agc.html",
+        detail: "504RM 2DEC 1738090 B-29, equatorial moon radius in meters."
+    )
+
+    static let luminaryFlagwordAssignments = LMSourceReference(
+        id: "luminary099-flagword-assignments",
+        title: "Luminary099 flagword assignments",
+        url: "https://github.com/virtualagc/virtualagc/blob/master/Luminary099/FLAGWORD_ASSIGNMENTS.agc",
+        detail: "MOONFLAG (003), LUNAFLAG (048), and LMOONFLG (124) select lunar-SOI scaling."
+    )
+
+    static let nasaR567NavScales = LMSourceReference(
+        id: "nasa-r567-luminary-nav-scales",
+        title: "NASA R-567 Luminary GSOP Section 5 guidance equations",
+        url: "https://ibiblio.org/apollo/Documents/j2-80-R-567-SEC5-REV11_text.pdf",
+        detail: "Lunar-SOI RN meters B27, VN meters/centisecond B5, RLS moon-fixed meters B27, REFSMMAT half-unit direction cosines, MASS kilograms B16."
+    )
+
+    static let nasaSNA8D027Luminary99PadLoads = LMSourceReference(
+        id: "nasa-sna-8-d-027-luminary99-pad-loads",
+        title: "NASA SNA-8-D-027(II) LM Data Book Luminary 99 prelaunch erasable load",
+        url: "https://www.ibiblio.org/apollo/Documents/Luminary99PadLoads.pdf",
+        detail: "Table LM5/4.5.1-1: TLAND 100:50:49.20 GET, braking/approach aimpoints RBRFG–JAPFG*, VIGN/RIGNX/RIGNZ, V2FG −3 ft/s, TAUVERT 10 s, ZOOMTIME 26 s."
+    )
+
+    static let luminaryP63GUIDDURN = LMSourceReference(
+        id: "luminary099-the-lunar-landing-guiddurn",
+        title: "Luminary099 THE_LUNAR_LANDING GUIDDURN",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/THE_LUNAR_LANDING.agc",
+        detail: "GUIDDURN 2DEC +66440 is 664.40 s from IGNALG to landing. P63SPOT3 waits for CH33 LR POS1."
+    )
 }
 
 public extension LMSourceLocator {
@@ -163,6 +226,58 @@ public extension LMSourceLocator {
     static let luminary1ACCS = LMSourceLocator(
         reference: .luminary1ACCS,
         detail: "Diagonal inertia from 1/ACCS INERCON curve fits and TORKJET1."
+    )
+
+    static let nasaTN6846PoweredDescent = LMSourceLocator(
+        reference: .nasaTN6846PoweredDescent,
+        section: "Table I",
+        detail: "Apollo 11 premission PDI: 5560 fps inertial, -4 fps altitude rate, 48,814 ft."
+    )
+
+    static let nasaTN4131PDIAttitude = LMSourceLocator(
+        reference: .nasaTN4131PDIAttitude,
+        detail: "PDI attitude 95° from local vertical; trim-gimbal rate 0.2 deg/s."
+    )
+
+    static let nasaR567GimbalTrim = LMSourceLocator(
+        reference: .nasaR567GimbalTrim,
+        detail: "Channel 12 pitch/roll trim bits slew DPS gimbals at 0.2 deg/s within ±6 deg stops."
+    )
+
+    static let luminaryErasableAssignments = LMSourceLocator(
+        reference: .luminaryErasableAssignments,
+        detail: "ECADRs for RN, VN, PIPTIME, MASS, REFSMMAT, RLS, and LEM integration vectors."
+    )
+
+    static let luminaryControlledConstants = LMSourceLocator(
+        reference: .luminaryControlledConstants,
+        detail: "Landing-site radius uses Luminary 504RM = 1,738,090 m."
+    )
+
+    static let luminaryFlagwordAssignments = LMSourceLocator(
+        reference: .luminaryFlagwordAssignments,
+        detail: "MOONFLAG/LUNAFLAG/LMOONFLG set so Average-G uses lunar B27/B5 scales."
+    )
+
+    static let nasaR567NavScales = LMSourceLocator(
+        reference: .nasaR567NavScales,
+        detail: "PDI kinematics encoded into RN/VN/RLS/MASS at GSOP lunar-SOI scales; REFSMMAT is identity in the modeled local-vertical frame."
+    )
+
+    static let nasaSNA8D027Luminary99PadLoads = LMSourceLocator(
+        reference: .nasaSNA8D027Luminary99PadLoads,
+        section: "Table LM5/4.5.1-1",
+        detail: "Landing-guidance overlay TLAND through TAUVERT, plus ZOOMTIME and phase-switch times."
+    )
+
+    static let luminaryP63GUIDDURN = LMSourceLocator(
+        reference: .luminaryP63GUIDDURN,
+        detail: "AGC clock set to TLAND − GUIDDURN − ZOOMTIME so IGNALG starts at a PDI-relative GET."
+    )
+
+    static let luminaryIOChannelsModeControl = LMSourceLocator(
+        reference: .luminaryIOChannels,
+        detail: "CH31 bit 14 AUTO and CH30 bit 5 auto-throttle are inverted discretes; 0 means present."
     )
 }
 
@@ -316,6 +431,18 @@ public struct LMQuaternion: Equatable, Sendable, Codable {
         )
         return multiplied(by: delta).normalized()
     }
+
+    public static func fromAxisAngle(axis: LMVector3D, radians: Double) -> LMQuaternion {
+        let half = radians / 2
+        let direction = axis.normalized()
+        guard direction.magnitude > 0 else { return .identity }
+        return LMQuaternion(
+            w: cos(half),
+            x: direction.x * sin(half),
+            y: direction.y * sin(half),
+            z: direction.z * sin(half)
+        ).normalized()
+    }
 }
 
 public struct LMMainEngineConfiguration: Equatable, Sendable, Codable {
@@ -441,6 +568,8 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public let massKilograms: Double?
     public let propellantMassKilograms: Double?
     public let isLanded: Bool
+    public let dpsPitchGimbalRadians: Double
+    public let dpsRollGimbalRadians: Double
 
     public init(
         positionMeters: LMVector3D = .zero,
@@ -449,7 +578,9 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         angularVelocityRadiansPerSecond: LMVector3D = .zero,
         massKilograms: Double? = nil,
         propellantMassKilograms: Double? = nil,
-        isLanded: Bool = false
+        isLanded: Bool = false,
+        dpsPitchGimbalRadians: Double = 0,
+        dpsRollGimbalRadians: Double = 0
     ) {
         self.positionMeters = positionMeters
         self.velocityMetersPerSecond = velocityMetersPerSecond
@@ -458,6 +589,8 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         self.massKilograms = massKilograms
         self.propellantMassKilograms = propellantMassKilograms
         self.isLanded = isLanded
+        self.dpsPitchGimbalRadians = dpsPitchGimbalRadians
+        self.dpsRollGimbalRadians = dpsRollGimbalRadians
     }
 
     public var altitudeMeters: Double {
@@ -578,8 +711,21 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
             detail: "Source anchor for powered-descent program checkpoints P63-P66."
         )
         let configuration = LMVehicleConfiguration.sourceBackedDefault
+        let feet = 0.3048
+        let pdiAltitudeMeters = 48_814.0 * feet
+        let pdiHorizontalMetersPerSecond = 5_560.0 * feet
+        let pdiAltitudeRateMetersPerSecond = -4.0 * feet
+        let pdiPitch = LMQuaternion.fromAxisAngle(
+            axis: LMVector3D(x: 1),
+            radians: 95.0 * .pi / 180.0
+        )
         let initialState = LMVehicleStateSnapshot(
-            positionMeters: LMVector3D(z: 50_000.0 * 0.3048),
+            positionMeters: LMVector3D(z: pdiAltitudeMeters),
+            velocityMetersPerSecond: LMVector3D(
+                y: pdiHorizontalMetersPerSecond,
+                z: pdiAltitudeRateMetersPerSecond
+            ),
+            attitude: pdiPitch,
             massKilograms: 33_000.0 * 0.45359237
         )
         let checkpoints = [
@@ -595,10 +741,24 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
             configuration: configuration,
             checkpoints: checkpoints,
             sourceStatus: LMSourceStatus(
-                sources: [dpsSource, guidanceSource] + configuration.sourceReferences,
+                sources: [
+                    dpsSource,
+                    guidanceSource,
+                    .nasaTN6846PoweredDescent,
+                    .nasaTN4131PDIAttitude,
+                    .nasaR567GimbalTrim,
+                    .luminaryErasableAssignments,
+                    .luminaryControlledConstants,
+                    .luminaryFlagwordAssignments,
+                    .nasaR567NavScales,
+                    .nasaSNA8D027Luminary99PadLoads,
+                    .luminaryP63GUIDDURN
+                ] + configuration.sourceReferences,
                 unmodeledItems: [
-                    "Apollo 11 powered-descent initial velocity",
-                    "Apollo 11 powered-descent initial attitude and angular velocity"
+                    "Apollo 11 powered-descent body angular rates",
+                    "Selenographic ephemeris and PDI range-to-go (RN/VN use a modeled local-vertical moon-centered frame with identity REFSMMAT)",
+                    "P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)",
+                    "DPS engine-to-CG gimbal moment arm"
                 ]
             )
         )
@@ -742,6 +902,54 @@ public actor LMSimulationRuntime {
         return snapshot
     }
 
+    /// Idle-boot Luminary for `bootCycles` MCTs, load PDI nav + P63 pad-loads,
+    /// assert MODE CONTROL AUTO, then key V37E63E.
+    @discardableResult
+    public func bootAndEnterP63(
+        bootCycles: UInt64 = 1_000_000,
+        cyclesPerKey: UInt64 = 50_000
+    ) async -> LMSimulationSnapshot {
+        if bootCycles > 0 {
+            _ = await step(cycles: bootCycles)
+        }
+        await loadP63PadLoads()
+        await loadPDINavState()
+        await applyPoweredDescentPanel()
+        return await sendDSKYScript(.v37e63e, cyclesPerKey: cyclesPerKey)
+    }
+
+    /// NASA Luminary 99 landing-guidance overlay and a PDI-relative GET clock.
+    public func loadP63PadLoads() async {
+        await agcRuntime.writeErasable(Luminary99LandingPadLoad.erasableWords())
+        await agcRuntime.writeErasable(Luminary99LandingPadLoad.clockWords())
+    }
+
+    /// Held MODE CONTROL AUTO, auto throttle, engine armed, IMU operate, LR POS1.
+    public func applyPoweredDescentPanel() async {
+        await agcRuntime.enqueueInputs(LMPoweredDescentPanel.channelInputs)
+    }
+
+    /// Encode the current vehicle state into Luminary RN/VN/RLS/REFSMMAT/MASS
+    /// and set lunar-SOI flags. Call after fresh start so restart does not wipe it.
+    public func loadPDINavState() async {
+        let time2 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time2)
+        let time1 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time1)
+        await agcRuntime.writeErasable(
+            LMAGCNavState.erasableWords(vehicle: vehicleState, time2: time2, time1: time1)
+        )
+        for flag in LMAGCNavState.lunarSphereFlags() {
+            await agcRuntime.setErasableBit(ecadr: flag.ecadr, bit: flag.bit)
+        }
+    }
+
+    public func readErasable(ecadr: Int) async -> Int {
+        await agcRuntime.readErasable(ecadr: ecadr)
+    }
+
+    public func readDoublePrecision(ecadr: Int) async -> AGCDoublePrecision {
+        await agcRuntime.readDoublePrecision(ecadr: ecadr)
+    }
+
     public func enqueueInput(_ input: AGCChannelInput) async {
         await agcRuntime.enqueueInput(input)
     }
@@ -873,7 +1081,7 @@ public actor LMSimulationRuntime {
             + configuration.sourceReferences
             + commands.sourceReferences
             + [radarInput?.conversionStatus.source?.reference].compactMap { $0 }
-            + [.luminaryPIPAScale, .agcCDUEncoding, .luminaryThrottleConstants, .luminaryRCSGeometry, .luminary1ACCS]
+            + [.luminaryPIPAScale, .agcCDUEncoding, .luminaryThrottleConstants, .luminaryRCSGeometry, .luminary1ACCS, .nasaR567GimbalTrim]
         var seen = Set<String>()
         return LMSourceStatus(
             sources: sources.filter { seen.insert($0.id).inserted },
@@ -899,13 +1107,16 @@ enum LMDynamics {
     ) -> LMVehicleStateSnapshot {
         guard deltaTime > 0, !state.isLanded else { return state }
 
+        let (pitch, roll) = advancedGimbal(state: state, commands: commands, deltaTime: deltaTime)
         var forceWorld = LMVector3D.zero
         var torqueBody = LMVector3D.zero
 
         if commands.mainEngineOn,
            !commands.mainEngineOff,
            let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
-            forceWorld = forceWorld + state.attitude.rotated(LMVector3D(z: thrust))
+            forceWorld = forceWorld + state.attitude.rotated(
+                LMDPSGimbalMap.thrustDirectionBody(pitchRadians: pitch, rollRadians: roll) * thrust
+            )
         }
 
         for command in commands.rcsJets {
@@ -963,7 +1174,9 @@ enum LMDynamics {
             angularVelocityRadiansPerSecond: angularVelocity,
             massKilograms: state.massKilograms,
             propellantMassKilograms: state.propellantMassKilograms,
-            isLanded: landed
+            isLanded: landed,
+            dpsPitchGimbalRadians: pitch,
+            dpsRollGimbalRadians: roll
         )
     }
 
@@ -977,7 +1190,10 @@ enum LMDynamics {
         if commands.mainEngineOn,
            !commands.mainEngineOff,
            let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
-            forceBody = forceBody + LMVector3D(z: thrust)
+            forceBody = forceBody + LMDPSGimbalMap.thrustDirectionBody(
+                pitchRadians: state.dpsPitchGimbalRadians,
+                rollRadians: state.dpsRollGimbalRadians
+            ) * thrust
         }
         for command in commands.rcsJets {
             guard let jet = configuration.rcsJets[command.jet] else { continue }
@@ -985,5 +1201,30 @@ enum LMDynamics {
         }
         guard let mass = state.massKilograms, mass > 0 else { return .zero }
         return forceBody / mass
+    }
+
+    static func advancedGimbal(
+        state: LMVehicleStateSnapshot,
+        commands: LMVehicleSnapshot,
+        deltaTime: Double
+    ) -> (pitch: Double, roll: Double) {
+        let channel12 = commands.outputChannel12
+        let pitch = LMDPSGimbalMap.integrated(
+            current: state.dpsPitchGimbalRadians,
+            command: LMDPSGimbalMap.command(
+                plusBit: (channel12 & 0o1000) != 0,
+                minusBit: (channel12 & 0o400) != 0
+            ),
+            deltaTime: deltaTime
+        )
+        let roll = LMDPSGimbalMap.integrated(
+            current: state.dpsRollGimbalRadians,
+            command: LMDPSGimbalMap.command(
+                plusBit: (channel12 & 0o4000) != 0,
+                minusBit: (channel12 & 0o2000) != 0
+            ),
+            deltaTime: deltaTime
+        )
+        return (pitch, roll)
     }
 }
