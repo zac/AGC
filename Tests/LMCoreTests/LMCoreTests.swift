@@ -1018,6 +1018,48 @@ struct LMCoreScenarioAndDynamicsTests {
         )
         #expect(snapshot.agc.dsky.programNumber == 63, "LUNLAND should keep P63 \(trail)")
         #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on under LUNLAND \(trail)")
+
+        let p64Deadline = Luminary99LandingPadLoad.guidDurnCentiseconds / 100.0
+        let remainingToLand = max(dt, p64Deadline - (snapshot.timeSeconds - igniteTime))
+        let p64Steps = Int((remainingToLand / dt).rounded(.up))
+        var reachedP64 = snapshot.agc.dsky.programNumber == 64
+        var lastLogged = -10.0
+        for _ in 1...p64Steps {
+            if reachedP64 { break }
+            snapshot = await runtime.step(deltaTime: dt, input: panel)
+            let burned = snapshot.timeSeconds - igniteTime
+            let now = await dump()
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            let ttf8 = AGCSinglePrecision(
+                word: await runtime.readErasable(ecadr: Luminary099Erasable.ttf8)
+            ).decoded(scale: 17)
+            let interesting = now != last || snapshot.agc.dsky.programNumber == 64
+            if interesting || burned - lastLogged >= 10 {
+                trail += " | +\(String(format: "%.1f", burned))s TTF/8=\(Int(ttf8.rounded())) \(now)"
+                last = now
+                lastLogged = burned
+            }
+            if aborting(fail1, fail2) {
+                trail += " | abort t=\(String(format: "%.1f", burned)) \(now)"
+                break
+            }
+            if snapshot.agc.dsky.programNumber == 64 {
+                reachedP64 = true
+                trail += " | P64 t=\(String(format: "%.1f", burned)) \(now)"
+                break
+            }
+            if snapshot.agc.dsky.programNumber != 63 {
+                trail += " | left P63 t=\(String(format: "%.1f", burned)) \(now)"
+                break
+            }
+        }
+        let p64Wch = await runtime.readErasable(ecadr: Luminary099Erasable.wchPhase)
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 before P64 \(trail)")
+        #expect(reachedP64, "TENDBRAK should start P64 before GUIDDURN \(trail)")
+        #expect(snapshot.agc.dsky.programNumber == 64, "STARTP64 NEWMODEX 64 \(trail)")
+        #expect(p64Wch == 1, "WCHPHASE should be APPRQUAD in P64 \(trail)")
+        #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on into P64 \(trail)")
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
