@@ -55,8 +55,8 @@ public enum LMDPSThrottleMap {
 
 /// DPS trim-gimbal kinematics. Drive rate and stops come from NASA TN D-4131
 /// and R-567 GSOP §3 (0.2 deg/s, ±6 deg). Channel 12 bits 9–12 select the
-/// pitch/roll direction. Engine-to-CG lever arm is unmodeled: only the force
-/// direction through the vehicle origin is tilted.
+/// pitch/roll direction. Torque uses Luminary 1/ACCS `L,PVT-CG` as the
+/// engine-pivot-to-CG lever along sim −Z (NASA −X).
 public enum LMDPSGimbalMap {
     public static let degreesPerSecond = 0.2
     public static let stopDegrees = 6.0
@@ -235,9 +235,25 @@ public enum LMInertiaMap {
 
     public static var modelingStatus: LMModelingStatus {
         .sourceBacked(
-            detail: "Diagonal inertia is TORKJET1/1JACC with 1JACC = A/(MASS+C)+B from INERCONA/B/C.",
+            detail: "Diagonal inertia is TORKJET1/1JACC with 1JACC = A/(MASS+C)+B from INERCONA/B/C. Descent L,PVT-CG uses the same fit at 8 ft.",
             source: .luminary1ACCS
         )
+    }
+
+    /// Luminary `L,PVT-CG` scale: 8 feet.
+    public static let pivotToCGScaleMeters = 8.0 * 0.3048
+
+    /// Descent-engine pivot-to-CG distance from 1/ACCS INERCON L A/B/C.
+    public static func descentEnginePivotToCGMeters(massKilograms: Double) -> Double {
+        let a = 0.0410511917 * pivotToCGScaleMeters * massScaleKilograms
+        let b = 0.155044 * pivotToCGScaleMeters
+        let c = -0.025233 * massScaleKilograms
+        return a / (massKilograms + c) + b
+    }
+
+    /// Engine pivot in the body frame. NASA +X is sim +Z; the engine is below the CG.
+    public static func descentEnginePivotBodyMeters(massKilograms: Double) -> LMVector3D {
+        LMVector3D(z: -descentEnginePivotToCGMeters(massKilograms: massKilograms))
     }
 
     private struct JetAccelerationFit {

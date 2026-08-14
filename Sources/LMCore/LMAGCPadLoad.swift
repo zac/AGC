@@ -5,8 +5,12 @@ import Foundation
 /// Table LM5/4.5.1-1 (prelaunch erasable load).
 ///
 /// Aimpoints are in descent-guidance coordinates. TLAND is 100:50:49.20 GET.
-/// The AGC clock is set to `TLAND − GUIDDURN − ZOOMTIME` so IGNALG starts at
-/// a sourced PDI-relative time rather than GET 0.
+/// The AGC clock is left at Luminary GET. TLAND is set to
+/// `GET + GUIDDURN + ZOOMTIME` plus the MIDTOAV TIG lead (`SEC45 + D29.9SEC
+/// + TIMEDELT`) so IGNALG’s TIG clears P41SPOT after IGNALG. BURNBABY
+/// `LONGCALL`s TIG-35; TIG ≤ GET+35 s alarms 01204. MIDTOAV1 needs
+/// `TIG − D29.9SEC > GET + TIMEDELT` or it alarms 01703.
+/// Do not write TIME2/TIME1 after idle boot (that alarms 01107).
 public enum Luminary99LandingPadLoad {
     /// NASA mission-tape TLAND, centiseconds GET, B28.
     public static let tlandCentiseconds = 36_304_920.0
@@ -14,10 +18,33 @@ public enum Luminary99LandingPadLoad {
     public static let guidDurnCentiseconds = 66_440.0
     /// NASA ZOOMTIME, 26 s of DPS throttle-up, B14 centiseconds.
     public static let zoomTimeCentiseconds = 2_600.0
-    /// NASA RIGNX, meters B24. Modeled as sim +X (crossrange, north).
+    /// BURNBABY `TIG-5` / CLOCPLAY V99, centiseconds.
+    public static let tigMinusFiveCentiseconds = 500.0
+    /// P41SPOT `D29.9SEC 2DEC 2990`. `TDEC1 = TIG − 29.9 s` for MIDTOAV1.
+    public static let d29p9SecCentiseconds = 2_990.0
+    /// `INTEGRATION_INITIALIZATION` `TIMEDELT 2DEC 2000`. MIDTOAV1 01703 if
+    /// `TDEC1 ≤ GET + 20 s` (“ignition time slipped”).
+    public static let timeDeltCentiseconds = 2_000.0
+    /// P40/BURNBABY `SEC45 DEC 4500`. GET used by V37/IGNALG/R60 before P41SPOT
+    /// (P40 crew note: 01703 if TIG is less than 45 s away).
+    public static let sec45Centiseconds = 4_500.0
+    /// TIG after GET: `D29.9SEC + TIMEDELT` so MIDTOAV1 sees `TDEC1 > GET+20 s`
+    /// after IGNALG, plus `SEC45` for GET used before P41SPOT.
+    public static var preIgnitionCentiseconds: Double {
+        sec45Centiseconds + d29p9SecCentiseconds + timeDeltCentiseconds
+    }
+    /// First IGNALG `TDEC1` look-ahead: ZOOMTIME + MIDTOAV TIG lead.
+    public static var ignalgLookaheadCentiseconds: Double {
+        zoomTimeCentiseconds + preIgnitionCentiseconds
+    }
+    /// NASA RIGNX, meters B24. Guidance-frame X of (R−LAND) at ignition (site-vertical channel).
     public static let rignXMeters = -39_782.453328
-    /// NASA RIGNZ, meters B24. Modeled as sim +Y (downrange, east). PDI starts here, uprange of RLS.
+    /// NASA RIGNZ, meters B24. Guidance-frame Z of (R−LAND) at ignition (downrange channel).
     public static let rignZMeters = -436_655.657
+    /// NASA VIGN, meters/centisecond B10.
+    public static let vignMetersPerCentisecond = 16.90256208
+    /// NASA TN D-6846 PDI altitude rate, meters/centisecond.
+    public static let pdiAltitudeRateMetersPerCentisecond = -4.0 * 0.3048 / 100.0
 
     public static var pdiGroundRangeMeters: Double {
         hypot(rignXMeters, rignZMeters)
@@ -27,8 +54,18 @@ public enum Luminary99LandingPadLoad {
         tlandCentiseconds - guidDurnCentiseconds - zoomTimeCentiseconds
     }
 
+    /// TLAND so IGNALG’s TIG clears MIDTOAV1 after IGNALG/R60 (BURNBABY TIG-35 LONGCALL).
+    /// Writing TIME2/TIME1 after idle boot trips alarm 01107 (phase-table / fresh start).
+    public static func tlandCentiseconds(fromClock clockCentiseconds: Double) -> Double {
+        clockCentiseconds + guidDurnCentiseconds + ignalgLookaheadCentiseconds
+    }
+
     public static func clockWords() -> [AGCErasableWord] {
         dp(Luminary099Erasable.time2, pdiClockCentiseconds, scale: 28)
+    }
+
+    public static func tlandWords(fromClock clockCentiseconds: Double) -> [AGCErasableWord] {
+        dp(Luminary099Erasable.tland, tlandCentiseconds(fromClock: clockCentiseconds), scale: 28)
     }
 
     public static func erasableWords() -> [AGCErasableWord] {
@@ -53,7 +90,7 @@ public enum Luminary99LandingPadLoad {
         words.append(contentsOf: dp(Luminary099Erasable.gainAppr, 0, scale: 0))
         words.append(sp(Luminary099Erasable.tcgfAppr, 3_000, scale: 17))
         words.append(sp(Luminary099Erasable.tcgiAppr, 20_000, scale: 17))
-        words.append(contentsOf: dp(Luminary099Erasable.vign, 16.90256208, scale: 10))
+        words.append(contentsOf: dp(Luminary099Erasable.vign, vignMetersPerCentisecond, scale: 10))
         words.append(contentsOf: dp(Luminary099Erasable.rignx, rignXMeters, scale: 24))
         words.append(contentsOf: dp(Luminary099Erasable.rignz, rignZMeters, scale: 24))
         words.append(contentsOf: dp(Luminary099Erasable.kignx, -0.617631, scale: 4))
@@ -105,6 +142,14 @@ public enum Luminary99CoordinatePadLoad {
         y: 697_547.4954,
         z: 21_616.9998
     )
+    /// NASA TEPHEM `00000 20017 20500`, centiseconds from 1 July 1968 to GET 0, B42.
+    public static let tephemCentiseconds = 134_472_000.0
+    /// NASA 504LM, moon-fixed libration radians B0.
+    public static let librationRadians = LMVector3D(
+        x: AGCDoublePrecision(high: 0o77775, low: 0o46355).decoded(scale: 0),
+        y: AGCDoublePrecision(high: 0o77766, low: 0o72372).decoded(scale: 0),
+        z: AGCDoublePrecision(high: 0o77777, low: 0o52552).decoded(scale: 0)
+    )
 
     public static func erasableWords() -> [AGCErasableWord] {
         [
@@ -152,13 +197,16 @@ public enum LMPoweredDescentPanel {
     }
 }
 
-/// Crew responses that P63 still needs after IGNALG: skip R51 fine-align,
-/// enable the R60 burn-attitude maneuver, then enable the engine at V99.
+/// Crew responses that P63 still needs after IGNALG: agree the event timer
+/// (V06N61), skip R51 fine-align, skip the R60 burn-attitude slew, then
+/// enable the engine at V99.
 ///
-/// From `THE_LUNAR_LANDING.agc`: R51P63 PROCEED fine-aligns, ENTER returns
-/// to P63SPOT2. R60 flashes V50N18. `BURNBABY` pastes V99 at TIG-5.
-/// T4RUPT samples inverted CH32 bit 14 every 120 ms, so PRO is held longer
-/// than one sample. ENTER is a one-shot CH15 keycode.
+/// From `THE_LUNAR_LANDING.agc` / `BURNBABY`: ASTNCLOK flashes V06N61;
+/// PROCEED goes to `ASTNRET` → `R51P63`. R51P63 PROCEED fine-aligns, ENTER
+/// returns to P63SPOT2. R60 `GOPERF2R` flashes V50N18; ENTER is
+/// `ENDMANU1` (“finished with R60”) so KALCMANU is not waited on. `BURNBABY`
+/// pastes V99 at TIG-5. T4RUPT samples inverted CH32 bit 14 every 120 ms, so
+/// PRO is held longer than one sample. ENTER is a one-shot CH15 keycode.
 public struct LMP63CrewHandshake: Equatable, Sendable {
     public static let proHoldSeconds = 0.15
 
@@ -168,6 +216,7 @@ public struct LMP63CrewHandshake: Equatable, Sendable {
     }
 
     private enum Prompt: String, Equatable, Hashable, Sendable {
+        case eventTimerAgree
         case fineAlignSkip
         case autoManeuver
         case engineEnable
@@ -197,10 +246,10 @@ public struct LMP63CrewHandshake: Equatable, Sendable {
         guard !completed.contains(prompt) else { return nil }
 
         switch prompt {
-        case .fineAlignSkip:
+        case .fineAlignSkip, .autoManeuver:
             completed.insert(prompt)
             return .enter
-        case .autoManeuver, .engineEnable:
+        case .eventTimerAgree, .engineEnable:
             activePRO = prompt
             holdRemaining = Self.proHoldSeconds
             return .pro(pressed: true)
@@ -209,6 +258,8 @@ public struct LMP63CrewHandshake: Equatable, Sendable {
 
     private static func prompt(verb: String, noun: String) -> Prompt? {
         switch (verb, noun) {
+        case ("06", "61"):
+            return .eventTimerAgree
         case ("50", "25"):
             return .fineAlignSkip
         case ("50", "18"):

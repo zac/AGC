@@ -3,9 +3,12 @@ import Foundation
 
 /// Sourced IMU/radar scales used to close the AGC sensor loop.
 public enum LMSensorScale {
-    /// LM PIPA scale factor: 5.85 cm/s per pulse (NASA R-567 / Luminary GSOP).
+    /// One PINC on PIPAX/Y/Z is 1 cm/s. SERVICER stores `|DELV|` as ABDELV
+    /// “CM/SEC*2(-14)” and DVMON compares that to DPSTHRSH (36 cm/s, ~600 lbf).
+    /// NASA R-567’s 5.85 cm/s is the analog IMU quantum; using that as the PINC
+    /// size left ABDELV ≈ 10 at 10% DPS and tripped COMFAIL / WAITLIST 01204.
     public static let pipaMetersPerSecondPerPulse = LMSourceValue(
-        0.0585,
+        0.01,
         source: .luminaryPIPAScale
     )
 
@@ -23,7 +26,9 @@ public enum LMSensorScale {
 }
 
 struct LMSensorFeedbackState {
-    static let maxPulsesPerAxis = 64
+    /// 0.25 s at FMAX is ~73 cm/s; keep CDU catch-up slower than that.
+    static let maxPIPAPulsesPerAxis = 256
+    static let maxCDUPulsesPerAxis = 64
 
     var pipaRemainder = LMVector3D.zero
     var lastCDUCounts: (x: Int, y: Int, z: Int)?
@@ -51,9 +56,9 @@ struct LMSensorFeedbackState {
         guard scale > 0 else { return [] }
 
         let deltaV = specificForceBody * deltaTime + pipaRemainder
-        let x = quantizedPulses(deltaV.x / scale)
-        let y = quantizedPulses(deltaV.y / scale)
-        let z = quantizedPulses(deltaV.z / scale)
+        let x = quantizedPulses(deltaV.x / scale, limit: Self.maxPIPAPulsesPerAxis)
+        let y = quantizedPulses(deltaV.y / scale, limit: Self.maxPIPAPulsesPerAxis)
+        let z = quantizedPulses(deltaV.z / scale, limit: Self.maxPIPAPulsesPerAxis)
         pipaRemainder = LMVector3D(x: x.remainder * scale, y: y.remainder * scale, z: z.remainder * scale)
 
         var inputs: [AGCChannelInput] = []
@@ -83,27 +88,27 @@ struct LMSensorFeedbackState {
         let dy = shortestCountDelta(from: last.y, to: target.y)
         let dz = shortestCountDelta(from: last.z, to: target.z)
         lastCDUCounts = (
-            x: wrappedCount(Double(last.x + clampedPulseCount(dx))),
-            y: wrappedCount(Double(last.y + clampedPulseCount(dy))),
-            z: wrappedCount(Double(last.z + clampedPulseCount(dz)))
+            x: wrappedCount(Double(last.x + clampedPulseCount(dx, limit: Self.maxCDUPulsesPerAxis))),
+            y: wrappedCount(Double(last.y + clampedPulseCount(dy, limit: Self.maxCDUPulsesPerAxis))),
+            z: wrappedCount(Double(last.z + clampedPulseCount(dz, limit: Self.maxCDUPulsesPerAxis)))
         )
 
         var inputs: [AGCChannelInput] = []
-        inputs.append(contentsOf: counterPulses(register: .regCDUX, count: clampedPulseCount(dx), cdu: true))
-        inputs.append(contentsOf: counterPulses(register: .regCDUY, count: clampedPulseCount(dy), cdu: true))
-        inputs.append(contentsOf: counterPulses(register: .regCDUZ, count: clampedPulseCount(dz), cdu: true))
+        inputs.append(contentsOf: counterPulses(register: .regCDUX, count: clampedPulseCount(dx, limit: Self.maxCDUPulsesPerAxis), cdu: true))
+        inputs.append(contentsOf: counterPulses(register: .regCDUY, count: clampedPulseCount(dy, limit: Self.maxCDUPulsesPerAxis), cdu: true))
+        inputs.append(contentsOf: counterPulses(register: .regCDUZ, count: clampedPulseCount(dz, limit: Self.maxCDUPulsesPerAxis), cdu: true))
         return inputs
     }
 
-    private func quantizedPulses(_ value: Double) -> (pulses: Int, remainder: Double) {
+    private func quantizedPulses(_ value: Double, limit: Int) -> (pulses: Int, remainder: Double) {
         let truncated = value.rounded(.towardZero)
         var pulses = Int(truncated)
-        pulses = clampedPulseCount(pulses)
+        pulses = clampedPulseCount(pulses, limit: limit)
         return (pulses, value - Double(pulses))
     }
 
-    private func clampedPulseCount(_ value: Int) -> Int {
-        min(max(value, -Self.maxPulsesPerAxis), Self.maxPulsesPerAxis)
+    private func clampedPulseCount(_ value: Int, limit: Int) -> Int {
+        min(max(value, -limit), limit)
     }
 
     private func wrappedCount(_ value: Double) -> Int {

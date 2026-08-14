@@ -73,8 +73,8 @@ public extension LMSourceReference {
 
     static let luminaryPIPAScale = LMSourceReference(
         id: "nasa-r567-luminary-pipa-scale",
-        title: "NASA R-567 Luminary GSOP PIPA scale",
-        detail: "LM PIPA scale factor is 5.85 cm/s per pulse."
+        title: "NASA R-567 / Luminary SERVICER PIPA scale",
+        detail: "SERVICER ABDELV is cm/s at 2(-14); one PINC is 1 cm/s so DVMON’s DPSTHRSH 36 cm/s is ~600 lbf. R-567’s 5.85 cm/s is the analog IMU quantum, not the PINC size."
     )
 
     static let agcCDUEncoding = LMSourceReference(
@@ -108,7 +108,7 @@ public extension LMSourceReference {
         id: "luminary099-aostask-1accs",
         title: "Luminary099 1/ACCS INERCON jet-acceleration curve fits",
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/AOSTASK_AND_AOSJOB.agc",
-        detail: "1JACC = A/(MASS+C)+B; I = TORKJET1/1JACC. A scaled at π/4 rad/s²·2^16 kg, B at π/4 rad/s², C at 2^16 kg. NASA P/Q/R map to sim Z/X/Y."
+        detail: "1JACC = A/(MASS+C)+B; I = TORKJET1/1JACC. L,PVT-CG uses the same fit at 8 ft. A scaled at π/4 rad/s²·2^16 kg (L at 8 ft·2^16 kg), B at π/4 (L at 8 ft), C at 2^16 kg. NASA P/Q/R map to sim Z/X/Y."
     )
 
     static let nasaTN6846PoweredDescent = LMSourceReference(
@@ -136,21 +136,21 @@ public extension LMSourceReference {
         id: "luminary099-erasable-assignments",
         title: "Luminary099 erasable assignments",
         url: "https://ibiblio.org/apollo/listings/Luminary099/ERASABLE_ASSIGNMENTS.agc.html",
-        detail: "yaYUL listing: RN 01220, VN 01226, PIPTIME 01234, MASS 01244, REFSMMAT E3,1733, RLS E4,1422 (ECADR 02222)."
+        detail: "yaYUL listing: RN 01220, VN 01226, PIPTIME 01234, MASS 01244, REFSMMAT E3,1733, RLS E4,1422 (ECADR 02022)."
     )
 
     static let luminaryControlledConstants = LMSourceReference(
         id: "luminary099-controlled-constants-504rm",
         title: "Luminary099 controlled constants 504RM",
         url: "https://ibiblio.org/apollo/listings/Luminary099/CONTROLLED_CONSTANTS.agc.html",
-        detail: "504RM 2DEC 1738090 B-29, equatorial moon radius in meters."
+        detail: "504RM 2DEC 1738090 B-29; MUM 2DEC* 4.9027780 E8 B-30* lunar GM m³/cs²."
     )
 
     static let luminaryFlagwordAssignments = LMSourceReference(
         id: "luminary099-flagword-assignments",
         title: "Luminary099 flagword assignments",
         url: "https://github.com/virtualagc/virtualagc/blob/master/Luminary099/FLAGWORD_ASSIGNMENTS.agc",
-        detail: "MOONFLAG (003), LUNAFLAG (048), and LMOONFLG (124) select lunar-SOI scaling."
+        detail: "MOONFLAG (003), LUNAFLAG (048), LMOONFLG (124), and REFSMFLG (047) select lunar-SOI scaling and a valid REFSMMAT."
     )
 
     static let nasaR567NavScales = LMSourceReference(
@@ -180,6 +180,13 @@ public extension LMSourceReference {
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/BURN,_BABY,_BURN_--_MASTER_IGNITION_ROUTINE.agc",
         detail: "V99 at TIG-5 via CLOCPLAY; PROCEED sets ASTNFLAG; IGNYET? lights the engine at TIG."
     )
+
+    static let luminaryPlanetaryInertialOrientation = LMSourceReference(
+        id: "luminary099-planetary-inertial-orientation",
+        title: "Luminary099 PLANETARY_INERTIAL_ORIENTATION",
+        url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/PLANETARY_INERTIAL_ORIENTATION.agc",
+        detail: "RP-TO-R: R = Mᵀ(T)*(RP + L×RP). MOONMX builds M from BSUBO/BDOT, FSUBO/FDOT, NODIO/NODDOT, COSI/SINI, and TEPHEM."
+    )
 }
 
 public extension LMSourceLocator {
@@ -207,7 +214,7 @@ public extension LMSourceLocator {
 
     static let luminaryPIPAScale = LMSourceLocator(
         reference: .luminaryPIPAScale,
-        detail: "PIPA pulse generation uses 5.85 cm/s per pulse."
+        detail: "PIPA PINCs are 1 cm/s so SERVICER ABDELV matches DVMON’s cm/s threshold."
     )
 
     static let agcCDUEncoding = LMSourceLocator(
@@ -232,7 +239,7 @@ public extension LMSourceLocator {
 
     static let luminary1ACCS = LMSourceLocator(
         reference: .luminary1ACCS,
-        detail: "Diagonal inertia from 1/ACCS INERCON curve fits and TORKJET1."
+        detail: "Diagonal inertia from 1/ACCS INERCON curve fits and TORKJET1; DPS gimbal torque from L,PVT-CG."
     )
 
     static let nasaTN6846PoweredDescent = LMSourceLocator(
@@ -258,7 +265,7 @@ public extension LMSourceLocator {
 
     static let luminaryControlledConstants = LMSourceLocator(
         reference: .luminaryControlledConstants,
-        detail: "Landing-site radius uses Luminary 504RM = 1,738,090 m."
+        detail: "Landing-site radius uses Luminary 504RM = 1,738,090 m. IGNALG PDI coast uses MUM."
     )
 
     static let luminaryFlagwordAssignments = LMSourceLocator(
@@ -268,7 +275,7 @@ public extension LMSourceLocator {
 
     static let nasaR567NavScales = LMSourceLocator(
         reference: .nasaR567NavScales,
-        detail: "PDI kinematics encoded into RN/VN/RLS/MASS at GSOP lunar-SOI scales; REFSMMAT is identity in the modeled local-vertical frame."
+        detail: "PDI kinematics encoded into RN/VN/RLS/MASS at GSOP lunar-SOI scales; RN is ZOOMTIME before RIGN so IGNALG’s first TDEC1 matches the pad."
     )
 
     static let nasaSNA8D027Luminary99PadLoads = LMSourceLocator(
@@ -279,12 +286,17 @@ public extension LMSourceLocator {
 
     static let luminaryP63GUIDDURN = LMSourceLocator(
         reference: .luminaryP63GUIDDURN,
-        detail: "AGC clock set to TLAND − GUIDDURN − ZOOMTIME so IGNALG starts at a PDI-relative GET."
+        detail: "AGC clock stays at Luminary GET. TLAND is GET + GUIDDURN + ZOOMTIME + SEC45 + D29.9SEC + TIMEDELT so MIDTOAV1 and BURNBABY’s TIG-35 LONGCALL both have a positive dt after IGNALG."
     )
 
     static let luminaryBurnBaby = LMSourceLocator(
         reference: .luminaryBurnBaby,
-        detail: "Auto-PRO holds inverted CH32 bit 14 for 150 ms on V50N18 and V99; ENTER skips V50N25 fine-align."
+        detail: "Auto-PRO holds inverted CH32 bit 14 for 150 ms on V06N61 and V99; ENTER skips V50N25 fine-align and V50N18 R60 (ENDMANU1)."
+    )
+
+    static let luminaryPlanetaryInertialOrientation = LMSourceLocator(
+        reference: .luminaryPlanetaryInertialOrientation,
+        detail: "RN is ZOOMTIME of MUM two-body before LAND+(RIGNX,0,RIGNZ) in P52LS SM; VN includes GUIDINIT WM×R so |VGU|=VIGN; RCV=RRECT."
     )
 
     static let luminaryIOChannelsModeControl = LMSourceLocator(
@@ -728,24 +740,12 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
             detail: "Source anchor for powered-descent program checkpoints P63-P66."
         )
         let configuration = LMVehicleConfiguration.sourceBackedDefault
-        let feet = 0.3048
-        let pdiAltitudeMeters = 48_814.0 * feet
-        let pdiHorizontalMetersPerSecond = 5_560.0 * feet
-        let pdiAltitudeRateMetersPerSecond = -4.0 * feet
         let pdiPitch = LMQuaternion.fromAxisAngle(
             axis: LMVector3D(x: 1),
             radians: 95.0 * .pi / 180.0
         )
-        let initialState = LMVehicleStateSnapshot(
-            positionMeters: LMVector3D(
-                x: Luminary99LandingPadLoad.rignXMeters,
-                y: Luminary99LandingPadLoad.rignZMeters,
-                z: pdiAltitudeMeters
-            ),
-            velocityMetersPerSecond: LMVector3D(
-                y: pdiHorizontalMetersPerSecond,
-                z: pdiAltitudeRateMetersPerSecond
-            ),
+        let initialState = LMAGCNavState.vehicleState(
+            timeCentiseconds: Luminary99LandingPadLoad.pdiClockCentiseconds,
             attitude: pdiPitch,
             massKilograms: 33_000.0 * 0.45359237
         )
@@ -774,13 +774,11 @@ public struct LMPoweredDescentScenario: Equatable, Sendable, Identifiable {
                     .nasaR567NavScales,
                     .nasaSNA8D027Luminary99PadLoads,
                     .luminaryP63GUIDDURN,
-                    .luminaryBurnBaby
+                    .luminaryBurnBaby,
+                    .luminaryPlanetaryInertialOrientation
                 ] + configuration.sourceReferences,
                 unmodeledItems: [
-                    "Apollo 11 powered-descent body angular rates",
-                    "RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference",
-                    "P63 IGNALG convergence with modeled (not flown) state vector",
-                    "DPS engine-to-CG gimbal moment arm"
+                    "Apollo 11 powered-descent body angular rates"
                 ]
             )
         )
@@ -942,30 +940,56 @@ public actor LMSimulationRuntime {
         cyclesPerKey: UInt64 = 50_000
     ) async -> LMSimulationSnapshot {
         if bootCycles > 0 {
-            _ = await step(cycles: bootCycles)
+            // Idle Luminary only: do not integrate the vehicle or inject PIPA/CDU
+            // during fresh start. Physics during that window can GOJAM (01107).
+            _ = await agcRuntime.step(cycles: bootCycles)
+            elapsedTimeSeconds += Double(bootCycles) / configuration.agcCyclesPerSecond.value
         }
         await loadP63PadLoads()
         await loadPDINavState()
+        for key in DSKYScript.v37e63e.keys {
+            if Task.isCancelled { break }
+            await agcRuntime.sendDSKYKey(key)
+            _ = await agcRuntime.step(cycles: cyclesPerKey)
+        }
+        // Held AUTO / engine-arm / LR POS1 after V37. Applying CH31 AUTO
+        // before V37E63E keeps PROG blank.
         await applyPoweredDescentPanel()
-        return await sendDSKYScript(.v37e63e, cyclesPerKey: cyclesPerKey)
+        let prepared = await snapshot()
+        lastDSKYVerb = prepared.agc.dsky.verb
+        lastDSKYNoun = prepared.agc.dsky.noun
+        return prepared
     }
 
-    /// NASA Luminary 99 landing-guidance overlay and a PDI-relative GET clock.
+    /// NASA Luminary 99 landing-guidance overlay. TLAND is placed
+    /// `GUIDDURN + ZOOMTIME` plus the MIDTOAV TIG lead after the live GET
+    /// (01703 if TIG − 29.9 s ≤ GET + 20 s; 01204 if TIG-35 ≤ GET).
     public func loadP63PadLoads() async {
         await agcRuntime.writeErasable(Luminary99LandingPadLoad.erasableWords())
-        await agcRuntime.writeErasable(Luminary99LandingPadLoad.clockWords())
+        let time2 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time2)
+        let time1 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time1)
+        let clock = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        await agcRuntime.writeErasable(Luminary99LandingPadLoad.tlandWords(fromClock: clock))
     }
 
     /// Held MODE CONTROL AUTO, auto throttle, engine armed, IMU operate, LR POS1.
+    /// Apply after V37E63E: CH31 AUTO before the program change leaves PROG blank.
     public func applyPoweredDescentPanel() async {
         await agcRuntime.enqueueInputs(LMPoweredDescentPanel.channelInputs)
     }
 
-    /// Encode the current vehicle state into Luminary RN/VN/RLS/REFSMMAT/MASS
-    /// and set lunar-SOI flags. Call after fresh start so restart does not wipe it.
+    /// Encode RIGN RN/VN tagged at first IGNALG `TDEC1` (`GET` + look-ahead)
+    /// so IGNALG’s `LEMPREC` has dt = 0. REFSMMAT stays at GET. Call after
+    /// pad-loads so the tag matches live GET + look-ahead.
     public func loadPDINavState() async {
         let time2 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time2)
         let time1 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time1)
+        let time = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        vehicleState = LMAGCNavState.vehicleState(
+            timeCentiseconds: time,
+            attitude: vehicleState.attitude,
+            massKilograms: vehicleState.massKilograms ?? 0
+        )
         await agcRuntime.writeErasable(
             LMAGCNavState.erasableWords(vehicle: vehicleState, time2: time2, time1: time1)
         )
@@ -1156,9 +1180,11 @@ enum LMDynamics {
         if commands.mainEngineOn,
            !commands.mainEngineOff,
            let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
-            forceWorld = forceWorld + state.attitude.rotated(
-                LMDPSGimbalMap.thrustDirectionBody(pitchRadians: pitch, rollRadians: roll) * thrust
-            )
+            let bodyForce = LMDPSGimbalMap.thrustDirectionBody(pitchRadians: pitch, rollRadians: roll) * thrust
+            forceWorld = forceWorld + state.attitude.rotated(bodyForce)
+            if let mass = state.massKilograms, mass > 0 {
+                torqueBody = torqueBody + LMInertiaMap.descentEnginePivotBodyMeters(massKilograms: mass).cross(bodyForce)
+            }
         }
 
         for command in commands.rcsJets {

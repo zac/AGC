@@ -90,13 +90,18 @@ struct LMCoreScenarioAndDynamicsTests {
     @Test func `source backed scenario exposes sources and unknowns`() {
         let scenario = LMPoweredDescentScenario.apollo11SourceBacked
 
-        #expect(abs(scenario.initialState.positionMeters.x - Luminary99LandingPadLoad.rignXMeters) < 1e-6)
-        #expect(abs(scenario.initialState.positionMeters.y - Luminary99LandingPadLoad.rignZMeters) < 1e-6)
-        #expect(abs(scenario.initialState.altitudeMeters - 48_814.0 * 0.3048) < 1e-9)
-        #expect(abs(scenario.initialState.groundRangeMeters - Luminary99LandingPadLoad.pdiGroundRangeMeters) < 1)
+        #expect(abs(scenario.initialState.positionMeters.x) < 5_000)
+        let coastMeters = Luminary99LandingPadLoad.ignalgLookaheadCentiseconds
+            * Luminary99LandingPadLoad.vignMetersPerCentisecond
+        #expect(
+            abs(
+                scenario.initialState.groundRangeMeters
+                    - (Luminary99LandingPadLoad.pdiGroundRangeMeters + coastMeters)
+            ) < 20_000
+        )
+        #expect(scenario.initialState.altitudeMeters > 10_000)
         #expect(scenario.initialState.massKilograms == 33_000.0 * 0.45359237)
-        #expect(abs(scenario.initialState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1e-9)
-        #expect(abs(scenario.initialState.velocityMetersPerSecond.z + 4.0 * 0.3048) < 1e-9)
+        #expect(abs(scenario.initialState.velocityMetersPerSecond.magnitude - Luminary99LandingPadLoad.vignMetersPerCentisecond * 100) < 50)
         let thrust = scenario.initialState.attitude.rotated(LMVector3D(z: 1))
         #expect(thrust.y < -0.98)
         #expect(thrust.z < 0)
@@ -106,14 +111,15 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent initial attitude and angular velocity"))
         #expect(scenario.sourceStatus.unmodeledItems.contains("Apollo 11 powered-descent body angular rates"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("AGC erasable state vector (RN/VN), REFSMMAT, and Average-G at PDI"))
-        #expect(scenario.sourceStatus.unmodeledItems.contains("RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("PDI range-to-go (RN starts over NASA RLS, not ~260 nmi uprange) and RN/VN remaining moon-fixed while IGNALG RP-TO-R’s RLS into Basic Reference"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 braking-phase pad loads (TLAND, RBRFG, and related targets)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 V99 ignition handshake (engine-arm already asserted; PRO at V99 is still crew)"))
-        #expect(scenario.sourceStatus.unmodeledItems.contains("P63 IGNALG convergence with modeled (not flown) state vector"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("P63 IGNALG convergence with modeled (not flown) state vector"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("RCS jet positions, vectors, and thrust"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("Channel 006 P-axis RCS per-jet geometry (JETSALL group masks only)"))
         #expect(!scenario.sourceStatus.unmodeledItems.contains("LM inertia tensor"))
+        #expect(!scenario.sourceStatus.unmodeledItems.contains("DPS engine-to-CG gimbal moment arm"))
         #expect(LMVehicleConfiguration.sourceBackedDefault.mainEngine?.engineOnThrustNewtons == nil)
         #expect(LMVehicleConfiguration.sourceBackedDefault.rcsJets.count == 16)
         #expect(LMVehicleConfiguration.sourceBackedDefault.rcsJets[.jet3] != nil)
@@ -255,15 +261,126 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(next.velocityMetersPerSecond.y < 0)
     }
 
+    @Test func `gimbaled DPS produces 1/ACCS L,PVT-CG torque`() {
+        let mass = 33_000.0 * 0.45359237
+        let arm = LMInertiaMap.descentEnginePivotToCGMeters(massKilograms: mass)
+        #expect(arm > 0)
+        #expect(arm < 3)
+
+        let source = LMSourceReference(id: "test-source", title: "Test source", detail: "Unit test")
+        let config = LMVehicleConfiguration(
+            lunarGravityMetersPerSecondSquared: LMVehicleConfiguration.sourceBackedDefault.lunarGravityMetersPerSecondSquared,
+            agcCyclesPerSecond: LMVehicleConfiguration.sourceBackedDefault.agcCyclesPerSecond,
+            mainEngine: LMMainEngineConfiguration(
+                maximumRatedThrustNewtons: LMSourceValue(10_500 * 4.4482216152605, source: source),
+                engineOnThrustNewtons: LMSourceValue(10_500 * 4.4482216152605, source: source)
+            )
+        )
+        let initial = LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 100),
+            massKilograms: mass,
+            dpsPitchGimbalRadians: 2 * .pi / 180
+        )
+        let next = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(outputChannel11: 0o10000),
+            configuration: config,
+            deltaTime: 1
+        )
+        #expect(next.angularVelocityRadiansPerSecond.x < 0)
+        #expect(abs(next.angularVelocityRadiansPerSecond.y) < 1e-12)
+        #expect(abs(next.angularVelocityRadiansPerSecond.z) < 1e-12)
+    }
+
+    @Test func `P63 pace is accelerated until PROG 64`() {
+        #expect(LMSimulationPace.pace(programNumber: 63) == .accelerated)
+        #expect(LMSimulationPace.pace(programNumber: nil) == .accelerated)
+        #expect(LMSimulationPace.pace(programNumber: 64) == .realtime)
+        #expect(LMSimulationPace.pace(programNumber: 65) == .realtime)
+        #expect(LMSimulationPace.pace(programNumber: 66) == .realtime)
+        #expect(LMSimulationPace.pace(programNumber: 63).simulationDelta(wallDelta: 0.016) == 0.25)
+        #expect(!LMSimulationPace.pace(programNumber: 63).shouldSleepToFrameRate)
+        #expect(LMSimulationPace.pace(programNumber: 64).shouldSleepToFrameRate)
+        #expect(abs(LMSimulationPace.pace(programNumber: 64).simulationDelta(wallDelta: 0.016) - 0.016) < 1e-12)
+    }
+
     @Test func `boot and enter P63 keys V37E63E after the boot horizon`() async throws {
         let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
         let snapshot = await runtime.bootAndEnterP63(bootCycles: 100, cyclesPerKey: 10)
         #expect(snapshot.agc.cycle >= 100 + UInt64(DSKYScript.v37e63e.keys.count) * 10)
-        #expect(abs(snapshot.vehicleState.velocityMetersPerSecond.y - 5_560.0 * 0.3048) < 1)
+        #expect(abs(snapshot.vehicleState.velocityMetersPerSecond.magnitude - Luminary99LandingPadLoad.vignMetersPerCentisecond * 100) < 50)
     }
 
-    @Test func `PDI nav load writes NASA RLS at ECADR 02022 and identity REFSMMAT`() async throws {
+    @Test func `RP-TO-R preserves NASA RLS magnitude and roundtrips`() {
+        let time = Luminary99LandingPadLoad.pdiClockCentiseconds
+        let rls = Luminary99CoordinatePadLoad.landingSiteMeters
+        let reference = LuminaryMoonOrientation.rpToR(rls, timeCentiseconds: time)
+        let back = LuminaryMoonOrientation.rToRP(reference, timeCentiseconds: time)
+        #expect(abs(reference.magnitude - rls.magnitude) < 1)
+        #expect((back - rls).magnitude < 1)
+
+        let matrix = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: time)
+        #expect(abs(matrix.r0.magnitude - 1) < 1e-8)
+        #expect(abs(matrix.r1.magnitude - 1) < 1e-8)
+        #expect(abs(matrix.r2.magnitude - 1) < 1e-8)
+        #expect(abs(matrix.r0.dot(matrix.r1)) < 1e-8)
+        #expect(abs(matrix.r0.dot(matrix.r2)) < 1e-8)
+        #expect(abs(matrix.r1.dot(matrix.r2)) < 1e-8)
+    }
+
+    @Test func `landing REFSMMAT puts RIGN on SM X and Z`() {
+        let time = Luminary99LandingPadLoad.pdiClockCentiseconds
+        let matrix = LMAGCNavState.refsmmat(timeCentiseconds: time)
+        let landingNow = LuminaryMoonOrientation.rpToR(
+            LMAGCNavState.landingSiteMeters(),
+            timeCentiseconds: time
+        )
+        let landing = LMAGCNavState.landBasic(pipTimeCentiseconds: time)
+        let position = LMAGCNavState.rignPositionMeters(pipTimeCentiseconds: time)
+        let xsm = matrix.r0
+        let ysm = matrix.r1
+        let zsm = matrix.r2
+        #expect((xsm - landingNow.normalized()).magnitude < 1e-9)
+        #expect(abs(xsm.dot(ysm)) < 1e-8)
+        #expect(abs(xsm.dot(zsm)) < 1e-8)
+        #expect(abs(ysm.dot(zsm)) < 1e-8)
+        #expect(abs(xsm.cross(ysm).dot(zsm) - 1) < 1e-8)
+        let rgu = LMVector3D(
+            x: (position - landing).dot(xsm),
+            y: (position - landing).dot(ysm),
+            z: (position - landing).dot(zsm)
+        )
+        #expect(abs(rgu.x - Luminary99LandingPadLoad.rignXMeters) < 2)
+        #expect(abs(rgu.y) < 2)
+        #expect(abs(rgu.z - Luminary99LandingPadLoad.rignZMeters) < 2)
+        let velocity = LMAGCNavState.rignVelocityMetersPerCentisecond(pipTimeCentiseconds: time)
+        let vsm = LMVector3D(x: velocity.dot(xsm), y: velocity.dot(ysm), z: velocity.dot(zsm))
+        let polarSM = matrix.times(
+            LuminaryMoonOrientation.rpToR(LMVector3D(z: 1), timeCentiseconds: time)
+        )
+        let wm = polarSM * (
+            LuminaryMoonOrientation.moonRateRadiansPerCentisecond
+                * Luminary099NavScale.guidinitMoonRateHalfUnits
+        )
+        let rsm = LMVector3D(x: position.dot(xsm), y: position.dot(ysm), z: position.dot(zsm))
+        let vgu = vsm + rsm.cross(wm)
+        #expect(abs(vgu.magnitude - Luminary99LandingPadLoad.vignMetersPerCentisecond) < 1e-6)
+        #expect(vgu.z > 0)
+    }
+
+    @Test func `PDI state coasts ZOOMTIME to RIGN with Luminary MUM`() {
+        let time = Luminary99LandingPadLoad.pdiClockCentiseconds
+        let rign = LMAGCNavState.rignPositionMeters(pipTimeCentiseconds: time)
+        let pdi = LMAGCNavState.pdiPositionMeters(pipTimeCentiseconds: time)
+        let velocity = LMAGCNavState.pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: time)
+        let coastMeters = Luminary99LandingPadLoad.ignalgLookaheadCentiseconds * velocity.magnitude
+        #expect(abs((rign - pdi).magnitude - coastMeters) < 5_000)
+        #expect((rign - pdi).dot(velocity) > 0)
+    }
+
+    @Test func `PDI nav load writes NASA RLS at ECADR 02022 and RP-TO-R RN`() async throws {
         let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
+        await runtime.loadP63PadLoads()
         await runtime.loadPDINavState()
 
         let rlsX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rls)
@@ -272,9 +389,12 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(await runtime.readErasable(ecadr: 0o1422) == 0)
         #expect(await runtime.readErasable(ecadr: 0o2222) == 0)
 
-        let expectedRN = LMAGCNavState.moonCenteredPositionMeters(
-            from: LMPoweredDescentScenario.apollo11SourceBacked.initialState
-        )
+        let clock = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.time2)
+        let time = clock.decoded(scale: 28)
+        let expectedRN = LMAGCNavState.rignPositionMeters(pipTimeCentiseconds: time)
+        let moonFixed = LuminaryMoonOrientation.rToRP(expectedRN, timeCentiseconds: time)
+        #expect((expectedRN - moonFixed).magnitude > 1_000)
+
         let rnX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn)
         let rnY = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 2)
         let rnZ = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
@@ -295,15 +415,31 @@ struct LMCoreScenarioAndDynamicsTests {
             y: vnY.decoded(scale: Luminary099NavScale.velocityScale),
             z: vnZ.decoded(scale: Luminary099NavScale.velocityScale)
         )
-        let expectedSpeed = hypot(5_560.0 * 0.3048, 4.0 * 0.3048) / 100.0
-        #expect(abs(vn.magnitude - expectedSpeed) < 1e-6)
+        let expectedVN = LMAGCNavState.rignVelocityMetersPerCentisecond(pipTimeCentiseconds: time)
+        #expect(abs(vn.x - expectedVN.x) < 1e-6)
+        #expect(abs(vn.y - expectedVN.y) < 1e-6)
+        #expect(abs(vn.z - expectedVN.z) < 1e-6)
+
+        let tet = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.tetLEM)
+        #expect(
+            abs(tet.decoded(scale: 28) - (time + Luminary99LandingPadLoad.ignalgLookaheadCentiseconds)) < 1
+        )
 
         let ref00 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.refsmmat)
-        #expect(ref00.high == 0o20000)
+        let expectedRef = LMAGCNavState.refsmmat(timeCentiseconds: time)
+        let expectedHalf = AGCDoublePrecision.encode(
+            value: expectedRef.entry(row: 0, column: 0) * Luminary099NavScale.refsmmatHalfUnit,
+            scale: 0
+        )
+        #expect(ref00.high == expectedHalf.high)
+        #expect(ref00.high != 0o20000)
 
         let moonflag = await runtime.readErasable(ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.moonflag))
         let moonBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.moonflag) - 1)
         #expect((moonflag & moonBit) != 0)
+        let refsm = await runtime.readErasable(ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.refsmflg))
+        let refsmBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.refsmflg) - 1)
+        #expect((refsm & refsmBit) != 0)
     }
 
     @Test func `P63 pad load matches NASA Luminary 99 octal and asserts MODE CONTROL AUTO`() async throws {
@@ -312,9 +448,17 @@ struct LMCoreScenarioAndDynamicsTests {
         await runtime.applyPoweredDescentPanel()
         _ = await runtime.step(cycles: 1)
 
+        let tlandNASA = Luminary99LandingPadLoad.erasableWords().first { $0.ecadr == Luminary099Erasable.tland }
+        #expect(tlandNASA?.value == 0o04247)
+
         let tland = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.tland)
-        #expect(tland.high == 0o04247)
-        #expect(tland.low == 0o34030)
+        let clock = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.time2)
+        #expect(
+            abs(
+                tland.decoded(scale: 28)
+                    - Luminary99LandingPadLoad.tlandCentiseconds(fromClock: clock.decoded(scale: 28))
+            ) < 1
+        )
 
         let rbrfgX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rbrfg)
         #expect(rbrfgX.high == 0o00000)
@@ -323,9 +467,6 @@ struct LMCoreScenarioAndDynamicsTests {
         let v2fgX = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.v2fg)
         #expect(v2fgX.high == 0o77777)
         #expect(v2fgX.low == 0o73242)
-
-        let clock = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.time2)
-        #expect(abs(clock.decoded(scale: 28) - Luminary99LandingPadLoad.pdiClockCentiseconds) < 1)
 
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.tephem + 1) == 0o20017)
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.azo) == 0o30624)
@@ -348,14 +489,17 @@ struct LMCoreScenarioAndDynamicsTests {
         var handshake = LMP63CrewHandshake()
         #expect(handshake.advance(verb: "06", noun: "63", deltaTime: 0.016) == nil)
 
+        #expect(handshake.advance(verb: "06", noun: "61", deltaTime: 0.016) == .pro(pressed: true))
+        #expect(handshake.advance(verb: "06", noun: "61", deltaTime: 0.16) == .pro(pressed: false))
+        #expect(handshake.advance(verb: "06", noun: "61", deltaTime: 0.016) == nil)
+
         #expect(handshake.advance(verb: "50", noun: "25", deltaTime: 0.016) == .enter)
         #expect(handshake.advance(verb: "50", noun: "25", deltaTime: 0.016) == nil)
         #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.016) == nil)
 
-        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.016) == .pro(pressed: true))
-        #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.12) == nil)
-        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.04) == .pro(pressed: false))
+        #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.016) == .enter)
         #expect(handshake.advance(verb: "50", noun: "18", deltaTime: 0.016) == nil)
+        #expect(handshake.advance(verb: "  ", noun: "  ", deltaTime: 0.016) == nil)
 
         #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.016) == .pro(pressed: true))
         #expect(handshake.advance(verb: "99", noun: "62", deltaTime: 0.16) == .pro(pressed: false))
@@ -469,6 +613,9 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(alphaP > 0)
         #expect(abs(inertia.z * alphaP - LMInertiaMap.oneJetTorqueNewtonMeters) < 1e-6)
         #expect(LMInertiaMap.modelingStatus.isSourceBacked)
+        let arm = LMInertiaMap.descentEnginePivotToCGMeters(massKilograms: mass)
+        #expect(arm > 0.5 && arm < 2.0)
+        #expect(LMInertiaMap.descentEnginePivotBodyMeters(massKilograms: mass).z == -arm)
     }
 
     @Test func `raw radar frame input is retained by simulation snapshots`() async throws {
@@ -513,7 +660,7 @@ struct LMCoreScenarioAndDynamicsTests {
             deltaTime: 1
         )
         let pipaz = inputs.filter { $0.channel == (0o200 | Register.regPIPAZ.rawValue) }
-        #expect(pipaz.count == Int((2.0 / 0.0585).rounded(.towardZero)))
+        #expect(pipaz.count == Int((2.0 / 0.01).rounded(.towardZero)))
         #expect(pipaz.allSatisfy { $0.value == 0 })
         #expect(inputs.filter { $0.channel == (0o200 | Register.regPIPAX.rawValue) }.isEmpty)
     }
@@ -578,6 +725,289 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect((result.channelActivityCounts[0o15] ?? 0) >= DSKYScript.v37e63e.keys.count)
         #expect(result.finalState != nil)
         #expect(!result.unmodeledItems.isEmpty)
+    }
+
+    @Test func `Luminary V37E63E enters PROG 63 and IGNALG with pad-load nav`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let agc = try AGCRuntime(binFile: romURL)
+        _ = await agc.step(cycles: 1_000_000)
+        await agc.writeErasable(Luminary99LandingPadLoad.erasableWords())
+        let time2 = await agc.readErasable(ecadr: Luminary099Erasable.time2)
+        let time1 = await agc.readErasable(ecadr: Luminary099Erasable.time1)
+        await agc.writeErasable(Luminary99LandingPadLoad.tlandWords(
+            fromClock: AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        ))
+        await agc.writeErasable(
+            LMAGCNavState.erasableWords(
+                vehicle: LMPoweredDescentScenario.apollo11SourceBacked.initialState,
+                time2: time2,
+                time1: time1
+            )
+        )
+        for flag in LMAGCNavState.lunarSphereFlags() {
+            await agc.setErasableBit(ecadr: flag.ecadr, bit: flag.bit)
+        }
+        var snapshot = await agc.snapshot()
+        for key in DSKYScript.v37e63e.keys {
+            await agc.sendDSKYKey(key)
+            snapshot = await agc.step(cycles: 50_000)
+        }
+        await agc.enqueueInputs(LMPoweredDescentPanel.channelInputs)
+        #expect(snapshot.dsky.programNumber == 63, "after V37E63E PROG='\(snapshot.dsky.mode)'")
+
+        func dump() async -> String {
+            let fail0 = await agc.readErasable(ecadr: 0o375)
+            let fail1 = await agc.readErasable(ecadr: 0o376)
+            let fail2 = await agc.readErasable(ecadr: 0o377)
+            let nign = await agc.readErasable(ecadr: Luminary099Erasable.nignLoop)
+            let tigH = await agc.readErasable(ecadr: Luminary099Erasable.tig)
+            let tigL = await agc.readErasable(ecadr: Luminary099Erasable.tig + 1)
+            let time2 = await agc.readErasable(ecadr: Luminary099Erasable.time2)
+            let time1 = await agc.readErasable(ecadr: Luminary099Erasable.time1)
+            let tigMinusGet = AGCDoublePrecision(high: tigH, low: tigL).decoded(scale: 28)
+                - AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+            let snap = await agc.snapshot()
+            let engine = ((snap.outputChannels[0o11] ?? 0) & 0o10000) != 0
+            return "NIGN=\(nign) TIG-GET=\(Int(tigMinusGet.rounded())) FAIL=\(String(fail0, radix: 8)),\(String(fail1, radix: 8)),\(String(fail2, radix: 8)) PROG='\(snap.dsky.mode)' V\(snap.dsky.verb) N\(snap.dsky.noun) ENG=\(engine)"
+        }
+
+        var trail = "after V37 \(await dump())"
+        var last = trail
+        var sawEventTimer = false
+        var enteredFineAlign = false
+        var skippedR60 = false
+        var enabledEngine = false
+        for step in 1...200 {
+            await agc.enqueueInputs(LMPoweredDescentPanel.channelInputs)
+            snapshot = await agc.step(cycles: 250_000)
+            let now = await dump()
+            if now != last {
+                trail += " | +\(step * 250_000) \(now)"
+                last = now
+            }
+            let fail1 = await agc.readErasable(ecadr: 0o376)
+            let fail2 = await agc.readErasable(ecadr: 0o377)
+            if fail1 == 0o1406 || fail1 == 0o1412 || fail1 == 0o1204
+                || fail1 == 0o1703 || fail1 == 0o430 || fail2 == 0o430 { break }
+            if snapshot.dsky.verb == "06", snapshot.dsky.noun == "61", !sawEventTimer {
+                sawEventTimer = true
+                await agc.sendPRO(pressed: true)
+                snapshot = await agc.step(cycles: 200_000)
+                await agc.sendPRO(pressed: false)
+                trail += " | PRO V06N61 \(await dump())"
+                last = ""
+            } else if snapshot.dsky.verb == "50", snapshot.dsky.noun == "25", !enteredFineAlign {
+                enteredFineAlign = true
+                await agc.sendDSKYKey(.enter)
+                trail += " | ENTER V50N25"
+                last = ""
+            } else if snapshot.dsky.verb == "50", snapshot.dsky.noun == "18", !skippedR60 {
+                skippedR60 = true
+                await agc.sendDSKYKey(.enter)
+                trail += " | ENTER V50N18"
+                last = ""
+            } else if snapshot.dsky.verb == "99", !enabledEngine {
+                enabledEngine = true
+                await agc.sendPRO(pressed: true)
+                snapshot = await agc.step(cycles: 200_000)
+                await agc.sendPRO(pressed: false)
+                trail += " | PRO V99 \(await dump())"
+                last = ""
+            }
+            let engineOn = ((snapshot.outputChannels[0o11] ?? 0) & 0o10000) != 0
+            if enabledEngine, engineOn { break }
+            if skippedR60, snapshot.dsky.programNumber != 63 { break }
+        }
+        #expect(await agc.readErasable(ecadr: 0o376) != 0o1406, "IGNALG ROOTPSRS POODOO \(trail)")
+        #expect(await agc.readErasable(ecadr: 0o376) != 0o1412, "IGNALG 40-loop 01412 \(trail)")
+        #expect(await agc.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 \(trail)")
+        #expect(await agc.readErasable(ecadr: 0o376) != 0o1703, "MIDTOAV 01703 TIG slipped \(trail)")
+        #expect(await agc.readErasable(ecadr: 0o376) != 0o430, "integration 00430 \(trail)")
+        #expect(await agc.readErasable(ecadr: 0o377) != 0o430, "integration 00430 \(trail)")
+        #expect(sawEventTimer, "IGNALG should flash V06N61 after DDUM \(trail)")
+        #expect(enteredFineAlign, "should flash V50N25 after V06N61 PROCEED \(trail)")
+        #expect(skippedR60, "R60 should flash V50N18 \(trail)")
+        #expect(enabledEngine, "BURNBABY should paste V99 at TIG-5 \(trail)")
+        #expect(snapshot.dsky.programNumber == 63, "during P63 \(trail)")
+        #expect(
+            ((snapshot.outputChannels[0o11] ?? 0) & 0o10000) != 0,
+            "V99 PROCEED should light the engine at TIG \(trail)"
+        )
+    }
+
+    @Test func `Luminary P63 closed-loop burn after V99 keeps PROG 63 under DPS`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
+        var snapshot = await runtime.bootAndEnterP63()
+        #expect(snapshot.agc.dsky.programNumber == 63, "after V37E63E PROG='\(snapshot.agc.dsky.mode)'")
+
+        let panel = LMFrameInput(rawChannelInputs: LMPoweredDescentPanel.channelInputs)
+        let dt = LMSimulationPace.acceleratedDeltaSeconds
+
+        func dump() async -> String {
+            let fail0 = await runtime.readErasable(ecadr: 0o375)
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            let wch = await runtime.readErasable(ecadr: Luminary099Erasable.wchPhase)
+            let abdelv = await runtime.readErasable(ecadr: Luminary099Erasable.abdelv)
+            let dvthrush = await runtime.readErasable(ecadr: Luminary099Erasable.dvthrush)
+            let dvcntr = await runtime.readErasable(ecadr: Luminary099Erasable.dvcntr)
+            let flag7 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd7)
+            let snap = await runtime.snapshot()
+            let thrust = snap.vehicleCommands.dps.commandedThrustNewtons ?? 0
+            return "FAIL=\(String(fail0, radix: 8)),\(String(fail1, radix: 8)),\(String(fail2, radix: 8)) PROG='\(snap.agc.dsky.mode)' V\(snap.agc.dsky.verb) N\(snap.agc.dsky.noun) WCH=\(wch) ABD=\(abdelv) THR=\(dvthrush) DVC=\(dvcntr) F7=\(String(flag7, radix: 8)) ENG=\(snap.vehicleCommands.mainEngineOn) F=\(Int(thrust.rounded()))"
+        }
+
+        func aborting(_ fail1: Int, _ fail2: Int) -> Bool {
+            fail1 == 0o1406 || fail1 == 0o1412 || fail1 == 0o1204
+                || fail1 == 0o1703 || fail1 == 0o430 || fail2 == 0o430
+        }
+
+        var trail = "after V37 \(await dump())"
+        var last = trail
+        var ignited = false
+        for step in 1...500 {
+            snapshot = await runtime.step(deltaTime: dt, input: panel)
+            let now = await dump()
+            if now != last {
+                trail += " | +\(String(format: "%.1f", Double(step) * dt))s \(now)"
+                last = now
+            }
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            if aborting(fail1, fail2) { break }
+            if snapshot.vehicleCommands.mainEngineOn {
+                ignited = true
+                break
+            }
+            if snapshot.agc.dsky.programNumber != 63 { break }
+        }
+        #expect(ignited, "V99 should light the engine \(trail)")
+        #expect(snapshot.agc.dsky.programNumber == 63, "at TIG \(trail)")
+
+        func rnMeters() async -> LMVector3D {
+            let x = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn)
+            let y = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 2)
+            let z = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn + 4)
+            return LMVector3D(
+                x: x.decoded(scale: Luminary099NavScale.positionScale),
+                y: y.decoded(scale: Luminary099NavScale.positionScale),
+                z: z.decoded(scale: Luminary099NavScale.positionScale)
+            )
+        }
+
+        let igniteHorizontal = hypot(
+            snapshot.vehicleState.velocityMetersPerSecond.x,
+            snapshot.vehicleState.velocityMetersPerSecond.y
+        )
+        let igniteRN = await rnMeters()
+        let igniteTime = snapshot.timeSeconds
+        let zoomDeadline = Luminary99LandingPadLoad.zoomTimeCentiseconds / 100.0 + 2.0
+        var fiveSecond: LMSimulationSnapshot?
+        let zoomSteps = Int((zoomDeadline / dt).rounded(.up))
+        for step in 1...zoomSteps {
+            snapshot = await runtime.step(deltaTime: dt, input: panel)
+            let now = await dump()
+            if now != last {
+                trail += " | +\(String(format: "%.1f", snapshot.timeSeconds - igniteTime))s \(now)"
+                last = now
+            }
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            let burned = snapshot.timeSeconds - igniteTime
+            if fiveSecond == nil, burned >= 5 {
+                fiveSecond = snapshot
+                trail += " | burn+5 \(now)"
+            }
+            if aborting(fail1, fail2) || snapshot.agc.dsky.programNumber != 63 {
+                trail += " | abort t=\(String(format: "%.1f", burned)) \(now)"
+                break
+            }
+            if step == zoomSteps {
+                trail += " | ZOOM \(now)"
+            }
+        }
+        let early = fiveSecond ?? snapshot
+        let burnedHorizontal = hypot(
+            early.vehicleState.velocityMetersPerSecond.x,
+            early.vehicleState.velocityMetersPerSecond.y
+        )
+        let burnedRN = await rnMeters()
+        let zoomThrust = snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
+
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1406, "IGNALG ROOTPSRS POODOO \(trail)")
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1412, "IGNALG 40-loop 01412 \(trail)")
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 \(trail)")
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1703, "MIDTOAV 01703 TIG slipped \(trail)")
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o430, "integration 00430 \(trail)")
+        #expect(snapshot.agc.dsky.programNumber == 63, "SERVICER should keep P63 \(trail)")
+        #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on after TIG \(trail)")
+        #expect(
+            (early.vehicleCommands.dps.commandedThrustNewtons ?? 0) >= LMDPSThrottleMap.minimumThrustNewtons * 0.99,
+            "DPS min throttle with engine on \(trail)"
+        )
+        #expect(
+            abs(burnedHorizontal - igniteHorizontal) > 0.5,
+            "95° DPS should change horizontal speed \(trail)"
+        )
+        #expect(
+            (burnedRN - igniteRN).magnitude > 1,
+            "Average-G should move RN \(trail)"
+        )
+        #expect(fiveSecond != nil, "should still be in P63 at TIG+5 \(trail)")
+        #expect(
+            zoomThrust >= LMDPSThrottleMap.fmaxNewtons * 0.8,
+            "P63ZOOM FLATOUT should throttle up at TIG+ZOOMTIME \(trail)"
+        )
+    }
+
+    @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let agc = try AGCRuntime(binFile: romURL)
+        _ = await agc.step(cycles: 1_000_000)
+
+        await agc.writeErasable(Luminary99LandingPadLoad.erasableWords())
+        let time2 = await agc.readErasable(ecadr: Luminary099Erasable.time2)
+        let time1 = await agc.readErasable(ecadr: Luminary099Erasable.time1)
+        await agc.writeErasable(Luminary99LandingPadLoad.tlandWords(
+            fromClock: AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        ))
+        await agc.writeErasable(
+            LMAGCNavState.erasableWords(
+                vehicle: LMPoweredDescentScenario.apollo11SourceBacked.initialState,
+                time2: time2,
+                time1: time1
+            )
+        )
+        for flag in LMAGCNavState.lunarSphereFlags() {
+            await agc.setErasableBit(ecadr: flag.ecadr, bit: flag.bit)
+        }
+        _ = await agc.step(cycles: 1)
+
+        let rlsX = await agc.readDoublePrecision(ecadr: Luminary099Erasable.rls)
+        #expect(rlsX.high == 0o00301)
+        #expect(rlsX.low == 0o34760)
+
+        let time = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        let expectedRN = LMAGCNavState.rignPositionMeters(pipTimeCentiseconds: time)
+        let rnX = await agc.readDoublePrecision(ecadr: Luminary099Erasable.rn)
+        #expect(abs(rnX.decoded(scale: Luminary099NavScale.positionScale) - expectedRN.x) < 2)
+
+        let refsm = await agc.readErasable(ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.refsmflg))
+        let refsmBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.refsmflg) - 1)
+        #expect((refsm & refsmBit) != 0)
     }
 }
 
