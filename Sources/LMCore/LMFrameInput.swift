@@ -99,4 +99,23 @@ public struct LMFrameInput: Equatable, Sendable {
     }
 
     public static let none = LMFrameInput()
+
+    /// Held AUTO / engine-arm / LR POS1 plus landing-radar altitude.
+    /// This is the auto-land button frame: no invented rates, no extra keys.
+    public static func autoLand(
+        altitudeMeters: Double,
+        rotationalHandController: LMRotationalHandControllerInput? = nil,
+        descendPlus: Bool = false,
+        descendMinus: Bool = false
+    ) -> LMFrameInput {
+        LMFrameInput(
+            radarInput: .measurement(LMRadarMeasurementInput(altitudeMeters: max(0, altitudeMeters))),
+            rotationalHandControllerInput: rotationalHandController,
+            descentRateInput: LMDescentRateControlInput(
+                descendPlus: descendPlus,
+                descendMinus: descendMinus
+            ),
+            rawChannelInputs: LMPoweredDescentPanel.channelInputs
+        )
+    }
 }

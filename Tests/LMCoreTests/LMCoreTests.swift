@@ -191,6 +191,19 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(atomicSnapshot.vehicleState == explicitSnapshot.vehicleState)
     }
 
+    @Test func `auto-land frame holds the AUTO panel and landing-radar altitude`() {
+        let input = LMFrameInput.autoLand(altitudeMeters: 100)
+        #expect(input.rawChannelInputs.map(\.channel) == [0o30, 0o31, 0o33])
+        #expect(input.rawChannelInputs.map(\.value) == [
+            LMPoweredDescentPanel.channel30,
+            LMPoweredDescentPanel.channel31,
+            LMPoweredDescentPanel.channel33
+        ])
+        #expect(input.radarInput?.rawAGCInput?.altitudeMeter != nil)
+        #expect(input.descentRateInput?.descendPlus == false)
+        #expect(input.descentRateInput?.descendMinus == false)
+    }
+
     @Test func `gravity only propagation is deterministic`() {
         let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100))
         let first = LMDynamics.propagate(
@@ -1101,6 +1114,44 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(snapshot.agc.dsky.programNumber == 65, "P65START NEWMODEX 65 \(trail)")
         #expect(p65Wch == 2, "WCHPHASE should be VERTICAL in P65 \(trail)")
         #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on into P65 \(trail)")
+
+        let p65Time = snapshot.timeSeconds
+        let vertHold = 30.0
+        let vertSteps = Int((vertHold / dt).rounded(.up))
+        var heldVertical = 0.0
+        lastLogged = -10.0
+        for _ in 1...vertSteps {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+            )
+            heldVertical = snapshot.timeSeconds - p65Time
+            let now = await dump()
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            let interesting = now != last
+            if interesting || heldVertical - lastLogged >= 10 {
+                trail += " | P65+\(String(format: "%.1f", heldVertical))s \(now)"
+                last = now
+                lastLogged = heldVertical
+            }
+            if aborting(fail1, fail2) {
+                trail += " | abort P65+\(String(format: "%.1f", heldVertical))s \(now)"
+                break
+            }
+            if snapshot.agc.dsky.programNumber != 65 {
+                trail += " | left P65+\(String(format: "%.1f", heldVertical))s \(now)"
+                break
+            }
+        }
+        let vertWch = await runtime.readErasable(ecadr: Luminary099Erasable.wchPhase)
+        let vertFlag2 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd2)
+        #expect(await runtime.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 under VERTGUID \(trail)")
+        #expect(heldVertical >= vertHold - dt, "VERTGUID should hold P65 for 30 s \(trail)")
+        #expect(snapshot.agc.dsky.programNumber == 65, "VERTGUID should keep P65 \(trail)")
+        #expect(vertWch == 2, "WCHPHASE should stay VERTICAL \(trail)")
+        #expect((vertFlag2 & steerMask) != 0, "STEERSW should stay set under VERTGUID \(trail)")
+        #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on under VERTGUID \(trail)")
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
