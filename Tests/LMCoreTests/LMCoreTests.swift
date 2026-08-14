@@ -860,10 +860,13 @@ struct LMCoreScenarioAndDynamicsTests {
             let abdelv = await runtime.readErasable(ecadr: Luminary099Erasable.abdelv)
             let dvthrush = await runtime.readErasable(ecadr: Luminary099Erasable.dvthrush)
             let dvcntr = await runtime.readErasable(ecadr: Luminary099Erasable.dvcntr)
-            let flag7 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd7)
+            let flag2 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd2)
+            let avegH = await runtime.readErasable(ecadr: Luminary099Erasable.avegExit)
+            let avegL = await runtime.readErasable(ecadr: Luminary099Erasable.avegExit + 1)
             let snap = await runtime.snapshot()
             let thrust = snap.vehicleCommands.dps.commandedThrustNewtons ?? 0
-            return "FAIL=\(String(fail0, radix: 8)),\(String(fail1, radix: 8)),\(String(fail2, radix: 8)) PROG='\(snap.agc.dsky.mode)' V\(snap.agc.dsky.verb) N\(snap.agc.dsky.noun) WCH=\(wch) ABD=\(abdelv) THR=\(dvthrush) DVC=\(dvcntr) F7=\(String(flag7, radix: 8)) ENG=\(snap.vehicleCommands.mainEngineOn) F=\(Int(thrust.rounded()))"
+            let steer = (flag2 & (1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.steersw) - 1))) != 0
+            return "FAIL=\(String(fail0, radix: 8)),\(String(fail1, radix: 8)),\(String(fail2, radix: 8)) PROG='\(snap.agc.dsky.mode)' V\(snap.agc.dsky.verb) N\(snap.agc.dsky.noun) WCH=\(wch) ABD=\(abdelv) THR=\(dvthrush) DVC=\(dvcntr) STEER=\(steer) AVEG=\(String(avegH, radix: 8)),\(String(avegL, radix: 8)) ENG=\(snap.vehicleCommands.mainEngineOn) F=\(Int(thrust.rounded()))"
         }
 
         func aborting(_ fail1: Int, _ fail2: Int) -> Bool {
@@ -892,6 +895,10 @@ struct LMCoreScenarioAndDynamicsTests {
         }
         #expect(ignited, "V99 should light the engine \(trail)")
         #expect(snapshot.agc.dsky.programNumber == 63, "at TIG \(trail)")
+        let avegAtIgnition = (
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit),
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit + 1)
+        )
 
         func rnMeters() async -> LMVector3D {
             let x = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.rn)
@@ -942,6 +949,39 @@ struct LMCoreScenarioAndDynamicsTests {
         )
         let burnedRN = await rnMeters()
         let zoomThrust = snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
+        let avegAtZoom = (
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit),
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit + 1)
+        )
+        let lunlandSeconds = 30.0
+        let lunlandSteps = Int((lunlandSeconds / dt).rounded(.up))
+        for step in 1...lunlandSteps {
+            snapshot = await runtime.step(deltaTime: dt, input: panel)
+            let now = await dump()
+            if now != last {
+                trail += " | +\(String(format: "%.1f", snapshot.timeSeconds - igniteTime))s \(now)"
+                last = now
+            }
+            let fail1 = await runtime.readErasable(ecadr: 0o376)
+            let fail2 = await runtime.readErasable(ecadr: 0o377)
+            if aborting(fail1, fail2) || snapshot.agc.dsky.programNumber != 63 {
+                trail += " | abort t=\(String(format: "%.1f", snapshot.timeSeconds - igniteTime)) \(now)"
+                break
+            }
+            if step == lunlandSteps {
+                trail += " | LUNLAND+30 \(now)"
+            }
+        }
+        let lunlandThrust = snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
+        let avegAfter = (
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit),
+            await runtime.readErasable(ecadr: Luminary099Erasable.avegExit + 1)
+        )
+        let flag2 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd2)
+        let steerMask = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.steersw) - 1)
+        let wch = await runtime.readErasable(ecadr: Luminary099Erasable.wchPhase)
+        let abdelv = await runtime.readErasable(ecadr: Luminary099Erasable.abdelv)
+        let dvthrush = await runtime.readErasable(ecadr: Luminary099Erasable.dvthrush)
 
         #expect(await runtime.readErasable(ecadr: 0o376) != 0o1406, "IGNALG ROOTPSRS POODOO \(trail)")
         #expect(await runtime.readErasable(ecadr: 0o376) != 0o1412, "IGNALG 40-loop 01412 \(trail)")
@@ -967,6 +1007,17 @@ struct LMCoreScenarioAndDynamicsTests {
             zoomThrust >= LMDPSThrottleMap.fmaxNewtons * 0.8,
             "P63ZOOM FLATOUT should throttle up at TIG+ZOOMTIME \(trail)"
         )
+        #expect(avegAtZoom != avegAtIgnition, "P63ZOOM should connect LUNLAND on AVEGEXIT \(trail)")
+        #expect(avegAfter == avegAtZoom, "LUNLAND should stay on AVEGEXIT after ZOOM \(trail)")
+        #expect(wch == 0, "WCHPHASE should stay BRAKQUAD after ZOOM \(trail)")
+        #expect((flag2 & steerMask) != 0, "DVMON should set STEERSW so LUNLAND can steer \(trail)")
+        #expect(abdelv > dvthrush, "ABDELV should stay above DVTHRUSH after FLATOUT \(trail)")
+        #expect(
+            lunlandThrust >= LMDPSThrottleMap.fmaxNewtons * 0.8,
+            "LUNLAND braking should keep DPS near FMAX \(trail)"
+        )
+        #expect(snapshot.agc.dsky.programNumber == 63, "LUNLAND should keep P63 \(trail)")
+        #expect(snapshot.vehicleCommands.mainEngineOn, "engine should stay on under LUNLAND \(trail)")
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {

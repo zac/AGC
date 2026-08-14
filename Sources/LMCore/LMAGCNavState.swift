@@ -17,6 +17,10 @@ public enum Luminary099Erasable {
     public static let abdelv = 0o1246
     /// PGUIDE+2. P63 loads DPSTHRSH (36 cm/s, ~600 lbf).
     public static let dvthrush = 0o1251
+    /// DVTHRUSH+1. P63IGN writes display 2CADR; P63ZOOM writes LUNLAND.
+    public static let avegExit = 0o1252
+    /// FLAGWRD2. STEERSW (bit 11) is set when DVMON sees enough thrust to steer.
+    public static let flagwrd2 = 0o76
     /// Unswitched DELV vector (PIPASR).
     public static let delv = 0o324
     /// FLAGWRD7. IDLEFLAG (DVMON inhibit) lives here.
@@ -102,6 +106,8 @@ public enum Luminary099Flag {
     public static let moonflag = 3
     public static let lunaflag = 48
     public static let refsmflg = 47
+    /// FLAGWRD2 bit 11. Set by DVMON when ABDELV exceeds DVTHRUSH.
+    public static let steersw = 34
     public static let lmoonflg = 124
 
     public static func ecadr(decimalIndex: Int) -> Int {
