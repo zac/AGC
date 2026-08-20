@@ -1258,6 +1258,55 @@ struct LMCoreScenarioAndDynamicsTests {
         )
     }
 
+    @Test func `SM and ENU CDUY share the sim-X Q sign through PDI pitch`() {
+        let t0 = 1_000.0
+        let t1 = t0 + 12_000
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: t0)
+        let dq = 1.0 * .pi / 180.0
+        func deg(_ radians: Double) -> Double { radians * 180 / .pi }
+        func wrappedDelta(_ from: Double, _ to: Double) -> Double {
+            var d = to - from
+            while d > .pi { d -= 2 * .pi }
+            while d < -.pi { d += 2 * .pi }
+            return d
+        }
+        var trail = ""
+        for pitchDeg in [95.0, 80.0, 55.0] {
+            let base = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: pitchDeg * .pi / 180.0)
+            let plus = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: (pitchDeg * .pi / 180.0) + dq)
+            for (label, time) in [("epoch", t0), ("+120s", t1)] {
+                let enu0 = LMIMUGimbalMap.cduRadians(from: base)
+                let enu1 = LMIMUGimbalMap.cduRadians(from: plus)
+                let sm0 = LMIMUGimbalMap.cduRadians(from: base, refsmmat: ref, timeCentiseconds: time)
+                let sm1 = LMIMUGimbalMap.cduRadians(from: plus, refsmmat: ref, timeCentiseconds: time)
+                let dENU = wrappedDelta(enu0.y, enu1.y)
+                let dSM = wrappedDelta(sm0.y, sm1.y)
+                let dENUX = wrappedDelta(enu0.x, enu1.x)
+                let dSMX = wrappedDelta(sm0.x, sm1.x)
+                trail += String(
+                    format: " \(label) Q=%.0f° dENUY=%+.3f° dSMY=%+.3f° dENUX=%+.3f° dSMX=%+.3f°",
+                    pitchDeg,
+                    deg(dENU),
+                    deg(dSM),
+                    deg(dENUX),
+                    deg(dSMX)
+                )
+                #expect(
+                    dENU * dSM > 0,
+                    "sim +X should move SM CDUY the same way as ENU CDUY\(trail)"
+                )
+                #expect(
+                    abs(deg(dSM) - deg(dENU)) < 0.2,
+                    "Q gain should match within 0.2°/°\(trail)"
+                )
+                #expect(
+                    abs(deg(dSMX)) < 0.3,
+                    "sim +X must not leak into SM CDUX\(trail)"
+                )
+            }
+        }
+    }
+
     @Test func `SM specific force stays within lunar rotation of the ENU map`() {
         let t0 = Luminary99LandingPadLoad.pdiClockCentiseconds
         let t1 = t0 + 80_000
