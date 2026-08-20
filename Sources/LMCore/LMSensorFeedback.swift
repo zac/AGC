@@ -37,13 +37,67 @@ public enum LMIMUGimbalMap {
     /// Luminary CALCGA / FLESHPOT (OIM=XYZ): CDUX outer, CDUY inner, CDUZ middle.
     /// Body axes in SM via `nasaBody` of world-rotated sim axes.
     public static func cduRadians(from attitude: LMQuaternion) -> (x: Double, y: Double, z: Double) {
-        let xnb = nasaBody(fromSim: attitude.rotated(LMVector3D(z: 1)))
-        let ynb = nasaBody(fromSim: attitude.rotated(LMVector3D(x: 1)))
-        let znb = nasaBody(fromSim: attitude.rotated(LMVector3D(y: 1)))
+        cduRadians(
+            xnb: nasaBody(fromSim: attitude.rotated(LMVector3D(z: 1))),
+            ynb: nasaBody(fromSim: attitude.rotated(LMVector3D(x: 1))),
+            znb: nasaBody(fromSim: attitude.rotated(LMVector3D(y: 1))),
+            fallbackInner: attitude.yawPitchRollRadians.x
+        )
+    }
+
+    /// Diagnostic CALCGA: body axes in frozen SM via live `RP-TO-R`.
+    /// Not for `LMSimulation.stepExact` until CDUY tracks CDUYD through ZOOM
+    /// on this map (the production SM wiring hit −148° CDUY error).
+    public static func cduRadians(
+        from attitude: LMQuaternion,
+        refsmmat: LMMatrix3,
+        timeCentiseconds: Double
+    ) -> (x: Double, y: Double, z: Double) {
+        cduRadians(
+            xnb: LMAGCNavState.specificForceSM(
+                body: LMVector3D(z: 1),
+                attitude: attitude,
+                refsmmat: refsmmat,
+                timeCentiseconds: timeCentiseconds
+            ),
+            ynb: LMAGCNavState.specificForceSM(
+                body: LMVector3D(x: 1),
+                attitude: attitude,
+                refsmmat: refsmmat,
+                timeCentiseconds: timeCentiseconds
+            ),
+            znb: LMAGCNavState.specificForceSM(
+                body: LMVector3D(y: 1),
+                attitude: attitude,
+                refsmmat: refsmmat,
+                timeCentiseconds: timeCentiseconds
+            ),
+            fallbackInner: attitude.yawPitchRollRadians.x
+        )
+    }
+
+    public static func cduCounts(from attitude: LMQuaternion) -> (x: Int, y: Int, z: Int) {
+        counts(cduRadians(from: attitude))
+    }
+
+    public static func cduCounts(
+        from attitude: LMQuaternion,
+        refsmmat: LMMatrix3,
+        timeCentiseconds: Double
+    ) -> (x: Int, y: Int, z: Int) {
+        counts(cduRadians(from: attitude, refsmmat: refsmmat, timeCentiseconds: timeCentiseconds))
+    }
+
+    private static func cduRadians(
+        xnb: LMVector3D,
+        ynb: LMVector3D,
+        znb: LMVector3D,
+        fallbackInner: Double
+    ) -> (x: Double, y: Double, z: Double) {
         let ysm = LMVector3D(y: 1)
         let mga = xnb.cross(ysm)
         guard mga.magnitude > 1e-12 else {
-            return (x: 0, y: attitude.yawPitchRollRadians.x, z: 0)
+            return (x: 0, y: fallbackInner, z: 0)
         }
         let mgaN = mga.normalized()
         let og = atan2(mgaN.dot(ynb), mgaN.dot(znb))
@@ -53,13 +107,8 @@ public enum LMIMUGimbalMap {
         return (x: og, y: ig, z: mg)
     }
 
-    public static func cduCounts(from attitude: LMQuaternion) -> (x: Int, y: Int, z: Int) {
-        let radians = cduRadians(from: attitude)
-        return (
-            x: count(radians.x),
-            y: count(radians.y),
-            z: count(radians.z)
-        )
+    private static func counts(_ radians: (x: Double, y: Double, z: Double)) -> (x: Int, y: Int, z: Int) {
+        (x: count(radians.x), y: count(radians.y), z: count(radians.z))
     }
 
     /// Shortest signed CDU tick delta in `[-16384, 16383]`.
@@ -114,17 +163,32 @@ struct LMSensorFeedbackState {
 
     /// PIPA pulses from SM specific force, plus CDU catch-up toward the current
     /// attitude. PIPAs sit on the stable member (inertial), not moon-fixed ENU.
+    ///
+    /// `refsmmat` is a diagnostic CDU map. Do not pass it from the simulation
+    /// hot path: that coupling left CDUY 148° off CDUYD after ZOOM.
     mutating func increments(
         specificForceSM: LMVector3D,
         attitude: LMQuaternion,
-        deltaTime: Double
+        deltaTime: Double,
+        refsmmat: LMMatrix3? = nil,
+        timeCentiseconds: Double? = nil
     ) -> [AGCChannelInput] {
         var inputs: [AGCChannelInput] = []
         inputs.append(contentsOf: pipaIncrements(
             specificForceSM: specificForceSM,
             deltaTime: deltaTime
         ))
-        inputs.append(contentsOf: cduIncrements(attitude: attitude))
+        let target: (x: Int, y: Int, z: Int)
+        if let refsmmat, let timeCentiseconds {
+            target = LMIMUGimbalMap.cduCounts(
+                from: attitude,
+                refsmmat: refsmmat,
+                timeCentiseconds: timeCentiseconds
+            )
+        } else {
+            target = LMIMUGimbalMap.cduCounts(from: attitude)
+        }
+        inputs.append(contentsOf: cduIncrements(attitude: attitude, targetCounts: target))
         return inputs
     }
 
@@ -163,18 +227,21 @@ struct LMSensorFeedbackState {
         return inputs
     }
 
-    mutating func cduIncrements(attitude: LMQuaternion) -> [AGCChannelInput] {
+    mutating func cduIncrements(
+        attitude: LMQuaternion,
+        targetCounts: (x: Int, y: Int, z: Int)
+    ) -> [AGCChannelInput] {
         let scale = LMSensorScale.cduRadiansPerCount.value
         guard scale > 0 else { return [] }
 
         guard let previousAttitude = lastAttitude, let previousCounts = lastCDUCounts else {
             lastAttitude = attitude
-            lastCDUCounts = LMIMUGimbalMap.cduCounts(from: attitude)
+            lastCDUCounts = targetCounts
             cduRemainder = .zero
             return []
         }
 
-        let target = LMIMUGimbalMap.cduCounts(from: attitude)
+        let target = targetCounts
         let euler = LMVector3D(
             x: Double(LMIMUGimbalMap.shortestCountDelta(from: previousCounts.x, to: target.x)),
             y: Double(LMIMUGimbalMap.shortestCountDelta(from: previousCounts.y, to: target.y)),

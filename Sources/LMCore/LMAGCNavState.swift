@@ -136,6 +136,16 @@ public enum Luminary099Erasable {
     public static let wchPhase = 0o1351
     /// E5,1636 RGU.
     public static let rgu = 0o2636
+    /// E3,1452. PIPA bias / scale-factor pair, then Y/Z. Perfect IMU is 0.
+    public static let pbiasx = 0o1452
+    public static let pipascfx = 0o1453
+    public static let pbiasz = 0o1456
+    public static let pipascfz = 0o1457
+    /// Unswitched 01075. 1/PIPA Δt. Leave 0 with GCOMPSW negative.
+    public static let pipadt = 0o1075
+    /// E3,1477. CCS negative skips 1/PIPA / NBDONLY. Do not use -0 (077777);
+    /// that takes the 1/PIPA path.
+    public static let gcompsw = 0o1477
 }
 
 /// Flag decimal indices from Luminary 099 `FLAGWORD_ASSIGNMENTS.agc`.
@@ -200,6 +210,7 @@ public enum Luminary099NavScale {
 public enum LMAGCNavState {
     /// Body specific force in frozen SM for MUNRVG. ENU coincides with SM only
     /// at the REFSMMAT epoch; later GET must go through RP-TO-R and REFSMMAT.
+    /// Diagnostic / comparison helper — not the simulation PIPA hot path.
     public static func specificForceSM(
         body: LMVector3D,
         attitude: LMQuaternion,
@@ -212,6 +223,48 @@ public enum LMAGCNavState {
         let basic = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: timeCentiseconds)
             .timesTranspose(moon)
         return refsmmat.times(basic)
+    }
+
+    /// Frozen-REFSMMAT position (m) and inertial velocity (m/s) of the plant.
+    /// Same conversion Average-G uses: live `RP-TO-R` / `V + ω×RP`, then `MXV REFSMMAT`.
+    public static func stableMemberKinematics(
+        from vehicle: LMVehicleStateSnapshot,
+        refsmmat: LMMatrix3,
+        timeCentiseconds: Double
+    ) -> (positionMeters: LMVector3D, velocityMetersPerSecond: LMVector3D) {
+        let moon = moonCenteredPositionMeters(from: vehicle)
+        let position = refsmmat.times(
+            LuminaryMoonOrientation.rpToR(moon, timeCentiseconds: timeCentiseconds)
+        )
+        let velocity = refsmmat.times(
+            LuminaryMoonOrientation.moonRelativeVelocityToReference(
+                velocityMetersPerCentisecond: velocityMetersPerCentisecond(from: vehicle),
+                moonFixedPosition: moon,
+                timeCentiseconds: timeCentiseconds
+            )
+        ) * 100.0
+        return (position, velocity)
+    }
+
+    /// PIPA specific force: plant inertial ΔV/Δt minus two-body gravity in SM.
+    /// Do not feed this to the PIPA counters: gravity residuals leak into PIPAX
+    /// and FINDCDUW leaves braking.
+    public static func nongravitationalAccelerationSM(
+        previousVelocityMetersPerSecond: LMVector3D,
+        positionMeters: LMVector3D,
+        velocityMetersPerSecond: LMVector3D,
+        deltaTime: Double
+    ) -> LMVector3D {
+        guard deltaTime > 0 else { return .zero }
+        let radiusSquared = positionMeters.dot(positionMeters)
+        let gravity = radiusSquared > 0
+            ? positionMeters * (
+                -Luminary099NavScale.lunarMuMetersCubedPerSecondSquared
+                    / (radiusSquared * sqrt(radiusSquared))
+            )
+            : .zero
+        return (velocityMetersPerSecond - previousVelocityMetersPerSecond) * (1.0 / deltaTime)
+            - gravity
     }
 
     public static func moonCenteredPositionMeters(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
@@ -393,6 +446,20 @@ public enum LMAGCNavState {
         }
         words.append(AGCErasableWord(ecadr: Luminary099Erasable.csmMass, value: 0))
         words.append(contentsOf: cduWords(attitude: vehicle.attitude))
+        words.append(contentsOf: perfectIMUCompensationWords())
+        return words
+    }
+
+    /// Skip 1/PIPA and gyro NBD. The plant PIPAs have no scale-factor error or
+    /// bias; running 1/PIPA with GCOMPSW=+0 still DAS’s DELV against whatever
+    /// is in E3 after idle boot.
+    private static func perfectIMUCompensationWords() -> [AGCErasableWord] {
+        var words: [AGCErasableWord] = []
+        for ecadr in Luminary099Erasable.pbiasx...Luminary099Erasable.gcompsw {
+            words.append(AGCErasableWord(ecadr: ecadr, value: 0))
+        }
+        words.append(AGCErasableWord(ecadr: Luminary099Erasable.pipadt, value: 0))
+        words.append(AGCErasableWord(ecadr: Luminary099Erasable.gcompsw, value: 0o77776))
         return words
     }
 

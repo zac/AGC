@@ -345,6 +345,107 @@ struct LMCoreScenarioAndDynamicsTests {
         )
     }
 
+    @Test func `PDI FMAX plant SM accel matches PIPA plus MUNGRAV`() {
+        let t0 = 10_000.0
+        let pdi = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: 95 * .pi / 180)
+        var state = LMAGCNavState.vehicleState(
+            timeCentiseconds: t0,
+            attitude: pdi,
+            massKilograms: 14_969
+        )
+        let commands = LMVehicleSnapshot(
+            outputChannel11: 0o10000,
+            commandedThrustNewtons: LMDPSThrottleMap.fmaxNewtons
+        )
+        let dt = 0.25
+        let seconds = 46.0
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: t0)
+        func smVelocity(_ vehicle: LMVehicleStateSnapshot, time: Double) -> LMVector3D {
+            ref.times(
+                LuminaryMoonOrientation.moonRelativeVelocityToReference(
+                    velocityMetersPerCentisecond: LMAGCNavState.velocityMetersPerCentisecond(from: vehicle),
+                    moonFixedPosition: LMAGCNavState.moonCenteredPositionMeters(from: vehicle),
+                    timeCentiseconds: time
+                )
+            ) * 100.0
+        }
+        let startV = smVelocity(state, time: t0)
+        var time = t0
+        for _ in 1...Int((seconds / dt).rounded()) {
+            state = LMDynamics.propagate(
+                state: state,
+                commands: commands,
+                configuration: .sourceBackedDefault,
+                deltaTime: dt
+            )
+            time += dt * 100.0
+        }
+        let dVPlant = smVelocity(state, time: time) - startV
+        let bodyForce = LMDynamics.specificForceBody(
+            state: state,
+            commands: commands,
+            configuration: .sourceBackedDefault
+        )
+        let pipaENU = LMIMUGimbalMap.nasaBody(fromSim: pdi.rotated(bodyForce))
+        let rSM = ref.times(LMAGCNavState.basicReferencePositionMeters(
+            from: LMAGCNavState.vehicleState(timeCentiseconds: t0, attitude: pdi, massKilograms: 14_969),
+            timeCentiseconds: t0
+        ))
+        let r2 = rSM.dot(rSM)
+        let gSM = rSM * (
+            -Luminary099NavScale.lunarMuMetersCubedPerSecondSquared / (r2 * sqrt(r2))
+        )
+        let dVENU = (pipaENU + gSM) * seconds
+        #expect(
+            (dVPlant - dVENU).magnitude < 2.0,
+            "46s plant ΔV \(String(format: "%.2f,%.2f,%.2f", dVPlant.x, dVPlant.y, dVPlant.z)) ENU-PIPA \(String(format: "%.2f,%.2f,%.2f", dVENU.x, dVENU.y, dVENU.z)) err \(String(format: "%.2f,%.2f,%.2f", (dVPlant - dVENU).x, (dVPlant - dVENU).y, (dVPlant - dVENU).z))"
+        )
+    }
+
+    @Test func `plant inertial specific force matches ENU thrust at PDI epoch`() {
+        let t0 = 10_000.0
+        let pdi = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: 95 * .pi / 180)
+        let state = LMAGCNavState.vehicleState(
+            timeCentiseconds: t0,
+            attitude: pdi,
+            massKilograms: 14_969
+        )
+        let commands = LMVehicleSnapshot(
+            outputChannel11: 0o10000,
+            commandedThrustNewtons: LMDPSThrottleMap.fmaxNewtons
+        )
+        let dt = 0.01
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: t0)
+        let sm0 = LMAGCNavState.stableMemberKinematics(from: state, refsmmat: ref, timeCentiseconds: t0)
+        let next = LMDynamics.propagate(
+            state: state,
+            commands: commands,
+            configuration: .sourceBackedDefault,
+            deltaTime: dt
+        )
+        let sm1 = LMAGCNavState.stableMemberKinematics(
+            from: next,
+            refsmmat: ref,
+            timeCentiseconds: t0 + dt * 100.0
+        )
+        let inertial = LMAGCNavState.nongravitationalAccelerationSM(
+            previousVelocityMetersPerSecond: sm0.velocityMetersPerSecond,
+            positionMeters: sm1.positionMeters,
+            velocityMetersPerSecond: sm1.velocityMetersPerSecond,
+            deltaTime: dt
+        )
+        let body = LMDynamics.specificForceBody(
+            state: state,
+            commands: commands,
+            configuration: .sourceBackedDefault
+        )
+        let enu = LMIMUGimbalMap.nasaBody(fromSim: pdi.rotated(body))
+        #expect(
+            (inertial - enu).magnitude < 0.05,
+            "inertial \(String(format: "%.3f,%.3f,%.3f", inertial.x, inertial.y, inertial.z)) ENU \(String(format: "%.3f,%.3f,%.3f", enu.x, enu.y, enu.z))"
+        )
+    }
+
     @Test func `PDI RIGN state does not contact the site sphere under MUM gravity`() {
         var state = LMPoweredDescentScenario.apollo11SourceBacked.initialState
         let startAltitude = state.altitudeMeters
@@ -985,6 +1086,68 @@ struct LMCoreScenarioAndDynamicsTests {
         let enu = LMIMUGimbalMap.nasaBody(fromSim: pdi.rotated(body))
         // Libration is in XSM = RP-TO-R(RLS) but not in the ENU shuffle.
         #expect((sm - enu).magnitude < 2e-4)
+    }
+
+    @Test func `SM CDUs match ENU map at the REFSMMAT epoch`() {
+        let time = Luminary99LandingPadLoad.pdiClockCentiseconds
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: time)
+        let pdi = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: 95.0 * .pi / 180.0)
+        let enu = LMIMUGimbalMap.cduCounts(from: pdi)
+        let sm = LMIMUGimbalMap.cduCounts(from: pdi, refsmmat: ref, timeCentiseconds: time)
+        #expect(
+            abs(LMIMUGimbalMap.shortestCountDelta(from: enu.x, to: sm.x)) <= 2
+                && abs(LMIMUGimbalMap.shortestCountDelta(from: enu.y, to: sm.y)) <= 1
+                && abs(LMIMUGimbalMap.shortestCountDelta(from: enu.z, to: sm.z)) <= 1,
+            "ENU \(enu) SM \(sm)"
+        )
+    }
+
+    @Test func `plant interpolator recovers the sample at an exact GET`() {
+        let t0 = 10_000.0
+        let pdi = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: 95 * .pi / 180)
+        let v0 = LMAGCNavState.vehicleState(
+            timeCentiseconds: t0,
+            attitude: pdi,
+            massKilograms: 14_969
+        )
+        let v1 = LMVehicleStateSnapshot(
+            positionMeters: v0.positionMeters + LMVector3D(y: 200),
+            velocityMetersPerSecond: v0.velocityMetersPerSecond,
+            attitude: v0.attitude,
+            massKilograms: v0.massKilograms
+        )
+        let samples = [
+            PlantGETSample(getCs: t0, vehicle: v0),
+            PlantGETSample(getCs: t0 + 100, vehicle: v1)
+        ]
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: t0)
+        let exact = interpolatePlant(samples: samples, getCs: t0, refsmmat: ref)
+        let expected = LMAGCNavState.stableMemberKinematics(
+            from: v0,
+            refsmmat: ref,
+            timeCentiseconds: t0
+        )
+        #expect(
+            exact != nil
+                && (exact!.positionMeters - expected.positionMeters).magnitude < 1
+                && (exact!.velocityMetersPerSecond - expected.velocityMetersPerSecond).magnitude < 0.01
+        )
+        let mid = interpolatePlant(samples: samples, getCs: t0 + 50, refsmmat: ref)
+        let midVehicle = LMVehicleStateSnapshot(
+            positionMeters: v0.positionMeters + LMVector3D(y: 100),
+            velocityMetersPerSecond: v0.velocityMetersPerSecond,
+            attitude: v0.attitude,
+            massKilograms: v0.massKilograms
+        )
+        let midExpected = LMAGCNavState.stableMemberKinematics(
+            from: midVehicle,
+            refsmmat: ref,
+            timeCentiseconds: t0 + 50
+        )
+        #expect(
+            mid != nil && (mid!.positionMeters - midExpected.positionMeters).magnitude < 1,
+            "midpoint interpolation should track site-east lerp"
+        )
     }
 
     @Test func `SM specific force stays within lunar rotation of the ENU map`() {
@@ -1714,8 +1877,8 @@ struct LMCoreScenarioAndDynamicsTests {
         var cdudDeg = Double(cdudyFinal & 0o77777) * 360.0 / 32_768.0
         if cdudDeg > 180 { cdudDeg -= 360 }
         #expect(
-            abs(cdudDeg) < 130,
-            "CDUYD should stay a braking attitude, not dive through 180° (\(String(format: "%.1f", cdudDeg))°) \(trail)"
+            abs(cdudDeg) > 75 && abs(cdudDeg) < 130,
+            "CDUYD should stay a braking attitude near 95° through ZOOM+40s, not pitch to high gate (\(String(format: "%.1f", cdudDeg))°) \(trail)"
         )
     }
 
@@ -1812,7 +1975,10 @@ struct LMCoreScenarioAndDynamicsTests {
         )
     }
 
-    @Test func `at P64 MUNRVG R in SM tracks the plant`() async throws {
+    /// AVERAGEG should integrate the same SM ΔV the plant produces. A window
+    /// that straddles ZOOM is biased by the 2 s SERVICER tag (plant includes
+    /// two extra seconds of FMAX). Measure after FLATOUT so both sides are FMAX.
+    @Test func `Average-G ΔV matches plant thrust through ZOOM`() async throws {
         let romURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1821,14 +1987,32 @@ struct LMCoreScenarioAndDynamicsTests {
         let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
         var snapshot = await runtime.bootAndEnterP63()
         let dt = LMSimulationPace.acceleratedDeltaSeconds
-        for _ in 1...3_200 {
+        for _ in 1...800 {
             snapshot = await runtime.step(
                 deltaTime: dt,
                 input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
             )
-            if snapshot.agc.dsky.programNumber == 64 { break }
+            if snapshot.vehicleCommands.mainEngineOn { break }
         }
-        #expect(snapshot.agc.dsky.programNumber == 64, "should reach P64")
+        #expect(snapshot.vehicleCommands.mainEngineOn, "need DPS before measuring ΔV")
+        let fmax = LMDPSThrottleMap.fmaxNewtons
+        for _ in 1...200 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+            )
+            if (snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0) > 0.9 * fmax { break }
+        }
+        #expect(
+            (snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0) > 0.9 * fmax,
+            "need FMAX before measuring ΔV"
+        )
+        for _ in 1...16 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+            )
+        }
 
         func dpVector(ecadr: Int, scale: Int) async -> LMVector3D {
             let x = await runtime.readDoublePrecision(ecadr: ecadr)
@@ -1856,55 +2040,320 @@ struct LMCoreScenarioAndDynamicsTests {
             }
             return LMMatrix3(r0: rows[0], r1: rows[1], r2: rows[2])
         }
+        func plantSM(get: Double, ref: LMMatrix3) -> (r: LMVector3D, v: LMVector3D) {
+            let moon = LMAGCNavState.moonCenteredPositionMeters(from: snapshot.vehicleState)
+            let r = ref.times(LuminaryMoonOrientation.rpToR(moon, timeCentiseconds: get))
+            let v = ref.times(
+                LuminaryMoonOrientation.moonRelativeVelocityToReference(
+                    velocityMetersPerCentisecond: LMAGCNavState.velocityMetersPerCentisecond(
+                        from: snapshot.vehicleState
+                    ),
+                    moonFixedPosition: moon,
+                    timeCentiseconds: get
+                )
+            )
+            return (r, v)
+        }
+        func sample() async -> (
+            get: Double,
+            lag: Double,
+            rSM: LMVector3D,
+            vSM: LMVector3D,
+            plantR: LMVector3D,
+            plantV: LMVector3D
+        ) {
+            let time2 = await runtime.readErasable(ecadr: Luminary099Erasable.time2)
+            let time1 = await runtime.readErasable(ecadr: Luminary099Erasable.time1)
+            let get = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+            let pip = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
+            let ref = await readRefsmmat()
+            let rSM = await dpVector(ecadr: Luminary099Erasable.servicerR, scale: 24)
+            let vSM = await dpVector(ecadr: Luminary099Erasable.servicerV, scale: 7)
+            let plant = plantSM(get: get, ref: ref)
+            return (get, (get - pip.decoded(scale: 28)) / 100.0, rSM, vSM, plant.r, plant.v)
+        }
 
-        let time2 = await runtime.readErasable(ecadr: Luminary099Erasable.time2)
-        let time1 = await runtime.readErasable(ecadr: Luminary099Erasable.time1)
-        let get = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
-        let ref = await readRefsmmat()
-        let rSM = await dpVector(ecadr: Luminary099Erasable.servicerR, scale: 24)
-        let vSM = await dpVector(ecadr: Luminary099Erasable.servicerV, scale: 7)
-        let landSM = await dpVector(ecadr: Luminary099Erasable.land, scale: 24)
-        let rgu = await dpVector(ecadr: Luminary099Erasable.rgu, scale: 24)
-        let rn29 = await dpVector(ecadr: Luminary099Erasable.rn, scale: 29)
-        let flag11 = await runtime.readErasable(ecadr: 0o107)
-        let vehicleMoon = LMAGCNavState.moonCenteredPositionMeters(from: snapshot.vehicleState)
-        let vehicleBasic = LuminaryMoonOrientation.rpToR(vehicleMoon, timeCentiseconds: get)
-        let vehicleSM = ref.times(vehicleBasic)
-        let vehicleVSM = ref.times(
-            LuminaryMoonOrientation.moonRelativeVelocityToReference(
-                velocityMetersPerCentisecond: LMAGCNavState.velocityMetersPerCentisecond(
-                    from: snapshot.vehicleState
-                ),
-                moonFixedPosition: vehicleMoon,
+        let start = await sample()
+        let startVelErr = (start.vSM - start.plantV) * 100.0
+        let delvx = await runtime.readErasable(ecadr: Luminary099Erasable.delv)
+        let delvz = await runtime.readErasable(ecadr: Luminary099Erasable.delv + 4)
+        let zoomSteps = Int((Luminary99LandingPadLoad.zoomTimeCentiseconds / 100.0 + 20.0) / dt)
+        let frozenRef = await readRefsmmat()
+        var accPipaG = LMVector3D.zero
+        var accThrust = LMVector3D.zero
+        var sumDelv = LMVector3D.zero
+        var delvCycles = 0
+        var lastPip = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
+        for _ in 1...zoomSteps {
+            let force = LMDynamics.specificForceBody(
+                state: snapshot.vehicleState,
+                commands: snapshot.vehicleCommands,
+                configuration: .sourceBackedDefault
+            )
+            let pipa = LMIMUGimbalMap.nasaBody(fromSim: snapshot.vehicleState.attitude.rotated(force))
+            let getNow = AGCDoublePrecision(
+                high: await runtime.readErasable(ecadr: Luminary099Erasable.time2),
+                low: await runtime.readErasable(ecadr: Luminary099Erasable.time1)
+            ).decoded(scale: 28)
+            let live = LMAGCNavState.stableMemberKinematics(
+                from: snapshot.vehicleState,
+                refsmmat: frozenRef,
+                timeCentiseconds: getNow
+            )
+            let r2 = live.positionMeters.dot(live.positionMeters)
+            let gSM = r2 > 0
+                ? live.positionMeters * (
+                    -Luminary099NavScale.lunarMuMetersCubedPerSecondSquared
+                        / (r2 * sqrt(r2))
+                )
+                : .zero
+            accPipaG = accPipaG + (pipa + gSM) * dt
+            accThrust = accThrust + pipa * dt
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+            )
+            let pip = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
+            if pip.high != lastPip.high || pip.low != lastPip.low {
+                func delvAxis(_ offset: Int) async -> Double {
+                    AGCSinglePrecision(
+                        word: await runtime.readErasable(ecadr: Luminary099Erasable.delv + offset)
+                    ).decoded(scale: 14) * 0.01
+                }
+                sumDelv = LMVector3D(
+                    x: sumDelv.x + (await delvAxis(0)),
+                    y: sumDelv.y + (await delvAxis(2)),
+                    z: sumDelv.z + (await delvAxis(4))
+                )
+                delvCycles += 1
+                lastPip = pip
+            }
+        }
+        let end = await sample()
+        let dtGET = (end.get - start.get) / 100.0
+        let dRAGC = end.rSM - start.rSM
+        let dRPlant = end.plantR - start.plantR
+        let dVAGC = (end.vSM - start.vSM) * 100.0
+        let dVPlant = (end.plantV - start.plantV) * 100.0
+        let dRErr = dRAGC - dRPlant
+        let dVErr = dVAGC - dVPlant
+        let endVelErr = (end.vSM - end.plantV) * 100.0
+        let aheadStart = (start.rSM - (start.plantR + start.plantV * 200.0)).magnitude
+        let aheadEnd = (end.rSM - (end.plantR + end.plantV * 200.0)).magnitude
+        let cduy0 = await runtime.readErasable(ecadr: Register.regCDUY.rawValue)
+        let pguide = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.abdelv + 1)
+        let abdelv = AGCSinglePrecision(
+            word: await runtime.readErasable(ecadr: Luminary099Erasable.abdelv)
+        ).decoded(scale: 14)
+        let gdt = await dpVector(ecadr: Luminary099Erasable.pipTime + 2, scale: 7)
+        let pipTime1 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime1)
+        let pipaz = await runtime.readErasable(ecadr: Register.regPIPAZ.rawValue)
+        let force = LMDynamics.specificForceBody(
+            state: snapshot.vehicleState,
+            commands: snapshot.vehicleCommands,
+            configuration: .sourceBackedDefault
+        )
+        let pipaENU = LMIMUGimbalMap.nasaBody(fromSim: snapshot.vehicleState.attitude.rotated(force))
+        #expect(
+            abdelv > 550 && abdelv < 650,
+            "ABDELV \(String(format: "%.0f", abdelv)) cm/s should match 2 s of FMAX PIPA (~600 cm/s)"
+        )
+        #expect(
+            dVErr.magnitude < 3,
+            "ΔV AGC \(String(format: "%.1f,%.1f,%.1f", dVAGC.x, dVAGC.y, dVAGC.z)) plant \(String(format: "%.1f,%.1f,%.1f", dVPlant.x, dVPlant.y, dVPlant.z)) pipaG \(String(format: "%.1f,%.1f,%.1f", accPipaG.x, accPipaG.y, accPipaG.z)) thrust \(String(format: "%.1f,%.1f,%.1f", accThrust.x, accThrust.y, accThrust.z)) ΣDELV \(String(format: "%.1f,%.1f,%.1f", sumDelv.x, sumDelv.y, sumDelv.z)) n=\(delvCycles) err \(String(format: "%.2f,%.2f,%.2f", dVErr.x, dVErr.y, dVErr.z)) m/s ΔR=\(Int(dRErr.x)),\(Int(dRErr.y)),\(Int(dRErr.z)) m dt=\(String(format: "%.1f", dtGET))s lag=\(String(format: "%.2f→%.2f", start.lag, end.lag)) ahead=\(Int(aheadStart))→\(Int(aheadEnd)) v0err=\(String(format: "%.2f,%.2f,%.2f", startVelErr.x, startVelErr.y, startVelErr.z)) v1err=\(String(format: "%.2f,%.2f,%.2f", endVelErr.x, endVelErr.y, endVelErr.z)) ABDELV=\(String(format: "%.0f", abdelv))cm/s GDT/2=\(String(format: "%.4f,%.4f,%.4f", gdt.x, gdt.y, gdt.z)) PIPA=\(String(format: "%.2f,%.2f,%.2f", pipaENU.x, pipaENU.y, pipaENU.z)) GET=\(String(format: "%.0f", end.get)) PIPTIME1=\(String(format: "%.0f", pipTime1.decoded(scale: 28))) PIPAZ=\(pipaz) DELV=\(delvx),\(delvz) CDUY=\(cduy0) PGUIDE=\(String(format: "%.2f", pguide.decoded(scale: 28)))cs thrust=\(Int(snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0))N P\(snapshot.agc.dsky.programNumber ?? 0)"
+        )
+    }
+
+    @Test func `at P64 MUNRVG R in SM tracks the plant`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
+        var snapshot = await runtime.bootAndEnterP63()
+        let dt = LMSimulationPace.acceleratedDeltaSeconds
+        let fmax = LMDPSThrottleMap.fmaxNewtons
+        var history: [PlantGETSample] = []
+
+        func dpVector(ecadr: Int, scale: Int) async -> LMVector3D {
+            let x = await runtime.readDoublePrecision(ecadr: ecadr)
+            let y = await runtime.readDoublePrecision(ecadr: ecadr + 2)
+            let z = await runtime.readDoublePrecision(ecadr: ecadr + 4)
+            return LMVector3D(
+                x: x.decoded(scale: scale),
+                y: y.decoded(scale: scale),
+                z: z.decoded(scale: scale)
+            )
+        }
+        func readGET() async -> Double {
+            let time2 = await runtime.readErasable(ecadr: Luminary099Erasable.time2)
+            let time1 = await runtime.readErasable(ecadr: Luminary099Erasable.time1)
+            return AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
+        }
+        func readRefsmmat() async -> LMMatrix3 {
+            var rows: [LMVector3D] = []
+            for row in 0..<3 {
+                var components: [Double] = []
+                for column in 0..<3 {
+                    let dp = await runtime.readDoublePrecision(
+                        ecadr: Luminary099Erasable.refsmmat + (row * 3 + column) * 2
+                    )
+                    components.append(
+                        dp.decoded(scale: 0) / Luminary099NavScale.refsmmatHalfUnit
+                    )
+                }
+                rows.append(LMVector3D(x: components[0], y: components[1], z: components[2]))
+            }
+            return LMMatrix3(r0: rows[0], r1: rows[1], r2: rows[2])
+        }
+        func recordPlant() async {
+            history.append(
+                PlantGETSample(getCs: await readGET(), vehicle: snapshot.vehicleState)
+            )
+        }
+        func sampleLine() async -> (
+            pipPositionError: Double,
+            pipVelocityError: Double,
+            text: String
+        ) {
+            let get = await readGET()
+            let pip = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
+            let pipTime = pip.decoded(scale: 28)
+            let lag = (get - pipTime) / 100.0
+            let ref = await readRefsmmat()
+            let rSM = await dpVector(ecadr: Luminary099Erasable.servicerR, scale: 24)
+            let vSM = await dpVector(ecadr: Luminary099Erasable.servicerV, scale: 7)
+            let landSM = await dpVector(ecadr: Luminary099Erasable.land, scale: 24)
+            let rgu = await dpVector(ecadr: Luminary099Erasable.rgu, scale: 24)
+            let ttf8 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.ttf8)
+            let unfc = await dpVector(ecadr: Luminary099Erasable.unfc2, scale: 1)
+            let cdux = await runtime.readErasable(ecadr: Register.regCDUX.rawValue)
+            let cduy = await runtime.readErasable(ecadr: Register.regCDUY.rawValue)
+            let cduz = await runtime.readErasable(ecadr: Register.regCDUZ.rawValue)
+            let cdudx = await runtime.readErasable(ecadr: Luminary099Erasable.cduxd)
+            let cdudy = await runtime.readErasable(ecadr: Luminary099Erasable.cduxd + 1)
+            let cdudz = await runtime.readErasable(ecadr: Luminary099Erasable.cduxd + 2)
+            let allowGts = await runtime.readErasable(ecadr: Luminary099Erasable.allowGts)
+            let plantNow = LMAGCNavState.stableMemberKinematics(
+                from: snapshot.vehicleState,
+                refsmmat: ref,
                 timeCentiseconds: get
             )
-        )
-        let rls = LMAGCNavState.landingSiteMeters()
-        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
-        let landMoon = LuminaryMoonOrientation.rToRP(ref.timesTranspose(landSM), timeCentiseconds: get)
-        func horizontal(_ a: LMVector3D, _ b: LMVector3D) -> Double {
-            let delta = a - b
-            return hypot(delta.dot(north), delta.dot(east))
+            let plantPip = interpolatePlant(samples: history, getCs: pipTime, refsmmat: ref)
+                ?? plantNow
+            let rls = LMAGCNavState.landingSiteMeters()
+            let (north, east, _) = LMAGCNavState.moonFixedSiteBasis()
+            let vehicleMoon = LMAGCNavState.moonCenteredPositionMeters(from: snapshot.vehicleState)
+            let landMoon = LuminaryMoonOrientation.rToRP(
+                ref.timesTranspose(landSM),
+                timeCentiseconds: get
+            )
+            func horizontal(_ a: LMVector3D, _ b: LMVector3D) -> Double {
+                let delta = a - b
+                return hypot(delta.dot(north), delta.dot(east))
+            }
+            let navErrNow = (rSM - plantNow.positionMeters).magnitude
+            let dRPip = rSM - plantPip.positionMeters
+            let dVPip = vSM * 100.0 - plantPip.velocityMetersPerSecond
+            let navErrPip = dRPip.magnitude
+            let velErrPip = dVPip.magnitude
+            let navErrAhead = (
+                rSM - (plantNow.positionMeters + plantNow.velocityMetersPerSecond * 2.0)
+            ).magnitude
+            let errY = signedCDUDegrees(cduy) - signedCDUDegrees(cdudy)
+            let text = String(
+                format: "P\(snapshot.agc.dsky.programNumber ?? 0) GET=%.0f PIPTIME=%.0f lag=%.2fs now=%d pip=%d ahead=%d dRpip=%d,%d,%d dVpip=%.1f,%.1f,%.1f rguZ=%d ttf8=%.0f UNFC=%.2f,%.2f,%.2f CDU=%.1f/%.1f,%.1f/%.1f,%.1f/%.1f errY=%+.1f° gimb=%+.2f° RCS=%d GTS=%o plantRLS=%d plantLAND=%d rng=%.1fnmi alt=%.0fft F=%.0f",
+                get,
+                pipTime,
+                lag,
+                Int(navErrNow),
+                Int(navErrPip),
+                Int(navErrAhead),
+                Int(dRPip.x),
+                Int(dRPip.y),
+                Int(dRPip.z),
+                dVPip.x,
+                dVPip.y,
+                dVPip.z,
+                Int(rgu.z),
+                ttf8.decoded(scale: 17),
+                unfc.x,
+                unfc.y,
+                unfc.z,
+                signedCDUDegrees(cdux),
+                signedCDUDegrees(cdudx),
+                signedCDUDegrees(cduy),
+                signedCDUDegrees(cdudy),
+                signedCDUDegrees(cduz),
+                signedCDUDegrees(cdudz),
+                errY,
+                snapshot.vehicleState.dpsPitchGimbalRadians * 180 / .pi,
+                snapshot.vehicleCommands.rcsJets.count,
+                allowGts,
+                Int(horizontal(vehicleMoon, rls)),
+                Int(horizontal(vehicleMoon, landMoon)),
+                snapshot.vehicleState.groundRangeMeters / 1852.0,
+                snapshot.vehicleState.altitudeMeters / 0.3048,
+                snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
+            )
+            return (navErrPip, velErrPip, text)
         }
-        let navErr = (rSM - vehicleSM).magnitude
-        let vehicleENUSM = LMVector3D(
-            x: vehicleMoon.dot(up),
-            y: vehicleMoon.dot(north),
-            z: vehicleMoon.dot(east)
-        )
-        let navErrENU = (rSM - vehicleENUSM).magnitude
-        let dV = vSM - vehicleVSM
-        let velErr = dV.magnitude * 100.0
-        let dR = rSM - vehicleSM
-        let vehicleAhead = vehicleSM + vehicleVSM * 200.0
-        let navErrAhead = (rSM - vehicleAhead).magnitude
-        let plantToRLS = horizontal(vehicleMoon, rls)
-        let plantToLand = horizontal(vehicleMoon, landMoon)
-        let rnSM = ref.times(rn29)
+
+        await recordPlant()
+        var trail = ""
+        var sawTIG = false
+        var sawFMAX = false
+        for _ in 1...3_200 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+            )
+            await recordPlant()
+            if !sawTIG && snapshot.vehicleCommands.mainEngineOn {
+                sawTIG = true
+                trail += " TIG " + (await sampleLine()).text
+            }
+            if !sawFMAX && (snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0) > 0.9 * fmax {
+                sawFMAX = true
+                trail += " FMAX " + (await sampleLine()).text
+            }
+            if snapshot.agc.dsky.programNumber == 64 { break }
+        }
+        #expect(snapshot.agc.dsky.programNumber == 64, "should reach P64 \(trail)")
+        let p64 = await sampleLine()
+        trail += " P64 " + p64.text
         #expect(
-            navErrAhead < 2_000,
-            "MUNRVG R vs plant SM \(Int(navErr)) m ahead2s=\(Int(navErrAhead)) enu=\(Int(navErrENU)) dR=\(Int(dR.x)),\(Int(dR.y)),\(Int(dR.z)) dV=\(String(format: "%.2f,%.2f,%.2f", dV.x * 100, dV.y * 100, dV.z * 100)) velErr=\(Int(velErr))m/s rguZ=\(Int(rgu.z)) plantRLS=\(Int(plantToRLS)) plantLAND=\(Int(plantToLand)) |R|=\(Int(rSM.magnitude)) |LAND|=\(Int(landSM.magnitude)) |RN-R|=\(Int((rnSM - rSM).magnitude)) GET=\(Int(get)) FLG11=\(String(flag11, radix: 8)) P\(snapshot.agc.dsky.programNumber ?? 0) rng=\(String(format: "%.1f", snapshot.vehicleState.groundRangeMeters / 1852))nmi"
+            p64.pipPositionError < 2_000,
+            "MUNRVG R vs plant at exact PIPTIME \(Int(p64.pipPositionError)) m \(trail)"
         )
+        // 2 km over ~500 s of braking is 4 m/s average. 10 m/s at the P64
+        // snapshot still flags a runaway without hiding a 5 km position miss.
+        #expect(
+            p64.pipVelocityError < 10,
+            "MUNRVG V vs plant at exact PIPTIME \(String(format: "%.1f", p64.pipVelocityError)) m/s \(trail)"
+        )
+    }
+
+    @Test func `perfect IMU compensation zeros PBIAS and skips 1/PIPA`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
+        _ = await runtime.bootAndEnterP63()
+        let gcomp = await runtime.readErasable(ecadr: Luminary099Erasable.gcompsw)
+        let pbiasx = await runtime.readErasable(ecadr: Luminary099Erasable.pbiasx)
+        let pipascfx = await runtime.readErasable(ecadr: Luminary099Erasable.pipascfx)
+        let pbiasz = await runtime.readErasable(ecadr: Luminary099Erasable.pbiasz)
+        let pipascfz = await runtime.readErasable(ecadr: Luminary099Erasable.pipascfz)
+        let pipadt = await runtime.readErasable(ecadr: Luminary099Erasable.pipadt)
+        #expect(gcomp == 0o77776, "GCOMPSW −1 skips 1/PIPA; −0 (077777) takes it. got \(String(gcomp, radix: 8))")
+        #expect(gcomp != 0 && gcomp != 0o77777)
+        #expect(pbiasx == 0 && pipascfx == 0, "PBIASX/PIPASCFX must be 0, got \(pbiasx),\(pipascfx)")
+        #expect(pbiasz == 0 && pipascfz == 0, "PBIASZ/PIPASCFZ must be 0, got \(pbiasz),\(pipascfz)")
+        #expect(pipadt == 0, "PIPADT must be 0 with GCOMPSW negative, got \(pipadt)")
     }
 
     @Test func `Auto-land headless trajectory until land or abort`() async throws {
@@ -2101,6 +2550,68 @@ struct LMCoreScenarioAndDynamicsTests {
         let refsmBit = 1 << (Luminary099Flag.bit(decimalIndex: Luminary099Flag.refsmflg) - 1)
         #expect((refsm & refsmBit) != 0)
     }
+}
+
+private struct PlantGETSample {
+    var getCs: Double
+    var vehicle: LMVehicleStateSnapshot
+}
+
+private func signedCDUDegrees(_ counts: Int) -> Double {
+    var wrapped = counts & 0o77777
+    if wrapped > 16_384 { wrapped -= 32_768 }
+    return Double(wrapped) * 360.0 / 32_768.0
+}
+
+private func interpolatePlant(
+    samples: [PlantGETSample],
+    getCs: Double,
+    refsmmat: LMMatrix3
+) -> (positionMeters: LMVector3D, velocityMetersPerSecond: LMVector3D)? {
+    guard let first = samples.first, let last = samples.last else { return nil }
+    let vehicle: LMVehicleStateSnapshot
+    if getCs <= first.getCs {
+        vehicle = first.vehicle
+    } else if getCs >= last.getCs {
+        vehicle = last.vehicle
+    } else {
+        var lo = 0
+        var hi = samples.count - 1
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2
+            if samples[mid].getCs <= getCs {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+        let a = samples[lo]
+        let b = samples[hi]
+        let span = b.getCs - a.getCs
+        let t = span > 0 ? (getCs - a.getCs) / span : 0
+        vehicle = LMVehicleStateSnapshot(
+            positionMeters: a.vehicle.positionMeters
+                + (b.vehicle.positionMeters - a.vehicle.positionMeters) * t,
+            velocityMetersPerSecond: a.vehicle.velocityMetersPerSecond
+                + (b.vehicle.velocityMetersPerSecond - a.vehicle.velocityMetersPerSecond) * t,
+            attitude: t < 0.5 ? a.vehicle.attitude : b.vehicle.attitude,
+            angularVelocityRadiansPerSecond: a.vehicle.angularVelocityRadiansPerSecond
+                + (b.vehicle.angularVelocityRadiansPerSecond
+                    - a.vehicle.angularVelocityRadiansPerSecond) * t,
+            massKilograms: a.vehicle.massKilograms,
+            propellantMassKilograms: a.vehicle.propellantMassKilograms,
+            isLanded: a.vehicle.isLanded,
+            dpsPitchGimbalRadians: a.vehicle.dpsPitchGimbalRadians
+                + (b.vehicle.dpsPitchGimbalRadians - a.vehicle.dpsPitchGimbalRadians) * t,
+            dpsRollGimbalRadians: a.vehicle.dpsRollGimbalRadians
+                + (b.vehicle.dpsRollGimbalRadians - a.vehicle.dpsRollGimbalRadians) * t
+        )
+    }
+    return LMAGCNavState.stableMemberKinematics(
+        from: vehicle,
+        refsmmat: refsmmat,
+        timeCentiseconds: getCs
+    )
 }
 
 private func makeAGCSnapshot(
