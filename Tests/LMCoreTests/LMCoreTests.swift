@@ -1150,6 +1150,25 @@ struct LMCoreScenarioAndDynamicsTests {
         )
     }
 
+    @Test func `SM CDUY at 95° PDI only moves by lunar rotation over 120 s`() {
+        let t0 = 1_000.0
+        let t1 = t0 + 12_000
+        let ref = LMAGCNavState.refsmmat(timeCentiseconds: t0)
+        let pdi = LMQuaternion.fromAxisAngle(axis: LMVector3D(x: 1), radians: 95.0 * .pi / 180.0)
+        let enu = LMIMUGimbalMap.cduRadians(from: pdi)
+        let sm0 = LMIMUGimbalMap.cduRadians(from: pdi, refsmmat: ref, timeCentiseconds: t0)
+        let sm1 = LMIMUGimbalMap.cduRadians(from: pdi, refsmmat: ref, timeCentiseconds: t1)
+        let lunar = LuminaryMoonOrientation.moonRateRadiansPerSecond * 120
+        func deg(_ radians: Double) -> Double { radians * 180 / .pi }
+        #expect(abs(deg(enu.y) - 95) < 0.2, "ENU CDUY \(deg(enu.y))°")
+        #expect(abs(deg(sm0.y) - deg(enu.y)) < 0.05, "epoch SM CDUY \(deg(sm0.y))° vs ENU \(deg(enu.y))°")
+        #expect(
+            abs(deg(sm1.y) - deg(sm0.y)) < deg(lunar) + 0.2,
+            "120s SM CDUY \(deg(sm0.y))° → \(deg(sm1.y))° vs lunar \(deg(lunar))°. CDUX \(deg(sm0.x))°→\(deg(sm1.x))° CDUZ \(deg(sm0.z))°→\(deg(sm1.z))°"
+        )
+        #expect(abs(deg(sm1.x) - deg(sm0.x)) < 2, "CDUX should not pick up the Q rotation")
+    }
+
     @Test func `SM specific force stays within lunar rotation of the ENU map`() {
         let t0 = Luminary99LandingPadLoad.pdiClockCentiseconds
         let t1 = t0 + 80_000
