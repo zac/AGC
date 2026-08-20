@@ -1113,10 +1113,10 @@ public actor LMSimulationRuntime {
         var rcsOut0 = 0
         var rcsOut1 = 0
         for slice in slices {
-            // ENU-as-SM until PIPAs and CDUs share a proven inertial map.
-            // Passing frozen REFSMMAT here previously drove CDUY error to
-            // −148° and CDUX +50° after ZOOM while Average-G missed its
-            // 3 m/s bound (Y-axis sign vs plant).
+            // ENU-as-SM: inertial PIPA + ENU CDUs left braking (P64 at 169 nmi,
+            // CDUY error +88°). Inertial PIPA + SM CDUs tumbled GTS after ZOOM
+            // (CDUY error −148°). Do not re-wire until both maps stay bounded
+            // through P64.
             let sensorPulses = sensorFeedback.increments(
                 specificForceBody: lastSpecificForceBody,
                 attitude: vehicleState.attitude,
