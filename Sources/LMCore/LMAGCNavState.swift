@@ -23,8 +23,41 @@ public enum Luminary099Erasable {
     public static let flagwrd2 = 0o76
     /// Unswitched DELV vector (PIPASR).
     public static let delv = 0o324
+    /// FLAGWRD5. SNUFFBIT (bit 13) inhibits Q,R RCS during a DPS burn (V65).
+    public static let flagwrd5 = 0o101
     /// FLAGWRD7. IDLEFLAG (DVMON inhibit) lives here.
     public static let flagwrd7 = 0o103
+    /// FLAGWRD13 / DAPBOOLS. USEQRJTS (bit 14) chooses GTS vs Q,R RCS.
+    public static let dapbools = 0o111
+    /// Unswitched IMODES30. Bit 9 set means IMU operating.
+    public static let imodes30 = 0o1302
+    /// Unswitched IMODES33. Bit 6 set disables DAP AUTO/HOLD (IMUZERO / coarse).
+    public static let imodes33 = 0o1303
+    /// E6,1421. DAP body rates at PI/4 rad/s. OMEGAQ = OMEGAP+1.
+    public static let omegap = 0o3021
+    public static let omegaq = 0o3022
+    /// E6,1501. NEGUQ; ALLOWGTS = NEGUQ+1.
+    public static let neguq = 0o3101
+    public static let allowGts = 0o3102
+    /// E6,1507. Q-jerk magnitude at PI/2^7 rad/s³. QACCDOT = ACCDOTQ+1 (signed).
+    public static let accDotQ = 0o3107
+    public static let qAccDot = 0o3110
+    /// E6,1527. Descent engine pivot-to-CG at 8 ft.
+    public static let pivotToCG = 0o3127
+    /// E6,1530. 1JACC; 1JACCQ = 1JACC+1 at PI/4 rad/s².
+    public static let oneJetAcc = 0o3130
+    public static let oneJetAccQ = 0o3131
+    /// E6,1537. Q-axis offset acceleration, DP at PI/2 rad/s².
+    public static let aosQ = 0o3137
+    /// E6,1635. FINDCDUW / KALCMANU desired CDUs (PI radians, two's complement).
+    public static let cduxd = 0o3235
+    /// E6,1643. FINDCDUW desired body rates at PI/4 rad/s. OMEGAQD = OMEGAPD+1.
+    public static let omegaPD = 0o3243
+    public static let omegaQD = 0o3244
+    /// E6,1654. FINDCDUW thrust command (SM), half-unit after NORMUNIT.
+    public static let unfc2 = 0o3254
+    /// E6,1662. FINDCDUW window command (SM).
+    public static let unwc2 = 0o3262
     /// E7,1515. DVMON low-thrust pass counter.
     public static let dvcntr = 0o3515
     public static let lemMass = 0o1331
@@ -93,6 +126,10 @@ public enum Luminary099Erasable {
     public static let ttf8 = 0o3642
     /// E7,1441 TIG.
     public static let tig = 0o3441
+    /// E7,1520. SERVICER `R`. MUNRVG keeps this in SM at B24 while MUNFLAG is set.
+    public static let servicerR = 0o3520
+    /// E7,1526. SERVICER `V`. MUNRVG keeps this in SM at B7 m/cs.
+    public static let servicerV = 0o3526
     /// E7,1646 NIGNLOOP.
     public static let nignLoop = 0o3646
     /// Unswitched 01351. IGNALG = −1, BRAKQUAD = 0, APPRQUAD = 1, VERTICAL = 2.
@@ -108,6 +145,9 @@ public enum Luminary099Flag {
     public static let refsmflg = 47
     /// FLAGWRD2 bit 11. Set by DVMON when ABDELV exceeds DVTHRUSH.
     public static let steersw = 34
+    /// FLAGWRD5 bit 13. V65 SNUFFBIT: inhibit Q,R RCS during a DPS burn so GTS
+    /// owns pitch/roll. Without it, RCS and GTS stack after ZOOM and tumble.
+    public static let snuffer = 77
     public static let lmoonflg = 124
 
     public static func ecadr(decimalIndex: Int) -> Int {
@@ -133,6 +173,10 @@ public enum Luminary099NavScale {
     public static let refsmmatHalfUnit = 0.5
     /// Luminary `MUM 2DEC* 4.9027780 E8 B-30*`, m³/cs².
     public static let lunarMuMetersCubedPerCentisecondSquared = 4.9027780e8
+    /// `MUM` in SI, `(m/cs)² → (m/s)²`.
+    public static var lunarMuMetersCubedPerSecondSquared: Double {
+        lunarMuMetersCubedPerCentisecondSquared * 10_000.0
+    }
     /// GUIDINIT: `UNITZ` and `REFSMMAT` are both half-units, so `WM = 0.25 ω polar`.
     public static let guidinitMoonRateHalfUnits = refsmmatHalfUnit * refsmmatHalfUnit
 }
@@ -144,15 +188,32 @@ public enum Luminary099NavScale {
 /// state vector): X along RLS, Z horizontal east, Y = Z × X.
 ///
 /// IGNALG’s first `TDEC1` is `GET + ZOOMTIME` plus the MIDTOAV TIG lead.
-/// RIGN is the G-frame state at that epoch (`LAND + (RIGNX, 0, RIGNZ)` in SM).
-/// RN/VN are that RIGN state tagged at `TDEC1` so `LEMPREC` has dt = 0 and
-/// `|DDUM|` can fall under 8 cs without a tiny `INTEGRVS` (that WAITLIST-aborts
-/// 01204). `TIG = TDEC1 − ZOOMTIME` is then far enough ahead that MIDTOAV1’s
-/// `TIG − D29.9SEC` still exceeds `GET + TIMEDELT` after IGNALG/R60 (01703 if
-/// not) and BURNBABY’s TIG-35 `LONGCALL` has a positive dt. VN is inertial so
-/// `|CG(V − WM×R)| = VIGN` with GUIDINIT’s half-unit `WM`. The tabletop vehicle
-/// is still that TIG-minus-lead state (two-body coast with Luminary `MUM`).
+/// RN/VN are the tabletop **PDI** Kepler state at live GET (same place as the
+/// vehicle) so Average-G and TTF see the real range, not the RIGN epoch
+/// `lookahead` seconds downstream. Tagging RIGN at `TDEC1` made `LEMPREC`
+/// dt = 0 and IGNALG converge, but then TENDBRAK fired ~4 nmi out still
+/// hypersonic. `TIG = TDEC1 − ZOOMTIME` stays far enough ahead that MIDTOAV1
+/// and BURNBABY LONGCALL keep a positive dt. VN is inertial so
+/// `|CG(V − WM×R)| = VIGN` with GUIDINIT’s half-unit `WM`. The tabletop
+/// vehicle is that same PDI state in site ENU. Altitude and H-dot are
+/// spherical (`|R| − |RLS|`, `V · UNIT(R)`).
 public enum LMAGCNavState {
+    /// Body specific force in frozen SM for MUNRVG. ENU coincides with SM only
+    /// at the REFSMMAT epoch; later GET must go through RP-TO-R and REFSMMAT.
+    public static func specificForceSM(
+        body: LMVector3D,
+        attitude: LMQuaternion,
+        refsmmat: LMMatrix3,
+        timeCentiseconds: Double
+    ) -> LMVector3D {
+        let enu = attitude.rotated(body)
+        let (north, east, up) = moonFixedSiteBasis()
+        let moon = north * enu.x + east * enu.y + up * enu.z
+        let basic = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: timeCentiseconds)
+            .timesTranspose(moon)
+        return refsmmat.times(basic)
+    }
+
     public static func moonCenteredPositionMeters(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
         let (north, east, up) = moonFixedSiteBasis()
         return Luminary99CoordinatePadLoad.landingSiteMeters
@@ -244,29 +305,37 @@ public enum LMAGCNavState {
         pdiState(pipTimeCentiseconds: pipTimeCentiseconds).velocity
     }
 
+    /// Tabletop PDI: moon-fixed Kepler state look-ahead before RIGN, in site
+    /// north/east/up. RN/VN in `erasableWords` are that same Basic-Reference
+    /// PDI state at live GET.
     public static func vehicleState(
         timeCentiseconds: Double,
         attitude: LMQuaternion,
         massKilograms: Double
     ) -> LMVehicleStateSnapshot {
+        let rMoon = LuminaryMoonOrientation.rToRP(
+            pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds),
+            timeCentiseconds: timeCentiseconds
+        )
+        let vMoon = LuminaryMoonOrientation.referenceVelocityToMoonRelative(
+            inertialMetersPerCentisecond: pdiVelocityMetersPerCentisecond(
+                pipTimeCentiseconds: timeCentiseconds
+            ),
+            moonFixedPosition: rMoon,
+            timeCentiseconds: timeCentiseconds
+        ) * 100.0
         let (north, east, up) = moonFixedSiteBasis()
-        let rBasic = pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds)
-        let vBasic = pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: timeCentiseconds)
-        let rMoon = LuminaryMoonOrientation.rToRP(rBasic, timeCentiseconds: timeCentiseconds)
-        let offset = rMoon - landingSiteMeters()
-        let inertialMoon = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: timeCentiseconds).times(vBasic)
-        let moonRelative = inertialMoon
-            - LMVector3D(z: LuminaryMoonOrientation.moonRateRadiansPerCentisecond).cross(rMoon)
+        let delta = rMoon - landingSiteMeters()
         return LMVehicleStateSnapshot(
             positionMeters: LMVector3D(
-                x: offset.dot(north),
-                y: offset.dot(east),
-                z: rMoon.magnitude - landingSiteMeters().magnitude
+                x: delta.dot(north),
+                y: delta.dot(east),
+                z: delta.dot(up)
             ),
             velocityMetersPerSecond: LMVector3D(
-                x: moonRelative.dot(north) * 100,
-                y: moonRelative.dot(east) * 100,
-                z: moonRelative.dot(up) * 100
+                x: vMoon.dot(north),
+                y: vMoon.dot(east),
+                z: vMoon.dot(up)
             ),
             attitude: attitude,
             massKilograms: massKilograms
@@ -288,10 +357,9 @@ public enum LMAGCNavState {
         time1: Int
     ) -> [AGCErasableWord] {
         let timeCentiseconds = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
-        let tetCentiseconds = timeCentiseconds + Luminary99LandingPadLoad.ignalgLookaheadCentiseconds
-        let tet = AGCDoublePrecision.encode(value: tetCentiseconds, scale: 28)
-        let position = rignPositionMeters(pipTimeCentiseconds: timeCentiseconds)
-        let velocity = rignVelocityMetersPerCentisecond(pipTimeCentiseconds: timeCentiseconds)
+        let tet = AGCDoublePrecision.encode(value: timeCentiseconds, scale: 28)
+        let position = pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds)
+        let velocity = pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: timeCentiseconds)
         var words: [AGCErasableWord] = []
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.rn, meters: position))
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.vn, metersPerCentisecond: velocity))
@@ -324,7 +392,24 @@ public enum LMAGCNavState {
             ))
         }
         words.append(AGCErasableWord(ecadr: Luminary099Erasable.csmMass, value: 0))
+        words.append(contentsOf: cduWords(attitude: vehicle.attitude))
         return words
+    }
+
+    /// Seed IMU CDUs and CDUD to the tabletop 95° PDI attitude. Catch-up pulses
+    /// only run after the first sample, so leaving CDUX/Y/Z at 0 after boot
+    /// makes DAP see a 95° IMU error that never closes. NASA P/Q/R are sim
+    /// Z/X/Y, so the PDI rotation about sim X is CDUY, not CDUX.
+    private static func cduWords(attitude: LMQuaternion) -> [AGCErasableWord] {
+        let counts = LMIMUGimbalMap.cduCounts(from: attitude)
+        return [
+            AGCErasableWord(ecadr: Register.regCDUX.rawValue, value: counts.x),
+            AGCErasableWord(ecadr: Register.regCDUY.rawValue, value: counts.y),
+            AGCErasableWord(ecadr: Register.regCDUZ.rawValue, value: counts.z),
+            AGCErasableWord(ecadr: Luminary099Erasable.cduxd, value: counts.x),
+            AGCErasableWord(ecadr: Luminary099Erasable.cduxd + 1, value: counts.y),
+            AGCErasableWord(ecadr: Luminary099Erasable.cduxd + 2, value: counts.z)
+        ]
     }
 
     public static func lunarSphereFlags() -> [(ecadr: Int, bit: Int)] {
@@ -338,7 +423,7 @@ public enum LMAGCNavState {
         }
     }
 
-    /// Moon-relative VIGN in SM (local-vertical rate plus horizontal toward the site),
+    /// Moon-relative VIGN in SM (along `UNIT(R)` plus horizontal toward the site),
     /// plus GUIDINIT `WM × R` (`UNITZ` and `REFSMMAT` are both half-units).
     private static func inertialVelocitySM(rsm: LMVector3D, timeCentiseconds: Double) -> LMVector3D {
         let vign = Luminary99LandingPadLoad.vignMetersPerCentisecond

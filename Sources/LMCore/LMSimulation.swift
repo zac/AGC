@@ -143,7 +143,7 @@ public extension LMSourceReference {
         id: "luminary099-controlled-constants-504rm",
         title: "Luminary099 controlled constants 504RM",
         url: "https://ibiblio.org/apollo/listings/Luminary099/CONTROLLED_CONSTANTS.agc.html",
-        detail: "504RM 2DEC 1738090 B-29; MUM 2DEC* 4.9027780 E8 B-30* lunar GM m³/cs²."
+        detail: "504RM 2DEC 1738090 B-29; MUM 2DEC* 4.9027780 E8 B-30* lunar GM m³/cs²; DPSVEX VE +2.95588868E+3 m/s (MASSMON)."
     )
 
     static let luminaryFlagwordAssignments = LMSourceReference(
@@ -617,8 +617,16 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         self.dpsRollGimbalRadians = dpsRollGimbalRadians
     }
 
+    /// Height above the sphere through NASA RLS. Site-ENU `z` is the tangent
+    /// plane, which is below the LM at PDI range.
     public var altitudeMeters: Double {
-        positionMeters.z
+        let moon = LMAGCNavState.moonCenteredPositionMeters(from: self)
+        return moon.magnitude - LMAGCNavState.landingSiteMeters().magnitude
+    }
+
+    /// East of the landing site. Negative is uprange (PDI); positive is past.
+    public var downrangeMeters: Double {
+        positionMeters.y
     }
 
     /// Horizontal distance from the landing-site origin in the modeled local-vertical.
@@ -626,8 +634,15 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         hypot(positionMeters.x, positionMeters.y)
     }
 
+    /// Radial rate `V · UNIT(R)` in moon-fixed axes.
     public var verticalSpeedMetersPerSecond: Double {
-        velocityMetersPerSecond.z
+        let moon = LMAGCNavState.moonCenteredPositionMeters(from: self)
+        guard moon.magnitude > 0 else { return 0 }
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
+        let velocity = north * velocityMetersPerSecond.x
+            + east * velocityMetersPerSecond.y
+            + up * velocityMetersPerSecond.z
+        return velocity.dot(moon) / moon.magnitude
     }
 }
 
@@ -955,6 +970,7 @@ public actor LMSimulationRuntime {
         // Held AUTO / engine-arm / LR POS1 after V37. Applying CH31 AUTO
         // before V37E63E keeps PROG blank.
         await applyPoweredDescentPanel()
+        await enableLandingDAP()
         let prepared = await snapshot()
         lastDSKYVerb = prepared.agc.dsky.verb
         lastDSKYNoun = prepared.agc.dsky.noun
@@ -996,6 +1012,31 @@ public actor LMSimulationRuntime {
         for flag in LMAGCNavState.lunarSphereFlags() {
             await agcRuntime.setErasableBit(ecadr: flag.ecadr, bit: flag.bit)
         }
+        await enableLandingDAP()
+    }
+
+    /// Skip-R51 never runs IMUFINE. Clear IMODES33 bit 6 (DAP AUTO/HOLD
+    /// enabled) and set IMODES30 bit 9 (IMU operating) so DAPIDLER can
+    /// leave SHUTDOWN. Without that, T5 zeros CH5/CH6 every 100 ms.
+    /// V65 SNUFFBIT keeps Q,R RCS off so GTS is not stacked with jets
+    /// (AFTERTJ XTRANS). P64 FINDCDUW’s LAND−R switch still needs GTS-only:
+    /// clearing SNUFFBIT lets Q,R jets tumble through the window change.
+    private func enableLandingDAP() async {
+        let imodes33 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes33)
+        await agcRuntime.writeErasable(
+            ecadr: Luminary099Erasable.imodes33,
+            value: imodes33 & ~0o40
+        )
+        let imodes30 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes30)
+        await agcRuntime.writeErasable(
+            ecadr: Luminary099Erasable.imodes30,
+            value: imodes30 | 0o400
+        )
+        let snuffer = (
+            Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.snuffer),
+            Luminary099Flag.bit(decimalIndex: Luminary099Flag.snuffer)
+        )
+        await agcRuntime.setErasableBit(ecadr: snuffer.0, bit: snuffer.1)
     }
 
     public func readErasable(ecadr: Int) async -> Int {
@@ -1043,6 +1084,9 @@ public actor LMSimulationRuntime {
         }
         if !input.rawChannelInputs.isEmpty {
             await agcRuntime.enqueueInputs(input.rawChannelInputs)
+            if input.rawChannelInputs.contains(where: { $0.channel == 0o31 }) {
+                await enableLandingDAP()
+            }
         }
         if let descentRateInput = input.descentRateInput {
             descentRateChannel16 = descentRateInput.channel16Value
@@ -1059,39 +1103,58 @@ public actor LMSimulationRuntime {
                 await agcRuntime.sendPRO(pressed: pressed)
             }
         }
-        let sensorPulses = sensorFeedback.increments(
-            specificForceBody: lastSpecificForceBody,
-            attitude: vehicleState.attitude,
-            deltaTime: deltaTime
-        )
-        if !sensorPulses.isEmpty {
-            await agcRuntime.enqueueInputs(sensorPulses)
-        }
         elapsedTimeSeconds += deltaTime
-        let agc = await agcRuntime.step(cycles: cycles)
-        let channelDeltas = traceDeltas(from: agc.channelTrace)
-        var commands = LMVehicleSnapshot(agcSnapshot: agc)
-        throttleState.advance(
-            thrustRegister: agc.registers.thrust,
-            driveActive: commands.thrustDriveActive,
-            deltaTime: deltaTime
+        let slices = LMRCSSampling.slices(
+            totalCycles: cycles,
+            deltaTime: deltaTime,
+            cyclesPerSecond: configuration.agcCyclesPerSecond.value
         )
-        let engineOn = commands.mainEngineOn && !commands.mainEngineOff
-        commands = commands.withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
-        lastSpecificForceBody = LMDynamics.specificForceBody(
-            state: vehicleState,
-            commands: commands,
-            configuration: configuration
-        )
-        vehicleState = LMDynamics.propagate(
-            state: vehicleState,
-            commands: commands,
-            configuration: configuration,
-            deltaTime: deltaTime
-        )
+        var agc = await agcRuntime.snapshot()
+        var rcsOut0 = 0
+        var rcsOut1 = 0
+        for slice in slices {
+            let sensorPulses = sensorFeedback.increments(
+                specificForceBody: lastSpecificForceBody,
+                attitude: vehicleState.attitude,
+                deltaTime: slice.deltaTime
+            )
+            if !sensorPulses.isEmpty {
+                await agcRuntime.enqueueInputs(sensorPulses)
+            }
+            agc = await agcRuntime.step(cycles: slice.cycles)
+            var commands = LMVehicleSnapshot(agcSnapshot: agc)
+            rcsOut0 |= commands.out0
+            rcsOut1 |= commands.out1
+            throttleState.advance(
+                thrustRegister: agc.registers.thrust,
+                driveActive: commands.thrustDriveActive,
+                deltaTime: slice.deltaTime
+            )
+            let engineOn = commands.mainEngineOn && !commands.mainEngineOff
+            commands = commands.withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
+            lastSpecificForceBody = LMDynamics.specificForceBody(
+                state: vehicleState,
+                commands: commands,
+                configuration: configuration
+            )
+            vehicleState = LMDynamics.propagate(
+                state: vehicleState,
+                commands: commands,
+                configuration: configuration,
+                deltaTime: slice.deltaTime
+            )
+        }
         lastDSKYVerb = agc.dsky.verb
         lastDSKYNoun = agc.dsky.noun
-        let snapshot = makeSnapshot(agc: agc, channelDeltas: channelDeltas)
+        let engineOn = {
+            let raw = LMVehicleSnapshot(agcSnapshot: agc)
+            return raw.mainEngineOn && !raw.mainEngineOff
+        }()
+        let commands = LMVehicleSnapshot(agcSnapshot: agc)
+            .withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
+            .withRCSBits(out0: rcsOut0, out1: rcsOut1)
+        let channelDeltas = traceDeltas(from: agc.channelTrace)
+        let snapshot = makeSnapshot(agc: agc, commands: commands, channelDeltas: channelDeltas)
         traceSamples.append(snapshot.traceSample)
         if traceSamples.count > 2_048 {
             traceSamples.removeFirst(traceSamples.count - 2_048)
@@ -1099,14 +1162,18 @@ public actor LMSimulationRuntime {
         return snapshot
     }
 
-    private func makeSnapshot(agc: AGCSnapshot, channelDeltas: [AGCChannelTraceEntry]) -> LMSimulationSnapshot {
+    private func makeSnapshot(
+        agc: AGCSnapshot,
+        commands: LMVehicleSnapshot? = nil,
+        channelDeltas: [AGCChannelTraceEntry]
+    ) -> LMSimulationSnapshot {
         let engineOn = {
             let raw = LMVehicleSnapshot(agcSnapshot: agc)
             return raw.mainEngineOn && !raw.mainEngineOff
         }()
-        let commands = LMVehicleSnapshot(agcSnapshot: agc)
+        let resolved = commands ?? LMVehicleSnapshot(agcSnapshot: agc)
             .withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
-        let sourceStatus = makeSourceStatus(commands: commands)
+        let sourceStatus = makeSourceStatus(commands: resolved)
         let sensorState = LMSensorSnapshot(
             radarInput: radarInput,
             rotationalHandControllerInput: rhcInput,
@@ -1116,7 +1183,7 @@ public actor LMSimulationRuntime {
             timeSeconds: elapsedTimeSeconds,
             agc: agc,
             vehicleState: vehicleState,
-            vehicleCommands: commands,
+            vehicleCommands: resolved,
             sourceStatus: sourceStatus,
             channelDeltas: channelDeltas
         )
@@ -1124,7 +1191,7 @@ public actor LMSimulationRuntime {
             timeSeconds: elapsedTimeSeconds,
             agc: agc,
             vehicleState: vehicleState,
-            vehicleCommands: commands,
+            vehicleCommands: resolved,
             sensorState: sensorState,
             channelTrace: agc.channelTrace,
             sourceStatus: sourceStatus,
@@ -1165,6 +1232,10 @@ public actor LMSimulationRuntime {
 }
 
 enum LMDynamics {
+    /// Contact is a landing only near the site at a non-orbital speed.
+    static let landingContactRangeMeters = 2_000.0
+    static let landingContactSpeedMetersPerSecond = 50.0
+
     static func propagate(
         state: LMVehicleStateSnapshot,
         commands: LMVehicleSnapshot,
@@ -1176,12 +1247,14 @@ enum LMDynamics {
         let (pitch, roll) = advancedGimbal(state: state, commands: commands, deltaTime: deltaTime)
         var forceWorld = LMVector3D.zero
         var torqueBody = LMVector3D.zero
+        var expendedForceNewtons = 0.0
 
         if commands.mainEngineOn,
            !commands.mainEngineOff,
            let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
             let bodyForce = LMDPSGimbalMap.thrustDirectionBody(pitchRadians: pitch, rollRadians: roll) * thrust
             forceWorld = forceWorld + state.attitude.rotated(bodyForce)
+            expendedForceNewtons += thrust
             if let mass = state.massKilograms, mass > 0 {
                 torqueBody = torqueBody + LMInertiaMap.descentEnginePivotBodyMeters(massKilograms: mass).cross(bodyForce)
             }
@@ -1191,16 +1264,40 @@ enum LMDynamics {
             guard let jet = configuration.rcsJets[command.jet] else { continue }
             let bodyForce = jet.thrustDirectionBody.value.normalized() * jet.thrustNewtons.value
             forceWorld = forceWorld + state.attitude.rotated(bodyForce)
+            expendedForceNewtons += jet.thrustNewtons.value
             torqueBody = torqueBody + jet.positionMeters.value.cross(bodyForce)
         }
 
-        var acceleration = LMVector3D(z: -configuration.lunarGravityMetersPerSecondSquared.value)
-        if let mass = state.massKilograms, mass > 0 {
-            acceleration = acceleration + forceWorld / mass
-        }
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
+        let site = LMAGCNavState.landingSiteMeters()
+        var moonPosition = LMAGCNavState.moonCenteredPositionMeters(from: state)
+        var moonVelocity = north * state.velocityMetersPerSecond.x
+            + east * state.velocityMetersPerSecond.y
+            + up * state.velocityMetersPerSecond.z
 
-        var velocity = state.velocityMetersPerSecond + acceleration * deltaTime
-        var position = state.positionMeters + velocity * deltaTime
+        let radiusSquared = moonPosition.dot(moonPosition)
+        var acceleration = radiusSquared > 0
+            ? moonPosition * (
+                -Luminary099NavScale.lunarMuMetersCubedPerSecondSquared
+                    / (radiusSquared * sqrt(radiusSquared))
+            )
+            : LMVector3D.zero
+        if let mass = state.massKilograms, mass > 0 {
+            let thrustMoon = north * (forceWorld.x / mass)
+                + east * (forceWorld.y / mass)
+                + up * (forceWorld.z / mass)
+            acceleration = acceleration + thrustMoon
+        }
+        // Moon-fixed axes rotate at OMEGMOON. Average-G+ENU PIPA is a
+        // non-rotating SM; these terms keep the plant on the same Kepler
+        // arc as R-TO-RP. They are not the P64 5 km RGU lead.
+        let omega = LMVector3D(z: LuminaryMoonOrientation.moonRateRadiansPerSecond)
+        acceleration = acceleration
+            - omega.cross(moonVelocity) * 2.0
+            - omega.cross(omega.cross(moonPosition))
+
+        moonVelocity = moonVelocity + acceleration * deltaTime
+        moonPosition = moonPosition + moonVelocity * deltaTime
         var angularVelocity = state.angularVelocityRadiansPerSecond
 
         let inertia = configuration.diagonalInertiaKilogramMetersSquared?.value
@@ -1227,12 +1324,43 @@ enum LMDynamics {
         )
 
         var landed = state.isLanded
-        if position.z <= 0 {
-            position = LMVector3D(x: position.x, y: position.y, z: 0)
-            if velocity.z < 0 {
-                velocity = LMVector3D(x: velocity.x, y: velocity.y, z: 0)
+        let siteRadius = site.magnitude
+        if moonPosition.magnitude <= siteRadius, siteRadius > 0 {
+            moonPosition = moonPosition.normalized() * siteRadius
+            let radial = moonPosition.normalized()
+            let radialSpeed = moonVelocity.dot(radial)
+            if radialSpeed < 0 {
+                moonVelocity = moonVelocity - radial * radialSpeed
             }
-            landed = true
+            let delta = moonPosition - site
+            let range = hypot(delta.dot(north), delta.dot(east))
+            if range <= landingContactRangeMeters,
+               moonVelocity.magnitude <= landingContactSpeedMetersPerSecond {
+                landed = true
+            }
+        }
+
+        let delta = moonPosition - site
+        let position = LMVector3D(
+            x: delta.dot(north),
+            y: delta.dot(east),
+            z: delta.dot(up)
+        )
+        let velocity = LMVector3D(
+            x: moonVelocity.dot(north),
+            y: moonVelocity.dot(east),
+            z: moonVelocity.dot(up)
+        )
+
+        let burned = LMDPSThrottleMap.burnedMassKilograms(
+            forceNewtons: expendedForceNewtons,
+            deltaTime: deltaTime
+        )
+        let massKilograms = state.massKilograms.map { mass in
+            max(mass - burned, 1.0)
+        }
+        let propellantMassKilograms = state.propellantMassKilograms.map { propellant in
+            max(propellant - burned, 0)
         }
 
         return LMVehicleStateSnapshot(
@@ -1240,8 +1368,8 @@ enum LMDynamics {
             velocityMetersPerSecond: velocity,
             attitude: attitude,
             angularVelocityRadiansPerSecond: angularVelocity,
-            massKilograms: state.massKilograms,
-            propellantMassKilograms: state.propellantMassKilograms,
+            massKilograms: massKilograms,
+            propellantMassKilograms: propellantMassKilograms,
             isLanded: landed,
             dpsPitchGimbalRadians: pitch,
             dpsRollGimbalRadians: roll

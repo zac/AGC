@@ -229,6 +229,20 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         )
     }
 
+    /// Keep engine/gimbal words, replace CH5/CH6 (frame-union of DAP pulses).
+    public func withRCSBits(out0: Int, out1: Int) -> LMVehicleSnapshot {
+        LMVehicleSnapshot(
+            out0: out0,
+            out1: out1,
+            outputChannel11: outputChannel11,
+            outputChannel12: outputChannel12,
+            outputChannel13: outputChannel13,
+            outputChannel14: outputChannel14,
+            inputChannel16: inputChannel16,
+            commandedThrustNewtons: dps.commandedThrustNewtons
+        )
+    }
+
     public var sourceReferences: [LMSourceReference] {
         var references = (rcsJets.map(\.source.reference)
             + discreteGroups.map(\.source.reference)

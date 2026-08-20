@@ -18,6 +18,17 @@ public enum LMDPSThrottleMap {
     public static let fmaxPulseUnits = 3467.0
     public static let fmaxNewtons = 4.34546769e4
 
+    /// Luminary `DPSVEX` comment: VE (DPS) `+2.95588868E+3` m/s. SERVICER
+    /// MASSMON uses `dm = m ΔV / VE`, so the plant burns `F dt / VE`.
+    public static let dpsExhaustVelocityMetersPerSecond = 2.95588868e3
+
+    public static func burnedMassKilograms(forceNewtons: Double, deltaTime: Double) -> Double {
+        guard forceNewtons > 0, deltaTime > 0, dpsExhaustVelocityMetersPerSecond > 0 else {
+            return 0
+        }
+        return forceNewtons / dpsExhaustVelocityMetersPerSecond * deltaTime
+    }
+
     /// FRATE is 32 pulse units per centisecond.
     public static let pulseUnitsPerCentisecond = 32.0
 
@@ -86,6 +97,22 @@ public enum LMDPSGimbalMap {
     }
 
     /// Body thrust direction after pitch about sim +X (NASA Q) and roll about sim +Y (NASA R).
+    /// |dα_Q/dt| at the current thrust with the gimbal driving at 0.2 deg/s.
+    /// Matches 1/ACCS `D(ALPHA)/DT = T L / I * D(DELTA)/DT`.
+    public static func qJerkMagnitudeRadiansPerSecondCubed(
+        massKilograms: Double,
+        thrustNewtons: Double
+    ) -> Double {
+        let inertiaQ = LMInertiaMap.diagonalInertiaKilogramMetersSquared(
+            massKilograms: massKilograms
+        ).x
+        guard inertiaQ > 0 else { return 0 }
+        return thrustNewtons
+            * LMInertiaMap.descentEnginePivotToCGMeters(massKilograms: massKilograms)
+            * radiansPerSecond
+            / inertiaQ
+    }
+
     public static func thrustDirectionBody(pitchRadians: Double, rollRadians: Double) -> LMVector3D {
         let sinPitch = sin(pitchRadians)
         let cosPitch = cos(pitchRadians)
@@ -307,4 +334,31 @@ public enum LMInertiaAxis: String, Sendable {
     case p
     case q
     case r
+}
+
+/// Sample CH5/CH6 at Luminary T5 so DAP min-pulses are not lost at the end
+/// of a 0.25 s GET step.
+public enum LMRCSSampling {
+    /// P-AXIS_RCS_AUTOPILOT T5 period, seconds.
+    public static let dapPeriodSeconds = 0.010
+
+    public static func slices(
+        totalCycles: UInt64,
+        deltaTime: Double,
+        cyclesPerSecond: Double
+    ) -> [(cycles: UInt64, deltaTime: Double)] {
+        guard deltaTime > 0, cyclesPerSecond > 0 else { return [] }
+        if totalCycles == 0 {
+            return [(0, deltaTime)]
+        }
+        let sliceCycles = max(1, UInt64((dapPeriodSeconds * cyclesPerSecond).rounded(.down)))
+        var remaining = totalCycles
+        var result: [(UInt64, Double)] = []
+        while remaining > 0 {
+            let cycles = min(remaining, sliceCycles)
+            result.append((cycles, deltaTime * Double(cycles) / Double(totalCycles)))
+            remaining -= cycles
+        }
+        return result
+    }
 }

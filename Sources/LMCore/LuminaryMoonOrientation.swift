@@ -26,6 +26,10 @@ public enum LuminaryMoonOrientation {
     public static let bsuboRevolutions = 0.0651201393
     /// `OMEGMOON 2DEC* 2.66169947 E-8 B+23*` radians per centisecond.
     public static let moonRateRadiansPerCentisecond = 2.66169947e-8
+    /// Sidereal lunar rate in SI, along moon-fixed +Z.
+    public static var moonRateRadiansPerSecond: Double {
+        moonRateRadiansPerCentisecond * 100.0
+    }
 
     public static func moonMatrix(timeCentiseconds: Double) -> LMMatrix3 {
         let b = newAngle(
@@ -84,6 +88,17 @@ public enum LuminaryMoonOrientation {
         let omega = LMVector3D(z: moonRateRadiansPerCentisecond)
         let inertialMoonFixed = velocityMetersPerCentisecond + omega.cross(moonFixedPosition)
         return moonMatrix(timeCentiseconds: timeCentiseconds).timesTranspose(inertialMoonFixed)
+    }
+
+    /// Inverse of `moonRelativeVelocityToReference`.
+    public static func referenceVelocityToMoonRelative(
+        inertialMetersPerCentisecond: LMVector3D,
+        moonFixedPosition: LMVector3D,
+        timeCentiseconds: Double
+    ) -> LMVector3D {
+        let inertialMoonFixed = moonMatrix(timeCentiseconds: timeCentiseconds).times(inertialMetersPerCentisecond)
+        let omega = LMVector3D(z: moonRateRadiansPerCentisecond)
+        return inertialMoonFixed - omega.cross(moonFixedPosition)
     }
 
     /// `NEWANGLE`: `X = frac(X0 + XDOT*(T + TEPHEM))` revolutions B0.

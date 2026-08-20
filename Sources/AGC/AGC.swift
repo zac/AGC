@@ -353,6 +353,14 @@ public actor AGCRuntime {
         components.engine.writeErasableECADR(ecadr, current | mask)
     }
 
+    /// Clear bit `bit` (AGC numbering, 1 = LSB … 15 = sign) at `ecadr`.
+    public func clearErasableBit(ecadr: Int, bit: Int) {
+        let clampedBit = min(max(bit, 1), 15)
+        let mask = 1 << (clampedBit - 1)
+        let current = components.engine.readErasableECADR(ecadr)
+        components.engine.writeErasableECADR(ecadr, current & ~mask)
+    }
+
 
     public func setRotationalHandControllerInput(_ input: AGCRotationalHandControllerInput) async {
         components.externalInput.enqueue([
