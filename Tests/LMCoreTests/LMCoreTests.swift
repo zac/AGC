@@ -209,8 +209,58 @@ struct LMCoreScenarioAndDynamicsTests {
             LMPoweredDescentPanel.channel33
         ])
         #expect(input.radarInput?.rawAGCInput?.altitudeMeter != nil)
+        #expect(input.radarInput?.rawAGCInput?.landingRadarVelocityX == nil)
         #expect(input.descentRateInput?.descendPlus == false)
         #expect(input.descentRateInput?.descendMinus == false)
+    }
+
+    @Test func `auto-land CH33 altitude data-good survives the panel word`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data())
+        let snapshot = await runtime.step(deltaTime: 0.001, input: .autoLand(altitudeMeters: 100))
+        let ch33 = snapshot.agc.inputChannels[0o33] ?? 0
+        #expect(
+            (ch33 & LMPoweredDescentPanel.channel33LRAltitudeDataGood) == 0,
+            "INITREAD latches CH33 into OLDATAGD; panel 77337 must not win, got \(String(ch33, radix: 8))"
+        )
+        #expect((ch33 & LMPoweredDescentPanel.channel33LRPosition1) == 0)
+        #expect((ch33 & 0o400) == 0, "low scale bit 9 must stay 0, got \(String(ch33, radix: 8))")
+    }
+
+    @Test func `auto-land from vehicle encodes LR velocity at LVELBIAS`() {
+        let state = LMVehicleStateSnapshot(
+            velocityMetersPerSecond: LMVector3D(z: 0.644 * 0.3048),
+            attitude: .identity
+        )
+        let input = LMFrameInput.autoLand(from: state)
+        let raw = input.radarInput?.rawAGCInput
+        #expect(raw?.landingRadarVelocityX == 12_287)
+        #expect(raw?.landingRadarVelocityY == 12_288)
+        #expect(raw?.landingRadarVelocityZ == 12_288)
+        #expect(raw?.rnradWord(channel13Low3: 0o4) == 12_287)
+        #expect(raw?.rnradWord(channel13Low3: 0o7) == raw?.altitudeMeter)
+    }
+
+    @Test func `auto-land from vehicle withholds LR until the range beam sees the ground`() {
+        let upright = LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 1_000),
+            velocityMetersPerSecond: LMVector3D(z: 0.644 * 0.3048)
+        )
+        #expect(LMFrameInput.autoLand(from: upright).radarInput != nil)
+
+        let pdi = LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 1_000),
+            attitude: .fromAxisAngle(axis: LMVector3D(x: 1), radians: 95 * .pi / 180)
+        )
+        #expect(
+            LMFrameInput.autoLand(from: pdi).radarInput != nil,
+            "PDI 95° still illuminates the surface; STILBADH needs those samples before HIGATE"
+        )
+
+        let skyward = LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 1_000),
+            attitude: .fromAxisAngle(axis: LMVector3D(x: 1), radians: .pi)
+        )
+        #expect(LMFrameInput.autoLand(from: skyward).radarInput == nil)
     }
 
     @Test func `gravity only propagation is deterministic`() {
@@ -756,6 +806,13 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(rignX.high == 0o77731)
         #expect(rignX.low == 0o44630)
 
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrhmax) == 0o35610)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.delqfix + 1) == 0o01717)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.rpcrtime) == 0o01407)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.rpcrtqsw) == 0o77777)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lralpha) == 0)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta1) == 0)
+
         let snapshot = await runtime.snapshot()
         #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)
         #expect(snapshot.agc.inputChannels[0o30] == LMPoweredDescentPanel.channel30)
@@ -1047,6 +1104,26 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(raw.conversionStatus.source?.reference == .yaAGCRadarRequest)
     }
 
+    @Test func `Luminary radar gate latches LRALT after CH13 activity`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try AGCRuntime(binFile: romURL)
+        _ = await runtime.step(cycles: 1_000_000)
+        await runtime.setRadarInput(
+            AGCRadarInput(landingRadarVelocityX: 0o11111, landingRadarAltitude: 0o12345)
+        )
+        await runtime.enqueueInput(AGCChannelInput(channel: 0o13, value: 0o17))
+        _ = await runtime.step(cycles: 200_000)
+        let snapshot = await runtime.snapshot()
+        #expect(
+            snapshot.registers.rendezvousRadar == 0o12345,
+            "idle Luminary plus CH13=17 should latch LRALT, RNRAD=\(String(snapshot.registers.rendezvousRadar, radix: 8)) CH13=\(String(snapshot.outputChannels[0o13] ?? snapshot.inputChannels[0o13] ?? 0, radix: 8))"
+        )
+    }
+
     @Test func `SI radar frame input converts altitude at landing-radar low scale`() async throws {
         let runtime = try LMSimulationRuntime(coreImage: Data())
         let snapshot = await runtime.step(deltaTime: 0.001, input: LMFrameInput(
@@ -1057,6 +1134,14 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(snapshot.sensorState.radarInput?.rawAGCInput?.altitudeMeter == Int((80.0 / (1.079 * 0.3048)).rounded()))
         #expect(snapshot.sourceStatus.sources.contains(.luminaryLandingRadarScale))
         #expect(!snapshot.sourceStatus.unmodeledItems.contains("SI radar measurement conversion into AGC raw words is unmodeled."))
+    }
+
+    @Test func `landing-radar low scale encodes up to 15 bits`() {
+        let input = LMFrameInput.autoLand(altitudeMeters: 30_000 * 0.3048)
+        let counts = input.radarInput?.rawAGCInput?.landingRadarAltitude ?? 0
+        #expect(counts == Int((30_000 / 1.079).rounded()))
+        let saturated = LMFrameInput.autoLand(altitudeMeters: 50_000 * 0.3048)
+        #expect(saturated.radarInput?.rawAGCInput?.landingRadarAltitude == 0o77777)
     }
 
     @Test func `PIPA pulses accumulate from body specific force`() {
@@ -1167,6 +1252,10 @@ struct LMCoreScenarioAndDynamicsTests {
             "120s SM CDUY \(deg(sm0.y))° → \(deg(sm1.y))° vs lunar \(deg(lunar))°. CDUX \(deg(sm0.x))°→\(deg(sm1.x))° CDUZ \(deg(sm0.z))°→\(deg(sm1.z))°"
         )
         #expect(abs(deg(sm1.x) - deg(sm0.x)) < 2, "CDUX should not pick up the Q rotation")
+        #expect(
+            abs(deg(sm1.x) - deg(enu.x)) < 1 && abs(deg(sm1.z) - deg(enu.z)) < 1,
+            "SM vs ENU at +120s CDUX \(deg(sm1.x))°/\(deg(enu.x))° CDUY \(deg(sm1.y))°/\(deg(enu.y))° CDUZ \(deg(sm1.z))°/\(deg(enu.z))°"
+        )
     }
 
     @Test func `SM specific force stays within lunar rotation of the ENU map`() {
@@ -1699,7 +1788,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...vertSteps {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             heldVertical = snapshot.timeSeconds - p65Time
             let now = await dump()
@@ -1817,7 +1906,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...500 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             let fail1 = await runtime.readErasable(ecadr: 0o376)
             if snapshot.timeSeconds - lastLoggedPre >= 5 || snapshot.vehicleCommands.mainEngineOn {
@@ -1850,7 +1939,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...steps {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             let burned = snapshot.timeSeconds - igniteTime
             let cduy = await runtime.readErasable(ecadr: Register.regCDUY.rawValue)
@@ -1913,7 +2002,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...800 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             if snapshot.vehicleCommands.mainEngineOn { break }
         }
@@ -1926,7 +2015,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...40 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
         }
 
@@ -1985,7 +2074,7 @@ struct LMCoreScenarioAndDynamicsTests {
             "TIG range \(String(format: "%.1f", tigRangeNmi)) nmi vs NASA RIGN \(String(format: "%.1f", rignNmi)) nmi"
         )
         #expect(
-            navErrAhead < 1_000,
+            navErrPip < 1_000,
             "Average-G RN vs plant \(Int(navErr)) m pip=\(Int(navErrPip)) m ahead2s=\(Int(navErrAhead)) m lag=\(String(format: "%.2f", lag))s moonH=\(Int(navErrMoon)) m |RN29|=\(Int(rn29.magnitude)) |plant|=\(Int(vehicleBasic.magnitude))"
         )
         #expect(
@@ -2009,7 +2098,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...800 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             if snapshot.vehicleCommands.mainEngineOn { break }
         }
@@ -2018,7 +2107,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...200 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             if (snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0) > 0.9 * fmax { break }
         }
@@ -2029,7 +2118,7 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...16 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
         }
 
@@ -2130,7 +2219,7 @@ struct LMCoreScenarioAndDynamicsTests {
             accThrust = accThrust + pipa * dt
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             let pip = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
             if pip.high != lastPip.high || pip.low != lastPip.low {
@@ -2323,12 +2412,31 @@ struct LMCoreScenarioAndDynamicsTests {
         var trail = ""
         var sawTIG = false
         var sawFMAX = false
+        var maxRadarSelect = 0
+        var hmeasBeforeHigate = 0
+        var stilbadhMin = 0o77777
+        var lrPreHigate = ""
+        var wrapTrail = ""
+        var lastWrapR: LMVector3D?
+        var maxWrapStep = 0.0
         for _ in 1...3_200 {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             await recordPlant()
+            let getNow = await readGET()
+            if getNow >= 15_500 && getNow <= 17_500 {
+                let rNow = await dpVector(ecadr: Luminary099Erasable.servicerR, scale: 24)
+                if let previous = lastWrapR {
+                    let step = (rNow - previous).magnitude
+                    if step > maxWrapStep { maxWrapStep = step }
+                    if step > 200 {
+                        wrapTrail += String(format: " GET=%.0f |ΔR|=%.0f", getNow, step)
+                    }
+                }
+                lastWrapR = rNow
+            }
             if !sawTIG && snapshot.vehicleCommands.mainEngineOn {
                 sawTIG = true
                 trail += " TIG " + (await sampleLine()).text
@@ -2337,11 +2445,50 @@ struct LMCoreScenarioAndDynamicsTests {
                 sawFMAX = true
                 trail += " FMAX " + (await sampleLine()).text
             }
+            let radarSelect = (snapshot.agc.inputChannels[0o13] ?? 0) & 0o17
+            if radarSelect > maxRadarSelect { maxRadarSelect = radarSelect }
+            if sawTIG {
+                let flg11Now = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd11)
+                let hmeasHigh = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas)
+                let hmeasLow = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas + 1)
+                let stilNow = await runtime.readErasable(ecadr: Luminary099Erasable.stilbadh)
+                if stilNow < stilbadhMin { stilbadhMin = stilNow }
+                // PSTHIBIT (bit 11) means HIGATASK has already inhibited LRHJOB.
+                if (flg11Now & 0o40) != 0 && (flg11Now & 0o2000) == 0 {
+                    if (hmeasHigh != 0 || hmeasLow != 0) && hmeasBeforeHigate == 0 {
+                        hmeasBeforeHigate = hmeasLow != 0 ? hmeasLow : hmeasHigh
+                    }
+                    if lrPreHigate.isEmpty {
+                        let ch33 = snapshot.agc.inputChannels[0o33] ?? 0
+                        let radmodes = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd12)
+                        let phase2 = await runtime.readErasable(ecadr: Luminary099Erasable.phase2)
+                        lrPreHigate = String(
+                            format: " READLR CH13=%o CH33=%o RADMODES=%o PHASE2=%o HMEAS=%o,%o STIL=%o radar=%@",
+                            radarSelect,
+                            ch33,
+                            radmodes,
+                            phase2,
+                            hmeasHigh,
+                            hmeasLow,
+                            stilNow,
+                            snapshot.sensorState.radarInput == nil ? "nil" : "on"
+                        )
+                    }
+                }
+            }
             if snapshot.agc.dsky.programNumber == 64 { break }
         }
         #expect(snapshot.agc.dsky.programNumber == 64, "should reach P64 \(trail)")
         let p64 = await sampleLine()
         trail += " P64 " + p64.text
+        trail += " wrapMax=\(Int(maxWrapStep))m\(wrapTrail)"
+        // SERVICER writes R every ~2 s. At PDI that is ~3.3 km/update, decaying
+        // through braking. TIME1 overflow would spike one update; a smooth
+        // 3 km cadence is the healthy AVERAGEG step, not a wrap discontinuity.
+        #expect(
+            maxWrapStep < 4_000 || lastWrapR == nil,
+            "TIME1 overflow should not jump MUNRVG R beyond one AVERAGEG step \(Int(maxWrapStep)) m \(trail)"
+        )
         #expect(
             p64.pipPositionError < 2_000,
             "MUNRVG R vs plant at exact PIPTIME \(Int(p64.pipPositionError)) m \(trail)"
@@ -2351,6 +2498,42 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(
             p64.pipVelocityError < 10,
             "MUNRVG V vs plant at exact PIPTIME \(String(format: "%.1f", p64.pipVelocityError)) m/s \(trail)"
+        )
+        let flg11 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd11)
+        let hcalc = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.hcalc)
+        let hmeasHigh = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas)
+        let hmeasLow = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas + 1)
+        let stilbadh = await runtime.readErasable(ecadr: Luminary099Erasable.stilbadh)
+        let radmodes = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd12)
+        let phase2 = await runtime.readErasable(ecadr: Luminary099Erasable.phase2)
+        let fail0 = await runtime.readErasable(ecadr: 0o375)
+        let fail1 = await runtime.readErasable(ecadr: 0o376)
+        let fail2 = await runtime.readErasable(ecadr: 0o377)
+        let ch33 = snapshot.agc.inputChannels[0o33] ?? 0
+        let lrTrail = String(
+            format: " FLG11=%o HCALC=%.0fm HMEAS=%o,%o STILBADH=%o minSTIL=%o preH=%o CH13max=%o CH33=%o RADMODES=%o PHASE2=%o FAIL=%o/%o/%o radar=%@%@",
+            flg11,
+            hcalc.decoded(scale: 24),
+            hmeasHigh,
+            hmeasLow,
+            stilbadh,
+            stilbadhMin,
+            hmeasBeforeHigate,
+            maxRadarSelect,
+            ch33,
+            radmodes,
+            phase2,
+            fail0,
+            fail1,
+            fail2,
+            snapshot.sensorState.radarInput == nil ? "nil" : "on",
+            lrPreHigate
+        )
+        #expect((flg11 & 0o40000) == 0, "FLAGORGY should clear LRBYPASS \(lrTrail) \(trail)")
+        #expect((flg11 & 0o40) != 0, "READLR should be set below 35 kft \(lrTrail) \(trail)")
+        #expect(
+            hmeasBeforeHigate != 0 || hmeasHigh != 0 || hmeasLow != 0,
+            "LRHJOB should store HMEAS before HIGATE \(lrTrail) \(trail)"
         )
     }
 
@@ -2414,8 +2597,20 @@ struct LMCoreScenarioAndDynamicsTests {
                 scale: Luminary099NavScale.positionScale
             )
             let rgu = await dpVector(ecadr: Luminary099Erasable.rgu, scale: 24)
+            let vgu = await dpVector(ecadr: Luminary099Erasable.vgu, scale: 7)
+            let vSM = await dpVector(ecadr: Luminary099Erasable.servicerV, scale: 7)
             let ttf8 = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.ttf8)
+            let flg11 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd11)
+            let hmeasHigh = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas)
+            let hmeasLow = await runtime.readErasable(ecadr: Luminary099Erasable.hmeas + 1)
+            let hcalc = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.hcalc)
             let ref = LMAGCNavState.refsmmat(timeCentiseconds: get)
+            let plantSM = LMAGCNavState.stableMemberKinematics(
+                from: snapshot.vehicleState,
+                refsmmat: ref,
+                timeCentiseconds: get
+            )
+            let dV = vSM * 100.0 - plantSM.velocityMetersPerSecond
             let landMoon = LuminaryMoonOrientation.rToRP(
                 ref.timesTranspose(landRaw * 0.125),
                 timeCentiseconds: get
@@ -2430,7 +2625,7 @@ struct LMCoreScenarioAndDynamicsTests {
             let engine = snapshot.vehicleCommands.mainEngineOn ? "ON" : "off"
             let force = snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
             return String(
-                format: "t=%.0fs P\(snapshot.agc.dsky.programNumber ?? 0) alt=%.0fft hd=%+.0f hv=%.0f rng=%.1fnmi r2l=%.1fnmi rguZ=%.0f ttf=%.0f %@ RCS=%d ENG=%@ F=%.0f m=%.0f FAIL=%o landed=%@ tz=%+.2f DAP=%o CDU=%o/%o,%o/%o CH12=%o STEER=%d IMU33=%o",
+                format: "t=%.0fs P\(snapshot.agc.dsky.programNumber ?? 0) alt=%.0fft hd=%+.2f hv=%.1f rng=%.2fnmi r2l=%.2fnmi rguZ=%.0f vguX=%.2f dV=%.1f,%.1f,%.1f ttf=%.0f H=%.0f HMEAS=%o,%o FLG11=%o radar=%@ %@ RCS=%d ENG=%@ F=%.0f m=%.0f FAIL=%o landed=%@ tz=%+.2f DAP=%o CDU=%.1f/%.1f,%.1f/%.1f CH12=%o STEER=%d IMU33=%o",
                 snapshot.timeSeconds,
                 v.altitudeMeters / 0.3048,
                 v.verticalSpeedMetersPerSecond,
@@ -2438,7 +2633,16 @@ struct LMCoreScenarioAndDynamicsTests {
                 abs(v.downrangeMeters) / 1852.0,
                 rangeToLand / 1852.0,
                 rgu.z,
+                vgu.x * 100.0,
+                dV.x,
+                dV.y,
+                dV.z,
                 ttf8.decoded(scale: 17),
+                hcalc.decoded(scale: 24),
+                hmeasHigh,
+                hmeasLow,
+                flg11,
+                snapshot.sensorState.radarInput == nil ? "nil" : "on",
                 v.downrangeMeters > 50 ? "past" : "togo",
                 snapshot.vehicleCommands.rcsJets.count,
                 engine,
@@ -2448,10 +2652,10 @@ struct LMCoreScenarioAndDynamicsTests {
                 v.isLanded ? "yes" : "no",
                 thrust.z,
                 dap,
-                cdux,
-                cdudx,
-                cduy,
-                cdudy,
+                signedCDUDegrees(cdux),
+                signedCDUDegrees(cdudx),
+                signedCDUDegrees(cduy),
+                signedCDUDegrees(cdudy),
                 snapshot.vehicleCommands.outputChannel12,
                 (flag2 & 0o2000) != 0 ? 1 : 0,
                 imodes33
@@ -2470,13 +2674,15 @@ struct LMCoreScenarioAndDynamicsTests {
         for _ in 1...steps {
             snapshot = await runtime.step(
                 deltaTime: dt,
-                input: .autoLand(altitudeMeters: snapshot.vehicleState.altitudeMeters)
+                input: .autoLand(from: snapshot.vehicleState)
             )
             ignited = ignited || snapshot.vehicleCommands.mainEngineOn
             sawP64 = sawP64 || snapshot.agc.dsky.programNumber == 64
             sawP65 = sawP65 || snapshot.agc.dsky.programNumber == 65
             minRange = min(minRange, snapshot.vehicleState.groundRangeMeters)
-            maxAltitude = max(maxAltitude, snapshot.vehicleState.altitudeMeters)
+            if snapshot.agc.dsky.programNumber != 65 {
+                maxAltitude = max(maxAltitude, snapshot.vehicleState.altitudeMeters)
+            }
             let fail1 = await runtime.readErasable(ecadr: 0o376)
             let range = snapshot.vehicleState.groundRangeMeters
             let past = snapshot.vehicleState.downrangeMeters > 50

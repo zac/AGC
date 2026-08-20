@@ -15,15 +15,20 @@ public struct LMRadarMeasurementInput: Equatable, Sendable, Codable {
     public let rangeMeters: Double?
     public let altitudeMeters: Double?
     public let rangeRateMetersPerSecond: Double?
+    /// NASA body (NB) velocity for LRVELX/Y/Z. Zero pad-load antenna
+    /// angles make the velocity beams the NASA body axes.
+    public let nasaBodyVelocityMetersPerSecond: LMVector3D?
 
     public init(
         rangeMeters: Double? = nil,
         altitudeMeters: Double? = nil,
-        rangeRateMetersPerSecond: Double? = nil
+        rangeRateMetersPerSecond: Double? = nil,
+        nasaBodyVelocityMetersPerSecond: LMVector3D? = nil
     ) {
         self.rangeMeters = rangeMeters
         self.altitudeMeters = altitudeMeters
         self.rangeRateMetersPerSecond = rangeRateMetersPerSecond
+        self.nasaBodyVelocityMetersPerSecond = nasaBodyVelocityMetersPerSecond
     }
 }
 
@@ -104,12 +109,35 @@ public struct LMFrameInput: Equatable, Sendable {
     /// This is the auto-land button frame: no invented rates, no extra keys.
     public static func autoLand(
         altitudeMeters: Double,
+        nasaBodyVelocityMetersPerSecond: LMVector3D? = nil,
         rotationalHandController: LMRotationalHandControllerInput? = nil,
         descendPlus: Bool = false,
         descendMinus: Bool = false
     ) -> LMFrameInput {
         LMFrameInput(
-            radarInput: .measurement(LMRadarMeasurementInput(altitudeMeters: max(0, altitudeMeters))),
+            radarInput: .measurement(LMRadarMeasurementInput(
+                altitudeMeters: max(0, altitudeMeters),
+                nasaBodyVelocityMetersPerSecond: nasaBodyVelocityMetersPerSecond
+            )),
+            rotationalHandControllerInput: rotationalHandController,
+            descentRateInput: LMDescentRateControlInput(
+                descendPlus: descendPlus,
+                descendMinus: descendMinus
+            ),
+            rawChannelInputs: LMPoweredDescentPanel.channelInputs
+        )
+    }
+
+    /// Auto-land with R12 radar when the range beam sees the ground.
+    /// HMEAS is slant range along `HBEAMANT`, not nadir altitude.
+    public static func autoLand(
+        from state: LMVehicleStateSnapshot,
+        rotationalHandController: LMRotationalHandControllerInput? = nil,
+        descendPlus: Bool = false,
+        descendMinus: Bool = false
+    ) -> LMFrameInput {
+        LMFrameInput(
+            radarInput: LMLandingRadar.measurement(from: state).map { .measurement($0) },
             rotationalHandControllerInput: rotationalHandController,
             descentRateInput: LMDescentRateControlInput(
                 descendPlus: descendPlus,

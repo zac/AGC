@@ -60,10 +60,44 @@ public struct AGCSnapshot: Equatable, Sendable {
 public struct AGCRadarInput: Equatable, Sendable {
     public let rendezvousRadar: Int?
     public let altitudeMeter: Int?
+    /// RNRAD word for LRVELX after CH13 activity is cleared (select 4).
+    public let landingRadarVelocityX: Int?
+    /// RNRAD word for LRVELY (select 5).
+    public let landingRadarVelocityY: Int?
+    /// RNRAD word for LRVELZ (select 6).
+    public let landingRadarVelocityZ: Int?
+    /// RNRAD word for LRALT (select 7). Falls back to `altitudeMeter`.
+    public let landingRadarAltitude: Int?
+    /// CH33 bit 9: 1 = LR altitude high scale (LRSCK ×4).
+    public let landingRadarAltitudeHighScale: Bool
 
-    public init(rendezvousRadar: Int? = nil, altitudeMeter: Int? = nil) {
+    public init(
+        rendezvousRadar: Int? = nil,
+        altitudeMeter: Int? = nil,
+        landingRadarVelocityX: Int? = nil,
+        landingRadarVelocityY: Int? = nil,
+        landingRadarVelocityZ: Int? = nil,
+        landingRadarAltitude: Int? = nil,
+        landingRadarAltitudeHighScale: Bool = false
+    ) {
         self.rendezvousRadar = rendezvousRadar
         self.altitudeMeter = altitudeMeter
+        self.landingRadarVelocityX = landingRadarVelocityX
+        self.landingRadarVelocityY = landingRadarVelocityY
+        self.landingRadarVelocityZ = landingRadarVelocityZ
+        self.landingRadarAltitude = landingRadarAltitude
+        self.landingRadarAltitudeHighScale = landingRadarAltitudeHighScale
+    }
+
+    /// CH13 bits 1–3 after the radar-activity bit is cleared at gate end.
+    public func rnradWord(channel13Low3: Int) -> Int? {
+        switch channel13Low3 & 0o7 {
+        case 0o4: return landingRadarVelocityX
+        case 0o5: return landingRadarVelocityY
+        case 0o6: return landingRadarVelocityZ
+        case 0o7: return landingRadarAltitude ?? altitudeMeter
+        default: return rendezvousRadar
+        }
     }
 }
 
@@ -410,8 +444,9 @@ public actor AGCRuntime {
 
         radarIO.onRequestRadarData = { [weak state] in
             guard let state, let input = radarInputBox.snapshot() else { return }
-            if let rendezvousRadar = input.rendezvousRadar {
-                state.erasableMemory[0][Register.regRNRAD.rawValue] = rendezvousRadar & 0o77777
+            let select = state.inputChannels[0o13] & 0o7
+            if let rnrad = input.rnradWord(channel13Low3: select) {
+                state.erasableMemory[0][Register.regRNRAD.rawValue] = rnrad & 0o77777
             }
             if let altitudeMeter = input.altitudeMeter {
                 state.erasableMemory[0][Register.regALTM.rawValue] = altitudeMeter & 0o77777

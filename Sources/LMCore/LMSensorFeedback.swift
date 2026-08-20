@@ -23,6 +23,31 @@ public enum LMSensorScale {
         1.079 * 0.3048,
         source: .luminaryLandingRadarScale
     )
+    /// LRSCK `DDOUBL` twice. High-scale quantum is 4.316 ft/bit.
+    public static let landingRadarAltitudeHighScaleMultiplier = 4.0
+    /// Luminary `HISCALIM DEC 460` comment: 2481.7 ft.
+    public static let landingRadarAltitudeHighScaleThresholdMeters = 2481.7 * 0.3048
+
+    /// LVELBIAS count at zero Doppler (CONTROLLED_CONSTANTS DEC −12288).
+    public static let landingRadarVelocityBiasCounts = 12_288
+
+    /// LRVELX −0.644 ft/s per bit.
+    public static let landingRadarVelocityXFeetPerSecondPerBit = LMSourceValue(
+        -0.644,
+        source: .luminaryLandingRadarScale
+    )
+
+    /// LRVELY 1.212 ft/s per bit.
+    public static let landingRadarVelocityYFeetPerSecondPerBit = LMSourceValue(
+        1.212,
+        source: .luminaryLandingRadarScale
+    )
+
+    /// LRVELZ 0.8668 ft/s per bit.
+    public static let landingRadarVelocityZFeetPerSecondPerBit = LMSourceValue(
+        0.8668,
+        source: .luminaryLandingRadarScale
+    )
 }
 
 /// NASA IMU 3-2-1 CDUs in the sim body frame. Luminary P/Q/R are
@@ -32,6 +57,10 @@ public enum LMSensorScale {
 public enum LMIMUGimbalMap {
     public static func nasaBody(fromSim sim: LMVector3D) -> LMVector3D {
         LMVector3D(x: sim.z, y: sim.x, z: sim.y)
+    }
+
+    public static func sim(fromNasa nasa: LMVector3D) -> LMVector3D {
+        LMVector3D(x: nasa.y, y: nasa.z, z: nasa.x)
     }
 
     /// Luminary CALCGA / FLESHPOT (OIM=XYZ): CDUX outer, CDUY inner, CDUZ middle.
@@ -308,16 +337,62 @@ struct LMSensorFeedbackState {
     }
 }
 
+/// Landing-radar geometry for R12. Pad-load LRALPHA/BETA are left at 0, so
+/// antenna axes are NASA body and HBEAMNB = HBEAMANT.
+enum LMLandingRadar {
+    /// Luminary `CONTROLLED_CONSTANTS` `HBEAMANT`, half-unit in antenna coords.
+    static let hBeamAntenna = LMVector3D(x: -0.4687018041, y: 0, z: -0.1741224271)
+    /// Skip data-good when the range beam points at the sky. 95° PDI still
+    /// sees the ground (`towardGround` ≈ 0.27). A 0.4 gate only opened while
+    /// pitching to P64, so STILBADH reached 0 without a third sample to store
+    /// HMEAS before HIGATE. At 50 kft `LRHMAX` zeros the altitude update, so
+    /// PDI slant cannot yank R.
+    static let minTowardGround = 0.2
+
+    static func measurement(from state: LMVehicleStateSnapshot) -> LMRadarMeasurementInput? {
+        let beamWorld = state.attitude.rotated(
+            LMIMUGimbalMap.sim(fromNasa: hBeamAntenna.normalized())
+        )
+        let towardGround = -beamWorld.z
+        guard towardGround > minTowardGround else { return nil }
+        return LMRadarMeasurementInput(
+            altitudeMeters: max(0, state.altitudeMeters / towardGround),
+            nasaBodyVelocityMetersPerSecond: LMIMUGimbalMap.nasaBody(
+                fromSim: state.attitude.inverseRotated(state.velocityMetersPerSecond)
+            )
+        )
+    }
+}
+
 enum LMRadarConversion {
     static func rawInput(from measurement: LMRadarMeasurementInput) -> AGCRadarInput {
-        AGCRadarInput(
+        let altitude = measurement.altitudeMeters.map { word(meters: $0) }
+        let velocity = measurement.nasaBodyVelocityMetersPerSecond
+        return AGCRadarInput(
             rendezvousRadar: measurement.rangeMeters.map { word(meters: $0) },
-            altitudeMeter: measurement.altitudeMeters.map { word(meters: $0) }
+            altitudeMeter: altitude,
+            landingRadarVelocityX: velocity.map {
+                velocityWord($0.x, feetPerSecondPerBit: LMSensorScale.landingRadarVelocityXFeetPerSecondPerBit.value)
+            },
+            landingRadarVelocityY: velocity.map {
+                velocityWord($0.y, feetPerSecondPerBit: LMSensorScale.landingRadarVelocityYFeetPerSecondPerBit.value)
+            },
+            landingRadarVelocityZ: velocity.map {
+                velocityWord($0.z, feetPerSecondPerBit: LMSensorScale.landingRadarVelocityZFeetPerSecondPerBit.value)
+            },
+            landingRadarAltitude: altitude
         )
     }
 
     private static func word(meters: Double, scale: Double = LMSensorScale.landingRadarAltitudeMetersPerBit.value) -> Int {
         let bits = Int((meters / scale).rounded())
-        return max(0, min(0o37777, bits))
+        return max(0, min(0o77777, bits))
+    }
+
+    private static func velocityWord(_ metersPerSecond: Double, feetPerSecondPerBit: Double) -> Int {
+        guard feetPerSecondPerBit != 0 else { return LMSensorScale.landingRadarVelocityBiasCounts }
+        let feetPerSecond = metersPerSecond / 0.3048
+        let counts = Double(LMSensorScale.landingRadarVelocityBiasCounts) + feetPerSecond / feetPerSecondPerBit
+        return max(0, min(0o37777, Int(counts.rounded())))
     }
 }

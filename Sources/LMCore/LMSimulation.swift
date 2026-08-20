@@ -87,7 +87,7 @@ public extension LMSourceReference {
         id: "luminary099-landing-radar-low-scale",
         title: "Luminary099 landing radar low-scale altitude",
         url: "https://github.com/chrislgarry/Apollo-11/blob/master/Luminary099/LANDING_RADAR_RUPT.agc",
-        detail: "Landing radar low-scale altitude is 1.079 feet per bit."
+        detail: "Landing radar low-scale altitude is 1.079 feet per bit. Velocity beams are LVELBIAS 12288 with VX/Y/Z −0.644 / 1.212 / 0.8668 ft/s per bit (CONTROLLED_CONSTANTS)."
     )
 
     static let luminaryThrottleConstants = LMSourceReference(
@@ -819,6 +819,8 @@ public actor LMSimulationRuntime {
     private var p63CrewHandshake = LMP63CrewHandshake()
     private var lastDSKYVerb = "  "
     private var lastDSKYNoun = "  "
+    /// CH12 bit 13 commands LR POS2; CH33 bits 6/7 are the antenna discretes.
+    private var landingRadarInPosition2 = false
 
     public init(
         binFile: URL,
@@ -875,6 +877,7 @@ public actor LMSimulationRuntime {
         p63CrewHandshake = LMP63CrewHandshake()
         lastDSKYVerb = "  "
         lastDSKYNoun = "  "
+        landingRadarInPosition2 = false
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -962,10 +965,14 @@ public actor LMSimulationRuntime {
         }
         await loadP63PadLoads()
         await loadPDINavState()
+        // V37 keys must run through `step` so the plant coasts with TIME2.
+        // AGC-only stepping here left GET ~4 s ahead of the frozen PDI state;
+        // the first AVERAGEG PGUIDE then integrated that gap and MUNRVG R
+        // stayed ~6 km downrange of the vehicle through P64.
         for key in DSKYScript.v37e63e.keys {
             if Task.isCancelled { break }
             await agcRuntime.sendDSKYKey(key)
-            _ = await agcRuntime.step(cycles: cyclesPerKey)
+            _ = await step(cycles: cyclesPerKey)
         }
         // Held AUTO / engine-arm / LR POS1 after V37. Applying CH31 AUTO
         // before V37E63E keeps PROG blank.
@@ -1083,15 +1090,43 @@ public actor LMSimulationRuntime {
             await setRotationalHandControllerInput(rhcInput)
         }
         if !input.rawChannelInputs.isEmpty {
-            await agcRuntime.enqueueInputs(input.rawChannelInputs)
+            // CH33 is the LR discretes word. The held panel value has data-good
+            // off; INITREAD latches that into OLDATAGD and DGCHECK then rejects
+            // the sample. Never enqueue the panel CH33 — applyLandingRadarChannel33
+            // writes the live POS/scale/data-good word once per frame.
+            let withoutRadarDiscretes = input.rawChannelInputs.filter { $0.channel != 0o33 }
+            if !withoutRadarDiscretes.isEmpty {
+                await agcRuntime.enqueueInputs(withoutRadarDiscretes)
+            }
             if input.rawChannelInputs.contains(where: { $0.channel == 0o31 }) {
                 await enableLandingDAP()
             }
         }
+        await applyLandingRadarChannel33()
         if let descentRateInput = input.descentRateInput {
             descentRateChannel16 = descentRateInput.channel16Value
             await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: descentRateInput.channel16Value))
         }
+    }
+
+    /// CH33 bits 5/8 are inverted LR data-good; bits 6/7 are antenna POS1/POS2.
+    /// Auto-land holds the panel, including a POS1 discrete; HIGATJOB’s CH12
+    /// bit 13 must still be allowed to move the antenna or R12 rejects POS2.
+    /// This is the only CH33 writer on the auto-land frame path so INITREAD
+    /// cannot sample the panel's not-good word into OLDATAGD.
+    private func applyLandingRadarChannel33() async {
+        var value = LMPoweredDescentPanel.channel33
+        if radarInput?.rawAGCInput?.altitudeMeter != nil {
+            value &= ~LMPoweredDescentPanel.channel33LRAltitudeDataGood
+        }
+        if radarInput?.rawAGCInput?.landingRadarVelocityX != nil {
+            value &= ~LMPoweredDescentPanel.channel33LRVelocityDataGood
+        }
+        if landingRadarInPosition2 {
+            value |= LMPoweredDescentPanel.channel33LRPosition1
+            value &= ~LMPoweredDescentPanel.channel33LRPosition2
+        }
+        await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o33, value: value))
     }
 
     private func stepExact(cycles: UInt64, deltaTime: Double) async -> LMSimulationSnapshot {
@@ -1113,10 +1148,9 @@ public actor LMSimulationRuntime {
         var rcsOut0 = 0
         var rcsOut1 = 0
         for slice in slices {
-            // ENU-as-SM: inertial PIPA + ENU CDUs left braking (P64 at 169 nmi,
-            // CDUY error +88°). Inertial PIPA + SM CDUs tumbled GTS after ZOOM
-            // (CDUY error −148°). Do not re-wire until both maps stay bounded
-            // through P64.
+            // ENU-as-SM: inertial PIPA + ENU CDUs still leaves braking after
+            // ZOOM (P64 at 173 nmi, CDUY error +88°) even with the V37 plant
+            // coasting. SM CDUs tumble GTS. Keep both maps on ENU.
             let sensorPulses = sensorFeedback.increments(
                 specificForceBody: lastSpecificForceBody,
                 attitude: vehicleState.attitude,
@@ -1129,6 +1163,11 @@ public actor LMSimulationRuntime {
             var commands = LMVehicleSnapshot(agcSnapshot: agc)
             rcsOut0 |= commands.out0
             rcsOut1 |= commands.out1
+            if !landingRadarInPosition2,
+               (commands.outputChannel12 & LMPoweredDescentPanel.channel12LRPosition2Command) != 0 {
+                landingRadarInPosition2 = true
+                await applyLandingRadarChannel33()
+            }
             throttleState.advance(
                 thrustRegister: agc.registers.thrust,
                 driveActive: commands.thrustDriveActive,

@@ -100,11 +100,31 @@ public enum Luminary99LandingPadLoad {
         words.append(sp(Luminary099Erasable.highcrit, 2_348.0, scale: 14))
         words.append(contentsOf: vector(Luminary099Erasable.v2fg, [-0.009144, 0, 0], scale: 10))
         words.append(contentsOf: dp(Luminary099Erasable.tauvert, 1_000, scale: 14))
+        // NASA LM5/4.5.1-1 octal. LRALPHA/BETA stay 0 so antenna = NASA body;
+        // SETPOS then leaves HBEAMNB = HBEAMANT and the Doppler converter
+        // can feed NB velocity without an antenna-frame rotation.
+        words.append(contentsOf: [
+            AGCErasableWord(ecadr: Luminary099Erasable.delqfix, value: 0o00000),
+            AGCErasableWord(ecadr: Luminary099Erasable.delqfix + 1, value: 0o01717),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrvmax, value: 0o01414),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrvf, value: 0o00116),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvz, value: 0o11463),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvy, value: 0o11463),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvx, value: 0o11463),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvfz, value: 0o06315),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvfy, value: 0o06315),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvfx, value: 0o06315),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwvff, value: 0o03146),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrhmax, value: 0o35610),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrwh, value: 0o13146)
+        ])
         words.append(sp(Luminary099Erasable.zoomtime, zoomTimeCentiseconds, scale: 14))
         words.append(sp(Luminary099Erasable.tendbrak, 6_200, scale: 17))
         words.append(sp(Luminary099Erasable.tendappr, 1_200, scale: 17))
         words.append(sp(Luminary099Erasable.delttfap, -11_000, scale: 17))
         words.append(sp(Luminary099Erasable.leadtime, -220, scale: 17))
+        words.append(AGCErasableWord(ecadr: Luminary099Erasable.rpcrtime, value: 0o01407))
+        words.append(AGCErasableWord(ecadr: Luminary099Erasable.rpcrtqsw, value: 0o77777))
         words.append(contentsOf: Luminary99CoordinatePadLoad.erasableWords())
         return words
     }
@@ -185,8 +205,22 @@ public enum LMPoweredDescentPanel {
     public static let channel30 = 0o37777 & ~0o1424
     /// CH31: MODE CONTROL AUTO (bit 14 = 0); ATT HOLD off; no RHC/THC.
     public static let channel31 = 0o57777
-    /// CH33: landing-radar antenna in position 1 (bit 6 = 0). P63 waits on this.
-    public static let channel33 = 0o77737
+    /// CH33: landing-radar antenna in position 1 (bit 6 = 0) and low scale
+    /// (bit 9 = 0). Data-good bits 5/8 stay 1 until `applyLandingRadarChannel33`
+    /// sees a measurement. P63 waits on POS1. R12 SCALECHK treats bit 9 as ALTSCBIT.
+    public static let channel33 = 0o77337
+    /// Inverted CH33 bit 5: 0 = LR altitude data good.
+    public static let channel33LRAltitudeDataGood = 0o20
+    /// Inverted CH33 bit 8: 0 = LR velocity data good.
+    public static let channel33LRVelocityDataGood = 0o200
+    /// Inverted CH33 bit 6: 0 = LR antenna in position 1.
+    public static let channel33LRPosition1 = 0o40
+    /// Inverted CH33 bit 7: 0 = LR antenna in position 2.
+    public static let channel33LRPosition2 = 0o100
+    /// CH33 bit 9: 1 = LR altitude high scale (`ALTSCBIT`).
+    public static let channel33LRAltitudeHighScale = 0o400
+    /// CH12 bit 13: command LR antenna to position 2.
+    public static let channel12LRPosition2Command = 0o10000
 
     public static var channelInputs: [AGCChannelInput] {
         [

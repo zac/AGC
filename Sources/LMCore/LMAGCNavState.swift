@@ -111,11 +111,33 @@ public enum Luminary099Erasable {
     public static let highcrit = 0o2507
     public static let v2fg = 0o2510
     public static let tauvert = 0o2516
+    /// E5,1520. LR altitude reasonableness (DELQFIX), meters B24.
+    public static let delqfix = 0o2520
+    public static let lralpha = 0o2522
+    public static let lrbeta1 = 0o2523
+    public static let lralpha2 = 0o2524
+    public static let lrbeta2 = 0o2525
+    public static let lrvmax = 0o2526
+    public static let lrvf = 0o2527
+    public static let lrwvz = 0o2530
+    public static let lrwvy = 0o2531
+    public static let lrwvx = 0o2532
+    public static let lrwvfz = 0o2533
+    public static let lrwvfy = 0o2534
+    public static let lrwvfx = 0o2535
+    public static let lrwvff = 0o2536
+    /// E7,1420. SERVICER bypasses every altitude update when H > LRHMAX.
+    public static let lrhmax = 0o3420
+    public static let lrwh = 0o3421
     public static let zoomtime = 0o3422
     public static let tendbrak = 0o3423
     public static let tendappr = 0o3424
     public static let delttfap = 0o3425
     public static let leadtime = 0o3426
+    /// E7,1427. HIGATCHK: TTF/8 + RPCRTIME; NASA 62 s, same octal as TENDBRAK.
+    public static let rpcrtime = 0o3427
+    /// E7,1430. HIGATCHK angle gate. NASA −1 (77777) trips POS2 at P64 start.
+    public static let rpcrtqsw = 0o3430
     /// E7,1560 PIPTIME1. IGNALG copies TAT here before DDUM.
     public static let pipTime1 = 0o3560
     /// E7,1626 VGU.
@@ -124,6 +146,18 @@ public enum Luminary099Erasable {
     public static let land = 0o3634
     /// E7,1642 TTF/8.
     public static let ttf8 = 0o3642
+    /// Unswitched FLAGWRD11 / LRSTAT. READLR bit 6, NOLRREAD bit 10, LRBYPASS bit 15.
+    public static let flagwrd11 = 0o107
+    /// Unswitched FLAGWRD12 / RADMODES. LRPOSBIT is bit 6, ALTSCBIT is bit 9.
+    public static let flagwrd12 = 0o110
+    /// Unswitched PHASE2. READACCS skips R10/LRHTASK while this is nonzero.
+    public static let phase2 = 0o755
+    /// E7,1534. SERVICER HCALC, meters B24.
+    public static let hcalc = 0o3534
+    /// E7,1654. LRH HMEAS, DP 1.079 ft/bit. Below ~17 kft the count lives in +1.
+    public static let hmeas = 0o3654
+    /// E7,1674. Consecutive-good altitude samples remaining.
+    public static let stilbadh = 0o3674
     /// E7,1441 TIG.
     public static let tig = 0o3441
     /// E7,1520. SERVICER `R`. MUNRVG keeps this in SM at B24 while MUNFLAG is set.
