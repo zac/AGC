@@ -342,18 +342,24 @@ struct LMSensorFeedbackState {
 enum LMLandingRadar {
     /// Luminary `CONTROLLED_CONSTANTS` `HBEAMANT`, half-unit in antenna coords.
     static let hBeamAntenna = LMVector3D(x: -0.4687018041, y: 0, z: -0.1741224271)
-    /// Skip data-good when the range beam points at the sky. 95° PDI still
-    /// sees the ground (`towardGround` ≈ 0.27). A 0.4 gate only opened while
-    /// pitching to P64, so STILBADH reached 0 without a third sample to store
-    /// HMEAS before HIGATE. At 50 kft `LRHMAX` zeros the altitude update, so
-    /// PDI slant cannot yank R.
+    /// Skip data-good when the range beam points at the sky. Against the
+    /// vehicle's local vertical, 95° PDI sees the ground at `towardGround`
+    /// ≈ 0.59, so this gate only closes when the beam really is skyward.
     static let minTowardGround = 0.2
 
     static func measurement(from state: LMVehicleStateSnapshot) -> LMRadarMeasurementInput? {
         let beamWorld = state.attitude.rotated(
             LMIMUGimbalMap.sim(fromNasa: hBeamAntenna.normalized())
         )
-        let towardGround = -beamWorld.z
+        // Project onto the vehicle's own local vertical, not the site's. Site
+        // ENU is a tangent plane pinned at RLS; at PDI the LM is 21° of lunar
+        // arc uprange of it, so `-beamWorld.z` overstates the slant range by
+        // 2.2x (56.7 km against a true 25.3 km).
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
+        let beamMoon = north * beamWorld.x + east * beamWorld.y + up * beamWorld.z
+        let moon = LMAGCNavState.moonCenteredPositionMeters(from: state)
+        guard moon.magnitude > 0 else { return nil }
+        let towardGround = -beamMoon.dot(moon.normalized())
         guard towardGround > minTowardGround else { return nil }
         return LMRadarMeasurementInput(
             altitudeMeters: max(0, state.altitudeMeters / towardGround),
