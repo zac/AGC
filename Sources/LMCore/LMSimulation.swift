@@ -584,6 +584,76 @@ public struct LMVehicleConfiguration: Equatable, Sendable, Codable {
     )
 }
 
+public enum LMFlightOutcome: String, Equatable, Sendable, Codable {
+    case inFlight
+    case softLanding
+    case hardLanding
+    case crashed
+
+    public var isTerminal: Bool { self != .inFlight }
+    public var isIntactLanding: Bool { self == .softLanding || self == .hardLanding }
+}
+
+public struct LMSurfaceContactSnapshot: Equatable, Sendable, Codable {
+    public let groundRangeMeters: Double
+    public let horizontalSpeedMetersPerSecond: Double
+    public let verticalSpeedMetersPerSecond: Double
+    public let tiltRadians: Double
+
+    public init(
+        groundRangeMeters: Double,
+        horizontalSpeedMetersPerSecond: Double,
+        verticalSpeedMetersPerSecond: Double,
+        tiltRadians: Double
+    ) {
+        self.groundRangeMeters = groundRangeMeters
+        self.horizontalSpeedMetersPerSecond = horizontalSpeedMetersPerSecond
+        self.verticalSpeedMetersPerSecond = verticalSpeedMetersPerSecond
+        self.tiltRadians = tiltRadians
+    }
+
+    public var flightOutcome: LMFlightOutcome {
+        LMLandingContactCriteria.classify(self)
+    }
+}
+
+/// Apollo 12 descent dispersion report figure 3 plots the LM landing-gear
+/// constraint as 4 ft/s maximum horizontal velocity, with maximum vertical
+/// velocity decreasing linearly from 10 ft/s at zero horizontal velocity to
+/// 7 ft/s at 4 ft/s horizontal velocity. Section 5.12 gives the nominal
+/// automatic touchdown as 0.008 ft/s horizontal and 3 ft/s vertical; section
+/// 5.9 gives a 6-degree pitch constraint.
+public enum LMLandingContactCriteria {
+    public static let softHorizontalSpeedMetersPerSecond = 1.0 * 0.3048
+    public static let softVerticalSpeedMetersPerSecond = 4.0 * 0.3048
+    public static let softTiltRadians = 2.0 * .pi / 180.0
+    public static let maximumHorizontalSpeedMetersPerSecond = 4.0 * 0.3048
+    public static let maximumTiltRadians = 6.0 * .pi / 180.0
+
+    public static func maximumVerticalSpeedMetersPerSecond(
+        horizontalSpeedMetersPerSecond: Double
+    ) -> Double {
+        let horizontalFeetPerSecond = horizontalSpeedMetersPerSecond / 0.3048
+        return max(0, 10.0 - 0.75 * horizontalFeetPerSecond) * 0.3048
+    }
+
+    public static func classify(_ contact: LMSurfaceContactSnapshot) -> LMFlightOutcome {
+        guard contact.horizontalSpeedMetersPerSecond <= maximumHorizontalSpeedMetersPerSecond,
+              contact.verticalSpeedMetersPerSecond <= maximumVerticalSpeedMetersPerSecond(
+                  horizontalSpeedMetersPerSecond: contact.horizontalSpeedMetersPerSecond
+              ),
+              contact.tiltRadians <= maximumTiltRadians
+        else { return .crashed }
+
+        if contact.horizontalSpeedMetersPerSecond <= softHorizontalSpeedMetersPerSecond,
+           contact.verticalSpeedMetersPerSecond <= softVerticalSpeedMetersPerSecond,
+           contact.tiltRadians <= softTiltRadians {
+            return .softLanding
+        }
+        return .hardLanding
+    }
+}
+
 public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public let positionMeters: LMVector3D
     public let velocityMetersPerSecond: LMVector3D
@@ -592,6 +662,8 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public let massKilograms: Double?
     public let propellantMassKilograms: Double?
     public let isLanded: Bool
+    public let flightOutcome: LMFlightOutcome
+    public let surfaceContact: LMSurfaceContactSnapshot?
     public let dpsPitchGimbalRadians: Double
     public let dpsRollGimbalRadians: Double
 
@@ -603,6 +675,8 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         massKilograms: Double? = nil,
         propellantMassKilograms: Double? = nil,
         isLanded: Bool = false,
+        flightOutcome: LMFlightOutcome? = nil,
+        surfaceContact: LMSurfaceContactSnapshot? = nil,
         dpsPitchGimbalRadians: Double = 0,
         dpsRollGimbalRadians: Double = 0
     ) {
@@ -612,7 +686,10 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         self.angularVelocityRadiansPerSecond = angularVelocityRadiansPerSecond
         self.massKilograms = massKilograms
         self.propellantMassKilograms = propellantMassKilograms
-        self.isLanded = isLanded
+        let resolvedOutcome = flightOutcome ?? (isLanded ? .softLanding : .inFlight)
+        self.flightOutcome = resolvedOutcome
+        self.surfaceContact = surfaceContact
+        self.isLanded = resolvedOutcome.isIntactLanding
         self.dpsPitchGimbalRadians = dpsPitchGimbalRadians
         self.dpsRollGimbalRadians = dpsRollGimbalRadians
     }
@@ -1351,17 +1428,13 @@ public actor LMSimulationRuntime {
 }
 
 enum LMDynamics {
-    /// Contact is a landing only near the site at a non-orbital speed.
-    static let landingContactRangeMeters = 2_000.0
-    static let landingContactSpeedMetersPerSecond = 50.0
-
     static func propagate(
         state: LMVehicleStateSnapshot,
         commands: LMVehicleSnapshot,
         configuration: LMVehicleConfiguration,
         deltaTime: Double
     ) -> LMVehicleStateSnapshot {
-        guard deltaTime > 0, !state.isLanded else { return state }
+        guard deltaTime > 0, !state.flightOutcome.isTerminal else { return state }
 
         let (pitch, roll) = advancedGimbal(state: state, commands: commands, deltaTime: deltaTime)
         var forceWorld = LMVector3D.zero
@@ -1442,20 +1515,32 @@ enum LMDynamics {
             deltaTime: deltaTime
         )
 
-        var landed = state.isLanded
+        var flightOutcome = state.flightOutcome
+        var surfaceContact = state.surfaceContact
         let siteRadius = site.magnitude
         if moonPosition.magnitude <= siteRadius, siteRadius > 0 {
             moonPosition = moonPosition.normalized() * siteRadius
             let radial = moonPosition.normalized()
             let radialSpeed = moonVelocity.dot(radial)
+            let tangentialVelocity = moonVelocity - radial * radialSpeed
+            let bodyUpSite = attitude.rotated(LMVector3D(z: 1)).normalized()
+            let bodyUpMoon = (
+                north * bodyUpSite.x
+                    + east * bodyUpSite.y
+                    + up * bodyUpSite.z
+            ).normalized()
+            let tiltCosine = min(max(bodyUpMoon.dot(radial), -1), 1)
+            let delta = moonPosition - site
+            let contact = LMSurfaceContactSnapshot(
+                groundRangeMeters: hypot(delta.dot(north), delta.dot(east)),
+                horizontalSpeedMetersPerSecond: tangentialVelocity.magnitude,
+                verticalSpeedMetersPerSecond: max(0, -radialSpeed),
+                tiltRadians: acos(tiltCosine)
+            )
+            surfaceContact = contact
+            flightOutcome = contact.flightOutcome
             if radialSpeed < 0 {
                 moonVelocity = moonVelocity - radial * radialSpeed
-            }
-            let delta = moonPosition - site
-            let range = hypot(delta.dot(north), delta.dot(east))
-            if range <= landingContactRangeMeters,
-               moonVelocity.magnitude <= landingContactSpeedMetersPerSecond {
-                landed = true
             }
         }
 
@@ -1489,7 +1574,8 @@ enum LMDynamics {
             angularVelocityRadiansPerSecond: angularVelocity,
             massKilograms: massKilograms,
             propellantMassKilograms: propellantMassKilograms,
-            isLanded: landed,
+            flightOutcome: flightOutcome,
+            surfaceContact: surfaceContact,
             dpsPitchGimbalRadians: pitch,
             dpsRollGimbalRadians: roll
         )

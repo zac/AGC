@@ -537,6 +537,43 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!next.isLanded, "orbital-speed contact 50 nmi out is not touchdown")
     }
 
+    @Test func `landing contact criteria distinguish soft hard and crash outcomes`() {
+        let nominal = LMSurfaceContactSnapshot(
+            groundRangeMeters: 0,
+            horizontalSpeedMetersPerSecond: 0.008 * 0.3048,
+            verticalSpeedMetersPerSecond: 3.0 * 0.3048,
+            tiltRadians: 0
+        )
+        #expect(nominal.flightOutcome == .softLanding)
+
+        let hard = LMSurfaceContactSnapshot(
+            groundRangeMeters: 100,
+            horizontalSpeedMetersPerSecond: 3.0 * 0.3048,
+            verticalSpeedMetersPerSecond: 7.5 * 0.3048,
+            tiltRadians: 5.0 * .pi / 180.0
+        )
+        #expect(hard.flightOutcome == .hardLanding)
+
+        let lateralCrash = LMSurfaceContactSnapshot(
+            groundRangeMeters: 200,
+            horizontalSpeedMetersPerSecond: 31.2,
+            verticalSpeedMetersPerSecond: 0,
+            tiltRadians: 0
+        )
+        #expect(lateralCrash.flightOutcome == .crashed)
+
+        #expect(
+            abs(LMLandingContactCriteria.maximumVerticalSpeedMetersPerSecond(
+                horizontalSpeedMetersPerSecond: 0
+            ) - 10.0 * 0.3048) < 1e-12
+        )
+        #expect(
+            abs(LMLandingContactCriteria.maximumVerticalSpeedMetersPerSecond(
+                horizontalSpeedMetersPerSecond: 4.0 * 0.3048
+            ) - 7.0 * 0.3048) < 1e-12
+        )
+    }
+
     @Test func `main engine thrust changes vertical acceleration when sourced`() {
         let source = LMSourceReference(id: "test-source", title: "Test source", detail: "Unit test")
         let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 1_000)
@@ -2639,7 +2676,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(pipadt == 0, "PIPADT must be 0 with GCOMPSW negative, got \(pipadt)")
     }
 
-    @Test func `Auto-land headless trajectory until land or abort`() async throws {
+    @Test func `Current closed-loop trajectory records terminal contact honestly`() async throws {
         let romURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2706,7 +2743,7 @@ struct LMCoreScenarioAndDynamicsTests {
             let engine = snapshot.vehicleCommands.mainEngineOn ? "ON" : "off"
             let force = snapshot.vehicleCommands.dps.commandedThrustNewtons ?? 0
             return String(
-                format: "t=%.0fs P\(snapshot.agc.dsky.programNumber ?? 0) alt=%.0fft hd=%+.2f hv=%.1f rng=%.2fnmi r2l=%.2fnmi rguZ=%.0f vguX=%.2f dV=%.1f,%.1f,%.1f ttf=%.0f H=%.0f HMEAS=%o,%o FLG11=%o radar=%@ %@ RCS=%d ENG=%@ F=%.0f m=%.0f FAIL=%o landed=%@ tz=%+.2f DAP=%o CDU=%.1f/%.1f,%.1f/%.1f CH12=%o STEER=%d IMU33=%o",
+                format: "t=%.0fs P\(snapshot.agc.dsky.programNumber ?? 0) alt=%.0fft hd=%+.2f hv=%.1f rng=%.2fnmi r2l=%.2fnmi rguZ=%.0f vguX=%.2f dV=%.1f,%.1f,%.1f ttf=%.0f H=%.0f HMEAS=%o,%o FLG11=%o radar=%@ %@ RCS=%d ENG=%@ F=%.0f m=%.0f FAIL=%o outcome=%@ tz=%+.2f DAP=%o CDU=%.1f/%.1f,%.1f/%.1f CH12=%o STEER=%d IMU33=%o",
                 snapshot.timeSeconds,
                 v.altitudeMeters / 0.3048,
                 v.verticalSpeedMetersPerSecond,
@@ -2730,7 +2767,7 @@ struct LMCoreScenarioAndDynamicsTests {
                 force,
                 v.massKilograms ?? 0,
                 fail1,
-                v.isLanded ? "yes" : "no",
+                v.flightOutcome.rawValue,
                 thrust.z,
                 dap,
                 signedCDUDegrees(cdux),
@@ -2770,15 +2807,15 @@ struct LMCoreScenarioAndDynamicsTests {
             let escaped = snapshot.vehicleState.altitudeMeters > 80_000
             let overshot = past && range > 20_000 && minRange < 10_000
             if snapshot.timeSeconds - lastLogged >= 20
-                || snapshot.vehicleState.isLanded
+                || snapshot.vehicleState.flightOutcome.isTerminal
                 || escaped
                 || overshot
             {
                 trail += " | " + (await vehicleLine())
                 lastLogged = snapshot.timeSeconds
             }
-            if snapshot.vehicleState.isLanded {
-                outcome = "landed"
+            if snapshot.vehicleState.flightOutcome.isTerminal {
+                outcome = snapshot.vehicleState.flightOutcome.rawValue
                 break
             }
             if escaped {
@@ -2803,7 +2840,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(ignited, "V99 should light DPS \(trail)")
         #expect(sawP64, "TENDBRAK should start P64 \(trail)")
         #expect(
-            sawP65 || snapshot.vehicleState.isLanded,
+            sawP65 || snapshot.vehicleState.flightOutcome.isTerminal,
             "TENDAPPR should start P65 unless physical contact ends P64 first \(trail)"
         )
         let lrUpdateMask = 1 << (
@@ -2823,15 +2860,13 @@ struct LMCoreScenarioAndDynamicsTests {
             minRange < 2_000,
             "closest approach \(Int(minRange / 1852)) nmi \(trail)"
         )
-        #expect(outcome == "landed", "Auto-land should reach the site \(trail)")
+        #expect(outcome == LMFlightOutcome.crashed.rawValue, "baseline must record the unsafe contact \(trail)")
+        let contact = try #require(snapshot.vehicleState.surfaceContact)
+        #expect(contact.groundRangeMeters < 2_000, "contact should preserve the near-site repro \(trail)")
         #expect(
-            snapshot.vehicleState.groundRangeMeters <= LMDynamics.landingContactRangeMeters,
-            "landed contact must remain within 2 km of the site \(trail)"
-        )
-        #expect(
-            snapshot.vehicleState.velocityMetersPerSecond.magnitude
-                <= LMDynamics.landingContactSpeedMetersPerSecond,
-            "landed contact must remain at or below 50 m/s \(trail)"
+            contact.horizontalSpeedMetersPerSecond
+                > LMLandingContactCriteria.maximumHorizontalSpeedMetersPerSecond,
+            "baseline crash should remain attributable to excessive lateral speed \(trail)"
         )
     }
 
@@ -2925,7 +2960,8 @@ private func interpolatePlant(
                     - a.vehicle.angularVelocityRadiansPerSecond) * t,
             massKilograms: a.vehicle.massKilograms,
             propellantMassKilograms: a.vehicle.propellantMassKilograms,
-            isLanded: a.vehicle.isLanded,
+            flightOutcome: a.vehicle.flightOutcome,
+            surfaceContact: a.vehicle.surfaceContact,
             dpsPitchGimbalRadians: a.vehicle.dpsPitchGimbalRadians
                 + (b.vehicle.dpsPitchGimbalRadians - a.vehicle.dpsPitchGimbalRadians) * t,
             dpsRollGimbalRadians: a.vehicle.dpsRollGimbalRadians
