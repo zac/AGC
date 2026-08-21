@@ -634,11 +634,35 @@ struct LMCoreScenarioAndDynamicsTests {
         let runtime = try LMSimulationRuntime(coreImage: Data(), scenario: .apollo11SourceBacked)
         let snapshot = await runtime.bootAndEnterP63(bootCycles: 100, cyclesPerKey: 10)
         #expect(snapshot.agc.cycle >= 100 + UInt64(DSKYScript.v37e63e.keys.count) * 10)
+        #expect((snapshot.agc.inputChannels[0o30] ?? 0o77777) & 0o400 == 0)
+        #expect((await runtime.readErasable(ecadr: Luminary099Erasable.imodes30) & 0o400) == 0)
+        #expect((await runtime.readErasable(ecadr: Luminary099Erasable.imodes33) & 0o40) == 0)
+        #expect((snapshot.vehicleCommands.outputChannel12 & 0o20) == 0)
         #expect(abs(snapshot.vehicleState.velocityMetersPerSecond.magnitude - Luminary99LandingPadLoad.vignMetersPerCentisecond * 100) < 5)
         #expect(
             snapshot.vehicleState.verticalSpeedMetersPerSecond < 0,
             "boot PDI H-dot should be descent, got \(snapshot.vehicleState.verticalSpeedMetersPerSecond) alt=\(snapshot.vehicleState.altitudeMeters)"
         )
+    }
+
+    @Test func `Luminary boot finishes IMU operate initialization before PDI seed`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
+        let snapshot = await runtime.bootAndEnterP63()
+        let imodes30 = await runtime.readErasable(ecadr: Luminary099Erasable.imodes30)
+        let imodes33 = await runtime.readErasable(ecadr: Luminary099Erasable.imodes33)
+        let cduy = await runtime.readErasable(ecadr: Register.regCDUY.rawValue)
+        let expectedCDUY = LMIMUGimbalMap.cduCounts(from: snapshot.vehicleState.attitude).y
+
+        #expect((snapshot.agc.inputChannels[0o30] ?? 0o77777) & 0o400 == 0)
+        #expect((imodes30 & 0o400) == 0, "T4 must have sampled inverted IMU OPERATE")
+        #expect((imodes33 & 0o40) == 0, "operate-only initialization must re-enable the DAP")
+        #expect((snapshot.vehicleCommands.outputChannel12 & 0o20) == 0, "ICDU zero discrete must be released")
+        #expect(cduy == expectedCDUY, "PDI CDUY seed must survive completed IMU initialization")
     }
 
     @Test func `RP-TO-R preserves NASA RLS magnitude and roundtrips`() {

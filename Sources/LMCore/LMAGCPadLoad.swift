@@ -201,6 +201,11 @@ public enum Luminary99CoordinatePadLoad {
 /// Held powered-descent panel discretes. Channels 30–33 are inverted:
 /// 0 means the named signal is present.
 public enum LMPoweredDescentPanel {
+    /// Before the PDI state is loaded, tell Luminary the already-powered IMU
+    /// is in OPERATE without also moving the landing-panel switches. Fresh
+    /// start otherwise sees OPERATE arrive after P63 and schedules a delayed
+    /// ICDU zero in the middle of braking.
+    public static let channel30IMUOperating = 0o37777 & ~0o400
     /// CH30: engine armed, auto throttle, IMU operate, LGC in control; temp OK already at boot.
     public static let channel30 = 0o37777 & ~0o1424
     /// CH31: MODE CONTROL AUTO (bit 14 = 0); ATT HOLD off; no RHC/THC.

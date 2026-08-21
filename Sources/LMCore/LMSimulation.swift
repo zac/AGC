@@ -957,12 +957,19 @@ public actor LMSimulationRuntime {
         bootCycles: UInt64 = 1_000_000,
         cyclesPerKey: UInt64 = 50_000
     ) async -> LMSimulationSnapshot {
+        // Apollo 11's IMU had completed turn-on long before PDI. Present the
+        // inverted OPERATE discrete during fresh start and let Luminary finish
+        // its operate-only ICDU initialization before seeding the PDI attitude.
+        await agcRuntime.enqueueInput(
+            AGCChannelInput(channel: 0o30, value: LMPoweredDescentPanel.channel30IMUOperating)
+        )
         if bootCycles > 0 {
             // Idle Luminary only: do not integrate the vehicle or inject PIPA/CDU
             // during fresh start. Physics during that window can GOJAM (01107).
             _ = await agcRuntime.step(cycles: bootCycles)
             elapsedTimeSeconds += Double(bootCycles) / configuration.agcCyclesPerSecond.value
         }
+        await finishIMUInitializationBeforePDI()
         await loadP63PadLoads()
         await loadPDINavState()
         // V37 keys must run through `step` so the plant coasts with TIME2.
@@ -982,6 +989,30 @@ public actor LMSimulationRuntime {
         lastDSKYVerb = prepared.agc.dsky.verb
         lastDSKYNoun = prepared.agc.dsky.noun
         return prepared
+    }
+
+    /// Fresh start initializes IMODES30 as though IMU OPERATE were absent.
+    /// Wait for T4's operate-only sequence (zero discrete, 10-second counter
+    /// reacquisition, DAP re-enable) so no waitlist job can zero the seeded
+    /// 95-degree PDI ICDUs later in the burn.
+    private func finishIMUInitializationBeforePDI() async {
+        var remainingCycles: UInt64 = 2_000_000
+        let chunkCycles: UInt64 = 50_000
+        while remainingCycles > 0 {
+            let agc = await agcRuntime.snapshot()
+            let imodes30 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes30)
+            let imodes33 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes33)
+            let zeroDiscrete = (agc.outputChannels[0o12] ?? 0) & 0o20
+            let operateSampled = (imodes30 & 0o400) == 0
+            let dapEnabled = (imodes33 & 0o40) == 0
+            if operateSampled && dapEnabled && zeroDiscrete == 0 {
+                break
+            }
+            let cycles = min(chunkCycles, remainingCycles)
+            _ = await agcRuntime.step(cycles: cycles)
+            elapsedTimeSeconds += Double(cycles) / configuration.agcCyclesPerSecond.value
+            remainingCycles -= cycles
+        }
     }
 
     /// NASA Luminary 99 landing-guidance overlay. TLAND is placed
@@ -1023,8 +1054,10 @@ public actor LMSimulationRuntime {
     }
 
     /// Skip-R51 never runs IMUFINE. Clear IMODES33 bit 6 (DAP AUTO/HOLD
-    /// enabled) and set IMODES30 bit 9 (IMU operating) so DAPIDLER can
-    /// leave SHUTDOWN. Without that, T5 zeros CH5/CH6 every 100 ms.
+    /// enabled) so DAPIDLER can leave SHUTDOWN. IMODES30 holds inverted
+    /// channel-30 samples: IMU OPERATE is bit 9 clear, established during
+    /// fresh-start initialization above. Writing it set retriggers T4's
+    /// operate-only sequence and schedules a delayed ICDU zero.
     /// V65 SNUFFBIT keeps Q,R RCS off so GTS is not stacked with jets
     /// (AFTERTJ XTRANS). P64 FINDCDUW’s LAND−R switch still needs GTS-only:
     /// clearing SNUFFBIT lets Q,R jets tumble through the window change.
@@ -1033,11 +1066,6 @@ public actor LMSimulationRuntime {
         await agcRuntime.writeErasable(
             ecadr: Luminary099Erasable.imodes33,
             value: imodes33 & ~0o40
-        )
-        let imodes30 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes30)
-        await agcRuntime.writeErasable(
-            ecadr: Luminary099Erasable.imodes30,
-            value: imodes30 | 0o400
         )
         let snuffer = (
             Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.snuffer),
