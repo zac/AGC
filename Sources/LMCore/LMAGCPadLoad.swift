@@ -18,6 +18,9 @@ public enum Luminary99LandingPadLoad {
     public static let guidDurnCentiseconds = 66_440.0
     /// NASA ZOOMTIME, 26 s of DPS throttle-up, B14 centiseconds.
     public static let zoomTimeCentiseconds = 2_600.0
+    /// Apollo 11 LM timeline: key V57 five minutes after ignition to permit
+    /// incorporation of validated landing-radar state-vector updates.
+    public static let landingRadarUpdateDelayAfterIgnitionSeconds = 300.0
     /// BURNBABY `TIG-5` / CLOCPLAY V99, centiseconds.
     public static let tigMinusFiveCentiseconds = 500.0
     /// P41SPOT `D29.9SEC 2DEC 2990`. `TDEC1 = TIG − 29.9 s` for MIDTOAV1.
@@ -100,12 +103,15 @@ public enum Luminary99LandingPadLoad {
         words.append(sp(Luminary099Erasable.highcrit, 2_348.0, scale: 14))
         words.append(contentsOf: vector(Luminary099Erasable.v2fg, [-0.009144, 0, 0], scale: 10))
         words.append(contentsOf: dp(Luminary099Erasable.tauvert, 1_000, scale: 14))
-        // NASA LM5/4.5.1-1 octal. LRALPHA/BETA stay 0 so antenna = NASA body;
-        // SETPOS then leaves HBEAMNB = HBEAMANT and the Doppler converter
-        // can feed NB velocity without an antenna-frame rotation.
+        // NASA LM5/4.5.1-1 octal. SETPOS uses the position-specific antenna
+        // Euler angles to transform the fixed LR beam vectors into NB.
         words.append(contentsOf: [
             AGCErasableWord(ecadr: Luminary099Erasable.delqfix, value: 0o00000),
             AGCErasableWord(ecadr: Luminary099Erasable.delqfix + 1, value: 0o01717),
+            AGCErasableWord(ecadr: Luminary099Erasable.lralpha, value: 0o01042),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrbeta1, value: 0o04211),
+            AGCErasableWord(ecadr: Luminary099Erasable.lralpha2, value: 0o01042),
+            AGCErasableWord(ecadr: Luminary099Erasable.lrbeta2, value: 0o00000),
             AGCErasableWord(ecadr: Luminary099Erasable.lrvmax, value: 0o01414),
             AGCErasableWord(ecadr: Luminary099Erasable.lrvf, value: 0o00116),
             AGCErasableWord(ecadr: Luminary099Erasable.lrwvz, value: 0o11463),

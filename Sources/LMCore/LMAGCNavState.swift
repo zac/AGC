@@ -193,6 +193,8 @@ public enum Luminary099Flag {
     /// owns pitch/roll. Without it, RCS and GTS stack after ZOOM and tumble.
     public static let snuffer = 77
     public static let lmoonflg = 124
+    /// FLAGWRD11 bit 8. V57 sets this to permit LR state-vector updates.
+    public static let landingRadarUpdates = 172
 
     public static func ecadr(decimalIndex: Int) -> Int {
         Luminary099Erasable.state + decimalIndex / 15

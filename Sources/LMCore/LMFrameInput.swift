@@ -15,26 +15,33 @@ public struct LMRadarMeasurementInput: Equatable, Sendable, Codable {
     public let rangeMeters: Double?
     public let altitudeMeters: Double?
     public let rangeRateMetersPerSecond: Double?
-    /// NASA body (NB) velocity for LRVELX/Y/Z. Zero pad-load antenna
-    /// angles make the velocity beams the NASA body axes.
+    /// Direct NASA-body velocity for callers supplying synthetic LRVELX/Y/Z.
+    /// Source-backed vehicle measurements instead use
+    /// `landingRadarBeamVelocityMetersPerSecond` after applying SETPOS geometry.
     public let nasaBodyVelocityMetersPerSecond: LMVector3D?
+    /// Three scalar Doppler measurements along Luminary's VX/VY/VZ beams.
+    public let landingRadarBeamVelocityMetersPerSecond: LMVector3D?
 
     public init(
         rangeMeters: Double? = nil,
         altitudeMeters: Double? = nil,
         rangeRateMetersPerSecond: Double? = nil,
-        nasaBodyVelocityMetersPerSecond: LMVector3D? = nil
+        nasaBodyVelocityMetersPerSecond: LMVector3D? = nil,
+        landingRadarBeamVelocityMetersPerSecond: LMVector3D? = nil
     ) {
         self.rangeMeters = rangeMeters
         self.altitudeMeters = altitudeMeters
         self.rangeRateMetersPerSecond = rangeRateMetersPerSecond
         self.nasaBodyVelocityMetersPerSecond = nasaBodyVelocityMetersPerSecond
+        self.landingRadarBeamVelocityMetersPerSecond = landingRadarBeamVelocityMetersPerSecond
     }
 }
 
 public enum LMRadarInput: Equatable, Sendable, Codable {
     case raw(LMRadarRawInput)
     case measurement(LMRadarMeasurementInput)
+    /// Vehicle state awaiting projection through the runtime's live LR position.
+    case landingRadar(LMVehicleStateSnapshot)
 
     public var rawAGCInput: AGCRadarInput? {
         switch self {
@@ -45,6 +52,9 @@ public enum LMRadarInput: Equatable, Sendable, Codable {
             )
         case .measurement(let measurement):
             return LMRadarConversion.rawInput(from: measurement)
+        case .landingRadar(let state):
+            return LMLandingRadar.measurement(from: state, position2: false)
+                .map(LMRadarConversion.rawInput(from:))
         }
     }
 
@@ -55,9 +65,9 @@ public enum LMRadarInput: Equatable, Sendable, Codable {
                 detail: "Raw AGC radar register words are injected without unit conversion.",
                 source: .yaAGCRadarRequest
             )
-        case .measurement:
+        case .measurement, .landingRadar:
             return .sourceBacked(
-                detail: "SI altitude/range converted at 1.079 feet per bit (landing radar low scale).",
+                detail: "SI landing-radar range uses the Luminary low/high altitude scales; vehicle Doppler uses the live SETPOS beam geometry.",
                 source: .luminaryLandingRadarScale
             )
         }
@@ -129,7 +139,8 @@ public struct LMFrameInput: Equatable, Sendable {
     }
 
     /// Auto-land with R12 radar when the range beam sees the ground.
-    /// HMEAS is slant range along `HBEAMANT`, not nadir altitude.
+    /// HMEAS is slant range along `HBEAMANT`, not nadir altitude. The runtime
+    /// follows the Apollo 11 crew timeline for V57 radar-update permission.
     public static func autoLand(
         from state: LMVehicleStateSnapshot,
         rotationalHandController: LMRotationalHandControllerInput? = nil,
@@ -137,7 +148,9 @@ public struct LMFrameInput: Equatable, Sendable {
         descendMinus: Bool = false
     ) -> LMFrameInput {
         LMFrameInput(
-            radarInput: LMLandingRadar.measurement(from: state).map { .measurement($0) },
+            radarInput: LMLandingRadar.measurement(from: state, position2: false).map { _ in
+                .landingRadar(state)
+            },
             rotationalHandControllerInput: rotationalHandController,
             descentRateInput: LMDescentRateControlInput(
                 descendPlus: descendPlus,

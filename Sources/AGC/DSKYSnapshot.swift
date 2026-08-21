@@ -71,6 +71,12 @@ public struct DSKYScript: Equatable, Sendable, Identifiable {
         keys: [.verb, .digit1, .digit6, .noun, .digit3, .digit6, .enter]
     )
 
+    /// Permit Luminary to incorporate landing-radar position and velocity data.
+    public static let v57e = DSKYScript(
+        id: "V57E landing-radar updates",
+        keys: [.verb, .digit5, .digit7, .enter]
+    )
+
     public static func program(_ program: Int) -> DSKYScript {
         let clamped = max(0, min(99, program))
         return DSKYScript(

@@ -337,8 +337,8 @@ struct LMSensorFeedbackState {
     }
 }
 
-/// Landing-radar geometry for R12. Pad-load LRALPHA/BETA are left at 0, so
-/// antenna axes are NASA body and HBEAMNB = HBEAMANT.
+/// Landing-radar geometry for R12. Luminary SETPOS transforms antenna vectors
+/// to NASA body with the position-specific LRALPHA/LRBETA pad loads.
 enum LMLandingRadar {
     /// Luminary `CONTROLLED_CONSTANTS` `HBEAMANT`, half-unit in antenna coords.
     static let hBeamAntenna = LMVector3D(x: -0.4687018041, y: 0, z: -0.1741224271)
@@ -347,9 +347,37 @@ enum LMLandingRadar {
     /// ≈ 0.59, so this gate only closes when the beam really is skyward.
     static let minTowardGround = 0.2
 
-    static func measurement(from state: LMVehicleStateSnapshot) -> LMRadarMeasurementInput? {
+    static let alphaRadians = 6.0 * .pi / 180
+    static let beta1Radians = 24.0 * .pi / 180
+    static let beta2Radians = 0.0
+
+    /// Luminary's `*SMNB*` transform for CDUSPOT = (beta, 0, alpha):
+    /// antenna-to-NB = Rx(-alpha) Ry(-beta).
+    static func nasaBodyVector(fromAntenna vector: LMVector3D, position2: Bool) -> LMVector3D {
+        let beta = position2 ? beta2Radians : beta1Radians
+        let cosBeta = cos(beta)
+        let sinBeta = sin(beta)
+        let afterY = LMVector3D(
+            x: cosBeta * vector.x - sinBeta * vector.z,
+            y: vector.y,
+            z: sinBeta * vector.x + cosBeta * vector.z
+        )
+        let cosAlpha = cos(alphaRadians)
+        let sinAlpha = sin(alphaRadians)
+        return LMVector3D(
+            x: afterY.x,
+            y: cosAlpha * afterY.y + sinAlpha * afterY.z,
+            z: -sinAlpha * afterY.y + cosAlpha * afterY.z
+        )
+    }
+
+    static func measurement(
+        from state: LMVehicleStateSnapshot,
+        position2: Bool = false
+    ) -> LMRadarMeasurementInput? {
+        let hBeamNasa = nasaBodyVector(fromAntenna: hBeamAntenna.normalized(), position2: position2)
         let beamWorld = state.attitude.rotated(
-            LMIMUGimbalMap.sim(fromNasa: hBeamAntenna.normalized())
+            LMIMUGimbalMap.sim(fromNasa: hBeamNasa)
         )
         // Project onto the vehicle's own local vertical, not the site's. Site
         // ENU is a tangent plane pinned at RLS; at PDI the LM is 21° of lunar
@@ -361,10 +389,18 @@ enum LMLandingRadar {
         guard moon.magnitude > 0 else { return nil }
         let towardGround = -beamMoon.dot(moon.normalized())
         guard towardGround > minTowardGround else { return nil }
+        let nasaBodyVelocity = LMIMUGimbalMap.nasaBody(
+            fromSim: state.attitude.inverseRotated(state.velocityMetersPerSecond)
+        )
+        let xBeam = nasaBodyVector(fromAntenna: LMVector3D(x: 1), position2: position2)
+        let yBeam = nasaBodyVector(fromAntenna: LMVector3D(y: 1), position2: position2)
+        let zBeam = xBeam.cross(yBeam)
         return LMRadarMeasurementInput(
             altitudeMeters: max(0, state.altitudeMeters / towardGround),
-            nasaBodyVelocityMetersPerSecond: LMIMUGimbalMap.nasaBody(
-                fromSim: state.attitude.inverseRotated(state.velocityMetersPerSecond)
+            landingRadarBeamVelocityMetersPerSecond: LMVector3D(
+                x: nasaBodyVelocity.dot(xBeam),
+                y: nasaBodyVelocity.dot(yBeam),
+                z: nasaBodyVelocity.dot(zBeam)
             )
         )
     }
@@ -372,8 +408,14 @@ enum LMLandingRadar {
 
 enum LMRadarConversion {
     static func rawInput(from measurement: LMRadarMeasurementInput) -> AGCRadarInput {
-        let altitude = measurement.altitudeMeters.map { word(meters: $0) }
-        let velocity = measurement.nasaBodyVelocityMetersPerSecond
+        let altitudeHighScale = measurement.altitudeMeters.map {
+            $0 > LMSensorScale.landingRadarAltitudeHighScaleThresholdMeters
+        } ?? false
+        let altitudeScale = LMSensorScale.landingRadarAltitudeMetersPerBit.value
+            * (altitudeHighScale ? LMSensorScale.landingRadarAltitudeHighScaleMultiplier : 1.0)
+        let altitude = measurement.altitudeMeters.map { word(meters: $0, scale: altitudeScale) }
+        let velocity = measurement.landingRadarBeamVelocityMetersPerSecond
+            ?? measurement.nasaBodyVelocityMetersPerSecond
         return AGCRadarInput(
             rendezvousRadar: measurement.rangeMeters.map { word(meters: $0) },
             altitudeMeter: altitude,
@@ -386,7 +428,8 @@ enum LMRadarConversion {
             landingRadarVelocityZ: velocity.map {
                 velocityWord($0.z, feetPerSecondPerBit: LMSensorScale.landingRadarVelocityZFeetPerSecondPerBit.value)
             },
-            landingRadarAltitude: altitude
+            landingRadarAltitude: altitude,
+            landingRadarAltitudeHighScale: altitudeHighScale
         )
     }
 

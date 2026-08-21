@@ -821,6 +821,8 @@ public actor LMSimulationRuntime {
     private var lastDSKYNoun = "  "
     /// CH12 bit 13 commands LR POS2; CH33 bits 6/7 are the antenna discretes.
     private var landingRadarInPosition2 = false
+    private var poweredDescentIgnitionTimeSeconds: Double?
+    private var landingRadarPermissionKeyIndex = 0
 
     public init(
         binFile: URL,
@@ -878,6 +880,8 @@ public actor LMSimulationRuntime {
         lastDSKYVerb = "  "
         lastDSKYNoun = "  "
         landingRadarInPosition2 = false
+        poweredDescentIgnitionTimeSeconds = nil
+        landingRadarPermissionKeyIndex = 0
         return makeSnapshot(agc: agc, channelDeltas: [])
     }
 
@@ -1091,8 +1095,20 @@ public actor LMSimulationRuntime {
     }
 
     public func setRadarInput(_ input: LMRadarInput?) async {
-        radarInput = input
-        await agcRuntime.setRadarInput(input?.rawAGCInput)
+        let resolved: LMRadarInput?
+        switch input {
+        case .landingRadar(let state):
+            resolved = LMLandingRadar.measurement(
+                from: state,
+                position2: landingRadarInPosition2
+            ).map(LMRadarInput.measurement)
+        case .raw, .measurement:
+            resolved = input
+        case nil:
+            resolved = nil
+        }
+        radarInput = resolved
+        await agcRuntime.setRadarInput(resolved?.rawAGCInput)
     }
 
     public func setRotationalHandControllerInput(_ input: LMRotationalHandControllerInput) async {
@@ -1135,6 +1151,32 @@ public actor LMSimulationRuntime {
             descentRateChannel16 = descentRateInput.channel16Value
             await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: descentRateInput.channel16Value))
         }
+        await advanceLandingRadarPermission(for: input)
+    }
+
+    /// Apollo 11 keyed V57 at TIG + 5:00. Key the real extended verb one key
+    /// per simulation frame once the auto-land trajectory reaches that point.
+    private func advanceLandingRadarPermission(for input: LMFrameInput) async {
+        guard case .landingRadar? = input.radarInput,
+              let ignitionTime = poweredDescentIgnitionTimeSeconds,
+              elapsedTimeSeconds - ignitionTime
+                >= Luminary99LandingPadLoad.landingRadarUpdateDelayAfterIgnitionSeconds
+        else { return }
+
+        let flagWord = await agcRuntime.readErasable(ecadr: Luminary099Erasable.flagwrd11)
+        let mask = 1 << (
+            Luminary099Flag.bit(decimalIndex: Luminary099Flag.landingRadarUpdates) - 1
+        )
+        if (flagWord & mask) != 0 {
+            landingRadarPermissionKeyIndex = DSKYScript.v57e.keys.count
+            return
+        }
+
+        if landingRadarPermissionKeyIndex >= DSKYScript.v57e.keys.count {
+            landingRadarPermissionKeyIndex = 0
+        }
+        await agcRuntime.sendDSKYKey(DSKYScript.v57e.keys[landingRadarPermissionKeyIndex])
+        landingRadarPermissionKeyIndex += 1
     }
 
     /// CH33 bits 5/8 are inverted LR data-good; bits 6/7 are antenna POS1/POS2.
@@ -1149,6 +1191,9 @@ public actor LMSimulationRuntime {
         }
         if radarInput?.rawAGCInput?.landingRadarVelocityX != nil {
             value &= ~LMPoweredDescentPanel.channel33LRVelocityDataGood
+        }
+        if radarInput?.rawAGCInput?.landingRadarAltitudeHighScale == true {
+            value |= LMPoweredDescentPanel.channel33LRAltitudeHighScale
         }
         if landingRadarInPosition2 {
             value |= LMPoweredDescentPanel.channel33LRPosition1
@@ -1202,6 +1247,9 @@ public actor LMSimulationRuntime {
                 deltaTime: slice.deltaTime
             )
             let engineOn = commands.mainEngineOn && !commands.mainEngineOff
+            if engineOn, poweredDescentIgnitionTimeSeconds == nil {
+                poweredDescentIgnitionTimeSeconds = elapsedTimeSeconds
+            }
             commands = commands.withCommandedThrust(throttleState.commandedThrustNewtons(engineOn: engineOn))
             lastSpecificForceBody = LMDynamics.specificForceBody(
                 state: vehicleState,

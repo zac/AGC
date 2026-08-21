@@ -834,8 +834,10 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.delqfix + 1) == 0o01717)
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.rpcrtime) == 0o01407)
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.rpcrtqsw) == 0o77777)
-        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lralpha) == 0)
-        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta1) == 0)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lralpha) == 0o01042)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta1) == 0o04211)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lralpha2) == 0o01042)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta2) == 0o00000)
 
         let snapshot = await runtime.snapshot()
         #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)
@@ -1160,12 +1162,18 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(!snapshot.sourceStatus.unmodeledItems.contains("SI radar measurement conversion into AGC raw words is unmodeled."))
     }
 
-    @Test func `landing-radar low scale encodes up to 15 bits`() {
-        let input = LMFrameInput.autoLand(altitudeMeters: 30_000 * 0.3048)
-        let counts = input.radarInput?.rawAGCInput?.landingRadarAltitude ?? 0
-        #expect(counts == Int((30_000 / 1.079).rounded()))
-        let saturated = LMFrameInput.autoLand(altitudeMeters: 50_000 * 0.3048)
-        #expect(saturated.radarInput?.rawAGCInput?.landingRadarAltitude == 0o77777)
+    @Test func `landing radar selects high altitude scale above its crossover`() async throws {
+        let low = LMFrameInput.autoLand(altitudeMeters: 2_000 * 0.3048)
+        #expect(low.radarInput?.rawAGCInput?.landingRadarAltitude == Int((2_000 / 1.079).rounded()))
+        #expect(low.radarInput?.rawAGCInput?.landingRadarAltitudeHighScale == false)
+
+        let high = LMFrameInput.autoLand(altitudeMeters: 30_000 * 0.3048)
+        #expect(high.radarInput?.rawAGCInput?.landingRadarAltitude == Int((30_000 / 4.316).rounded()))
+        #expect(high.radarInput?.rawAGCInput?.landingRadarAltitudeHighScale == true)
+
+        let runtime = try LMSimulationRuntime(coreImage: Data())
+        let snapshot = await runtime.step(deltaTime: 0.001, input: high)
+        #expect((snapshot.agc.inputChannels[0o33] ?? 0) & LMPoweredDescentPanel.channel33LRAltitudeHighScale != 0)
     }
 
     @Test func `PIPA pulses accumulate from body specific force`() {
@@ -2794,7 +2802,17 @@ struct LMCoreScenarioAndDynamicsTests {
         }
         #expect(ignited, "V99 should light DPS \(trail)")
         #expect(sawP64, "TENDBRAK should start P64 \(trail)")
-        #expect(sawP65, "TENDAPPR should start P65 \(trail)")
+        #expect(
+            sawP65 || snapshot.vehicleState.isLanded,
+            "TENDAPPR should start P65 unless physical contact ends P64 first \(trail)"
+        )
+        let lrUpdateMask = 1 << (
+            Luminary099Flag.bit(decimalIndex: Luminary099Flag.landingRadarUpdates) - 1
+        )
+        #expect(
+            (await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd11) & lrUpdateMask) != 0,
+            "Apollo 11 TIG+5:00 V57 should permit LR updates before landing \(trail)"
+        )
         #expect(outcome != "escaped", "tabletop should not leave the Moon \(trail)")
         #expect(outcome != "overshot", "should not cross the site still fast \(trail)")
         #expect(
@@ -2806,6 +2824,15 @@ struct LMCoreScenarioAndDynamicsTests {
             "closest approach \(Int(minRange / 1852)) nmi \(trail)"
         )
         #expect(outcome == "landed", "Auto-land should reach the site \(trail)")
+        #expect(
+            snapshot.vehicleState.groundRangeMeters <= LMDynamics.landingContactRangeMeters,
+            "landed contact must remain within 2 km of the site \(trail)"
+        )
+        #expect(
+            snapshot.vehicleState.velocityMetersPerSecond.magnitude
+                <= LMDynamics.landingContactSpeedMetersPerSecond,
+            "landed contact must remain at or below 50 m/s \(trail)"
+        )
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
