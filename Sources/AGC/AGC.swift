@@ -68,7 +68,7 @@ public struct AGCRadarInput: Equatable, Sendable {
     public let landingRadarVelocityZ: Int?
     /// RNRAD word for LRALT (select 7). Falls back to `altitudeMeter`.
     public let landingRadarAltitude: Int?
-    /// CH33 bit 9: 1 = LR altitude high scale (LRSCK ×4).
+    /// CH33 bit 9: 1 = LR altitude high scale (`LRSCK` converts ×5 to low scale).
     public let landingRadarAltitudeHighScale: Bool
 
     public init(

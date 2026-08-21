@@ -86,10 +86,10 @@ struct LandingRadarGeometryTests {
     /// The source-backed PDI slant exceeds the low-scale counter but fits the
     /// high-scale counter selected through CH33.
     @Test func `source-backed PDI sample fits the high scale counter`() {
-        let highScale = 4.316 * 0.3048
+        let highScale = 5.395 * 0.3048
         let highCeiling = 0o77777 * highScale
         let lowCeiling = 0o77777 * 1.079 * 0.3048
-        #expect(highCeiling > 43_000 && highCeiling < 44_000, "15-bit high-scale ceiling ≈ 43.1 km")
+        #expect(highCeiling > 53_000 && highCeiling < 54_000, "15-bit high-scale ceiling ≈ 53.9 km")
 
         let measurement = try! #require(
             LMLandingRadar.measurement(

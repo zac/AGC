@@ -23,8 +23,9 @@ public enum LMSensorScale {
         1.079 * 0.3048,
         source: .luminaryLandingRadarScale
     )
-    /// LRSCK `DDOUBL` twice. High-scale quantum is 4.316 ft/bit.
-    public static let landingRadarAltitudeHighScaleMultiplier = 4.0
+    /// `LRSCK` adds the original sample to its twice-doubled value, converting
+    /// one 5.395 ft high-scale bit into five 1.079 ft low-scale bits.
+    public static let landingRadarAltitudeHighScaleMultiplier = 5.0
     /// Luminary `HISCALIM DEC 460` comment: 2481.7 ft.
     public static let landingRadarAltitudeHighScaleThresholdMeters = 2481.7 * 0.3048
 

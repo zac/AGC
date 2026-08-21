@@ -1205,7 +1205,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(low.radarInput?.rawAGCInput?.landingRadarAltitudeHighScale == false)
 
         let high = LMFrameInput.autoLand(altitudeMeters: 30_000 * 0.3048)
-        #expect(high.radarInput?.rawAGCInput?.landingRadarAltitude == Int((30_000 / 4.316).rounded()))
+        #expect(high.radarInput?.rawAGCInput?.landingRadarAltitude == Int((30_000 / 5.395).rounded()))
         #expect(high.radarInput?.rawAGCInput?.landingRadarAltitudeHighScale == true)
 
         let runtime = try LMSimulationRuntime(coreImage: Data())
@@ -2676,7 +2676,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(pipadt == 0, "PIPADT must be 0 with GCOMPSW negative, got \(pipadt)")
     }
 
-    @Test func `Current closed-loop trajectory records terminal contact honestly`() async throws {
+    @Test func `closed-loop trajectory reaches P65 and soft landing`() async throws {
         let romURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2685,7 +2685,7 @@ struct LMCoreScenarioAndDynamicsTests {
         let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
         var snapshot = await runtime.bootAndEnterP63()
         let dt = LMSimulationPace.acceleratedDeltaSeconds
-        let deadline = Luminary99LandingPadLoad.guidDurnCentiseconds / 100.0 + 120.0
+        let deadline = Luminary99LandingPadLoad.guidDurnCentiseconds / 100.0 + 240.0
 
         func dpVector(ecadr: Int, scale: Int) async -> LMVector3D {
             let x = await runtime.readDoublePrecision(ecadr: ecadr)
@@ -2860,14 +2860,20 @@ struct LMCoreScenarioAndDynamicsTests {
             minRange < 2_000,
             "closest approach \(Int(minRange / 1852)) nmi \(trail)"
         )
-        #expect(outcome == LMFlightOutcome.crashed.rawValue, "baseline must record the unsafe contact \(trail)")
+        #expect(outcome == LMFlightOutcome.softLanding.rawValue, "P65 should settle into soft contact \(trail)")
         let contact = try #require(snapshot.vehicleState.surfaceContact)
         #expect(contact.groundRangeMeters < 2_000, "contact should preserve the near-site repro \(trail)")
         #expect(
             contact.horizontalSpeedMetersPerSecond
-                > LMLandingContactCriteria.maximumHorizontalSpeedMetersPerSecond,
-            "baseline crash should remain attributable to excessive lateral speed \(trail)"
+                <= LMLandingContactCriteria.softHorizontalSpeedMetersPerSecond,
+            "soft contact should stay within the lateral-speed envelope \(trail)"
         )
+        #expect(
+            contact.verticalSpeedMetersPerSecond
+                <= LMLandingContactCriteria.softVerticalSpeedMetersPerSecond,
+            "soft contact should stay within the descent-rate envelope \(trail)"
+        )
+        #expect(contact.tiltRadians <= LMLandingContactCriteria.softTiltRadians)
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
