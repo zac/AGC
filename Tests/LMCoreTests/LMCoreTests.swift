@@ -87,6 +87,71 @@ struct LMCoreCommandDecodingTests {
 
 @Suite("LMCore scenarios and dynamics")
 struct LMCoreScenarioAndDynamicsTests {
+    @Test func `flight recording round trips and replay interpolates the verified state`() throws {
+        let start = LMFlightFrame(
+            timeSeconds: 100,
+            cycle: 1_000,
+            programNumber: 66,
+            vehicleState: LMVehicleStateSnapshot(
+                positionMeters: LMVector3D(z: 10),
+                velocityMetersPerSecond: LMVector3D(z: -1),
+                massKilograms: 7_000
+            ),
+            vehicleCommands: LMVehicleSnapshot(outputChannel11: 0o10000),
+            panelState: .p66AttitudeHold,
+            rhcPitch: 0o10,
+            descentRateChannel16: 0o100
+        )
+        let contact = LMSurfaceContactSnapshot(
+            groundRangeMeters: 0.1,
+            horizontalSpeedMetersPerSecond: 0.1,
+            verticalSpeedMetersPerSecond: 0.2,
+            tiltRadians: 0.01
+        )
+        let end = LMFlightFrame(
+            timeSeconds: 102,
+            cycle: 2_000,
+            programNumber: 66,
+            vehicleState: LMVehicleStateSnapshot(
+                positionMeters: LMVector3D(x: 10),
+                attitude: .fromAxisAngle(axis: LMVector3D(y: 1), radians: .pi / 2),
+                massKilograms: 6_998,
+                flightOutcome: .softLanding,
+                surfaceContact: contact
+            ),
+            vehicleCommands: LMVehicleSnapshot(outputChannel11: 0o20000),
+            panelState: .p66AttitudeHold
+        )
+        let recording = LMFlightRecording(
+            controlMode: .astronautP66,
+            frames: [end, start]
+        )
+
+        let data = try recording.encoded()
+        let encodedAgain = try recording.encoded()
+        let decoded = try LMFlightRecording.decode(data)
+        #expect(data == encodedAgain)
+        #expect(decoded == recording)
+        #expect(recording.durationSeconds == 2)
+        #expect(recording.flightOutcome == .softLanding)
+
+        let replay = LMFlightReplay(recording: recording)
+        let middle = try #require(replay.frame(at: 1))
+        #expect(abs(middle.vehicleState.positionMeters.x - 5) < 1e-9)
+        #expect(abs((middle.vehicleState.massKilograms ?? 0) - 6_999) < 1e-9)
+        let thrustAxis = middle.vehicleState.attitude.rotated(LMVector3D(z: 1))
+        #expect(abs(thrustAxis.x - sqrt(0.5)) < 1e-9)
+        #expect(abs(thrustAxis.z - sqrt(0.5)) < 1e-9)
+        #expect(middle.vehicleCommands.outputChannel11 == 0o10000)
+        #expect(middle.rhcPitch == 0o10)
+        #expect(middle.descentRateChannel16 == 0o100)
+        #expect(middle.vehicleState.flightOutcome == .inFlight)
+
+        let landed = try #require(replay.frame(at: 99))
+        #expect(landed.vehicleState.flightOutcome == .softLanding)
+        #expect(landed.vehicleState.surfaceContact == contact)
+    }
+
     @Test func `P66 pilot encodes signed ACA counts`() {
         let input = LMRotationalHandControllerInput.signedCounts(
             pitch: -1,
