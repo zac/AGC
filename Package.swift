@@ -19,6 +19,9 @@ let package = Package(
         .library(
             name: "LMCore",
             targets: ["LMCore"]),
+        .executable(
+            name: "LMFlightRecorder",
+            targets: ["LMFlightRecorder"]),
     ],
     targets: [
         .target(
@@ -27,6 +30,10 @@ let package = Package(
         .target(
             name: "LMCore",
             dependencies: ["AGC"]
+        ),
+        .executableTarget(
+            name: "LMFlightRecorder",
+            dependencies: ["LMCore"]
         ),
         .testTarget(
             name: "AGCTests",
