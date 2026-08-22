@@ -121,6 +121,16 @@ public enum Luminary99LandingPadLoad {
             AGCErasableWord(ecadr: Luminary099Erasable.lrwvfy, value: 0o06315),
             AGCErasableWord(ecadr: Luminary099Erasable.lrwvfx, value: 0o06315),
             AGCErasableWord(ecadr: Luminary099Erasable.lrwvff, value: 0o03146),
+            // Apollo 11 Luminary 99 P66 flight pad-load block.
+            AGCErasableWord(ecadr: Luminary099Erasable.rodScale, value: 0o14370),
+            AGCErasableWord(ecadr: Luminary099Erasable.tauRod, value: 0o11300),
+            AGCErasableWord(ecadr: Luminary099Erasable.tauRod + 1, value: 0o00000),
+            AGCErasableWord(ecadr: Luminary099Erasable.lagOverTau, value: 0o15164),
+            AGCErasableWord(ecadr: Luminary099Erasable.lagOverTau + 1, value: 0o01420),
+            AGCErasableWord(ecadr: Luminary099Erasable.minForce, value: 0o00001),
+            AGCErasableWord(ecadr: Luminary099Erasable.minForce + 1, value: 0o27631),
+            AGCErasableWord(ecadr: Luminary099Erasable.maxForce, value: 0o00013),
+            AGCErasableWord(ecadr: Luminary099Erasable.maxForce + 1, value: 0o06551),
             AGCErasableWord(ecadr: Luminary099Erasable.lrhmax, value: 0o35610),
             AGCErasableWord(ecadr: Luminary099Erasable.lrwh, value: 0o13146)
         ])
@@ -216,6 +226,10 @@ public enum LMPoweredDescentPanel {
     public static let channel30 = 0o37777 & ~0o1424
     /// CH31: MODE CONTROL AUTO (bit 14 = 0); ATT HOLD off; no RHC/THC.
     public static let channel31 = 0o57777
+    /// Inverted CH31 bit 13: 0 = MODE CONTROL ATT HOLD, which selects P66.
+    public static let channel31AttitudeHold = 0o10000
+    /// Inverted CH31 bit 15: 0 = rotational hand controller out of detent.
+    public static let channel31RHCOutOfDetent = 0o40000
     /// CH33: landing-radar antenna in position 1 (bit 6 = 0) and low scale
     /// (bit 9 = 0). Data-good bits 5/8 stay 1 until `applyLandingRadarChannel33`
     /// sees a measurement. P63 waits on POS1. R12 SCALECHK treats bit 9 as ALTSCBIT.

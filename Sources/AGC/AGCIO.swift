@@ -7,10 +7,14 @@ import Foundation
 public struct AGCChannelInput: Equatable, Sendable {
     public let channel: Int
     public let value: Int
+    /// Whether this external event also raises the channel's associated interrupt.
+    /// Momentary-switch releases update the channel level without a second interrupt.
+    public let interrupt: Bool
 
-    public init(channel: Int, value: Int) {
+    public init(channel: Int, value: Int, interrupt: Bool = true) {
         self.channel = channel
         self.value = value
+        self.interrupt = interrupt
     }
 }
 

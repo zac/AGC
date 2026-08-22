@@ -725,15 +725,18 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
 
 public struct LMSensorSnapshot: Equatable, Sendable {
     public let radarInput: LMRadarInput?
+    public let poweredDescentPanelState: LMPoweredDescentPanelState
     public let rotationalHandControllerInput: LMRotationalHandControllerInput
     public let descentRateChannel16: Int
 
     public init(
         radarInput: LMRadarInput? = nil,
+        poweredDescentPanelState: LMPoweredDescentPanelState = .automatic,
         rotationalHandControllerInput: LMRotationalHandControllerInput = LMRotationalHandControllerInput(),
         descentRateChannel16: Int = 0
     ) {
         self.radarInput = radarInput
+        self.poweredDescentPanelState = poweredDescentPanelState
         self.rotationalHandControllerInput = rotationalHandControllerInput
         self.descentRateChannel16 = descentRateChannel16 & 0o77777
     }
@@ -883,6 +886,7 @@ public actor LMSimulationRuntime {
     private var vehicleState: LMVehicleStateSnapshot
     private var configuration: LMVehicleConfiguration
     private var radarInput: LMRadarInput?
+    private var poweredDescentPanelState = LMPoweredDescentPanelState.automatic
     private var rhcInput = LMRotationalHandControllerInput()
     private var descentRateChannel16 = 0
     private var cycleRemainder = 0.0
@@ -1196,7 +1200,11 @@ public actor LMSimulationRuntime {
     public func setDescentRateControlInput(descendPlus: Bool, descendMinus: Bool) async {
         let input = LMDescentRateControlInput(descendPlus: descendPlus, descendMinus: descendMinus)
         descentRateChannel16 = input.channel16Value
-        await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: input.channel16Value))
+        await agcRuntime.enqueueInput(AGCChannelInput(
+            channel: 0o16,
+            value: input.channel16Value,
+            interrupt: input.channel16Value != 0
+        ))
     }
 
     public func simulationTrace() -> [LMSimulationTraceSample] {
@@ -1209,6 +1217,14 @@ public actor LMSimulationRuntime {
         }
         if let rhcInput = input.rotationalHandControllerInput {
             await setRotationalHandControllerInput(rhcInput)
+        }
+        if let panelState = input.poweredDescentPanelState {
+            poweredDescentPanelState = panelState
+            await agcRuntime.enqueueInputs(
+                panelState.channelInputs(rhcOutOfDetent: rhcInput.outOfDetent)
+                    .filter { $0.channel != 0o33 }
+            )
+            await enableLandingDAP()
         }
         if !input.rawChannelInputs.isEmpty {
             // CH33 is the LR discretes word. The held panel value has data-good
@@ -1226,7 +1242,17 @@ public actor LMSimulationRuntime {
         await applyLandingRadarChannel33()
         if let descentRateInput = input.descentRateInput {
             descentRateChannel16 = descentRateInput.channel16Value
-            await agcRuntime.enqueueInput(AGCChannelInput(channel: 0o16, value: descentRateInput.channel16Value))
+            // Typed panel frames model an actual momentary ROD switch: the
+            // release changes CH16 back to zero without raising KEYRUPT2.
+            // Legacy AUTO frames retain their established input timing until
+            // that closed-loop trajectory is recalibrated independently.
+            let isTypedMomentaryRelease = input.poweredDescentPanelState != nil
+                && descentRateInput.channel16Value == 0
+            await agcRuntime.enqueueInput(AGCChannelInput(
+                channel: 0o16,
+                value: descentRateInput.channel16Value,
+                interrupt: !isTypedMomentaryRelease
+            ))
         }
         await advanceLandingRadarPermission(for: input)
     }
@@ -1372,6 +1398,7 @@ public actor LMSimulationRuntime {
         let sourceStatus = makeSourceStatus(commands: resolved)
         let sensorState = LMSensorSnapshot(
             radarInput: radarInput,
+            poweredDescentPanelState: poweredDescentPanelState,
             rotationalHandControllerInput: rhcInput,
             descentRateChannel16: descentRateChannel16
         )

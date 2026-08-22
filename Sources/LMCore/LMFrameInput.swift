@@ -86,28 +86,84 @@ public struct LMDescentRateControlInput: Equatable, Sendable, Codable {
     public var channel16Value: Int {
         var value = 0
         if descendPlus {
-            value |= 0o20000
+            value |= 0o40
         }
         if descendMinus {
-            value |= 0o40000
+            value |= 0o100
         }
         return value
     }
 }
 
+public enum LMPoweredDescentAttitudeMode: String, Equatable, Sendable, Codable {
+    case automatic
+    case attitudeHold
+}
+
+/// Crew-selectable powered-descent panel state held for an entire simulation
+/// frame. Luminary's GUILDENSTERN monitor switches P65/P67 into P66 whenever
+/// the MODE CONTROL switch presents the ATT HOLD discrete on channel 31.
+public struct LMPoweredDescentPanelState: Equatable, Sendable, Codable {
+    public let attitudeMode: LMPoweredDescentAttitudeMode
+
+    public init(attitudeMode: LMPoweredDescentAttitudeMode = .automatic) {
+        self.attitudeMode = attitudeMode
+    }
+
+    public static let automatic = LMPoweredDescentPanelState()
+    public static let p66AttitudeHold = LMPoweredDescentPanelState(attitudeMode: .attitudeHold)
+
+    public var channel31Value: Int {
+        channel31Value(rhcOutOfDetent: false)
+    }
+
+    public func channel31Value(rhcOutOfDetent: Bool) -> Int {
+        var value: Int
+        switch attitudeMode {
+        case .automatic:
+            value = LMPoweredDescentPanel.channel31
+        case .attitudeHold:
+            value = LMPoweredDescentPanel.channel31
+                & ~LMPoweredDescentPanel.channel31AttitudeHold
+        }
+        if rhcOutOfDetent {
+            value &= ~LMPoweredDescentPanel.channel31RHCOutOfDetent
+        }
+        return value
+    }
+
+    public var channelInputs: [AGCChannelInput] {
+        channelInputs(rhcOutOfDetent: false)
+    }
+
+    public func channelInputs(rhcOutOfDetent: Bool) -> [AGCChannelInput] {
+        [
+            AGCChannelInput(channel: 0o30, value: LMPoweredDescentPanel.channel30),
+            AGCChannelInput(
+                channel: 0o31,
+                value: channel31Value(rhcOutOfDetent: rhcOutOfDetent)
+            ),
+            AGCChannelInput(channel: 0o33, value: LMPoweredDescentPanel.channel33)
+        ]
+    }
+}
+
 public struct LMFrameInput: Equatable, Sendable {
     public let radarInput: LMRadarInput?
+    public let poweredDescentPanelState: LMPoweredDescentPanelState?
     public let rotationalHandControllerInput: LMRotationalHandControllerInput?
     public let descentRateInput: LMDescentRateControlInput?
     public let rawChannelInputs: [AGCChannelInput]
 
     public init(
         radarInput: LMRadarInput? = nil,
+        poweredDescentPanelState: LMPoweredDescentPanelState? = nil,
         rotationalHandControllerInput: LMRotationalHandControllerInput? = nil,
         descentRateInput: LMDescentRateControlInput? = nil,
         rawChannelInputs: [AGCChannelInput] = []
     ) {
         self.radarInput = radarInput
+        self.poweredDescentPanelState = poweredDescentPanelState
         self.rotationalHandControllerInput = rotationalHandControllerInput
         self.descentRateInput = descentRateInput
         self.rawChannelInputs = rawChannelInputs
@@ -157,6 +213,29 @@ public struct LMFrameInput: Equatable, Sendable {
                 descendMinus: descendMinus
             ),
             rawChannelInputs: LMPoweredDescentPanel.channelInputs
+        )
+    }
+
+    /// P66 crew frame: ATT HOLD selects rate-of-descent guidance, the ACA is
+    /// held continuously for every AGC RHC sample, and each ROD switch closure
+    /// increments or decrements Luminary's desired descent rate.
+    public static func astronautLand(
+        from state: LMVehicleStateSnapshot,
+        panelState: LMPoweredDescentPanelState = .automatic,
+        attitudeController: LMRotationalHandControllerInput = LMRotationalHandControllerInput(),
+        descendPlus: Bool = false,
+        descendMinus: Bool = false
+    ) -> LMFrameInput {
+        LMFrameInput(
+            radarInput: LMLandingRadar.measurement(from: state, position2: false).map { _ in
+                .landingRadar(state)
+            },
+            poweredDescentPanelState: panelState,
+            rotationalHandControllerInput: attitudeController,
+            descentRateInput: LMDescentRateControlInput(
+                descendPlus: descendPlus,
+                descendMinus: descendMinus
+            )
         )
     }
 }

@@ -596,12 +596,39 @@ class AGCTests {
         engine.ioDelegate = io
         state.downruptTimeValid = false
         state.allowInterrupt = false
-        io.pendingInputs = [[AGCChannelInput(channel: 0o16, value: 0o20000)]]
+        io.pendingInputs = [[AGCChannelInput(channel: 0o16, value: 0o40)]]
 
         await engine.runEngine(for: 1)
 
         #expect(state.interruptRequests[6] == 1)
-        #expect(state.inputChannels[0o16] == 0o20000)
+        #expect(state.inputChannels[0o16] == 0o40)
+    }
+
+    @Test func channel16ReleaseClearsDiscreteWithoutRaisingKeyrupt2() async throws {
+        let (engine, state) = try makeEngine()
+        let io = TestIO()
+        engine.ioDelegate = io
+        state.downruptTimeValid = false
+        state.allowInterrupt = false
+        state.inputChannels[0o16] = 0o100
+        io.pendingInputs = [[AGCChannelInput(channel: 0o16, value: 0, interrupt: false)]]
+
+        await engine.runEngine(for: 1)
+
+        #expect(state.inputChannels[0o16] == 0)
+        #expect(state.interruptRequests[6] == 0)
+    }
+
+    @Test func luminaryDescentMinusInterruptReachesRodCount() async throws {
+        let runtime = try makeRuntime()
+        _ = await runtime.step(cycles: 1_000_000)
+        let before = await runtime.readErasable(ecadr: 0o3746)
+
+        await runtime.enqueueInput(AGCChannelInput(channel: 0o16, value: 0o100))
+        _ = await runtime.step(cycles: 20_000)
+        let after = await runtime.readErasable(ecadr: 0o3746)
+
+        #expect(after != before, "MARKRUPT DESCEND- should decrement RODCOUNT")
     }
 
     @Test func proKeyClearsChannel32Bit14() async throws {

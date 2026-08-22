@@ -376,12 +376,12 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         ])
     }
 
-    // Channel 16 bits 14 and 15 are the crew DESCEND+ / DESCEND- inputs.
+    // Channel 16 bits 6 and 7 are the crew DESCEND+ / DESCEND- inputs.
     // Source: Apollo-11 Luminary099 INPUT_OUTPUT_CHANNEL_BIT_DESCRIPTIONS.agc.
     private static func decodeDescentRateCommands(channel16: Int) -> [LMVehicleDiscreteCommand] {
         discreteCommands(channel: 0o16, value: channel16, mappings: [
-            (14, "DESCEND+ crew input"),
-            (15, "DESCEND- crew input")
+            (6, "DESCEND+ crew input"),
+            (7, "DESCEND- crew input")
         ])
     }
 
@@ -426,7 +426,7 @@ public struct LMVehicleSnapshot: Equatable, Sendable, Codable {
         bits.append(contentsOf: unmappedBits(channel: 0o12, value: channel12, mappedMask: bitsMask([9, 10, 11, 12])))
         bits.append(contentsOf: unmappedBits(channel: 0o13, value: channel13, mappedMask: bitsMask([5, 9, 10])))
         bits.append(contentsOf: unmappedBits(channel: 0o14, value: channel14, mappedMask: bitsMask([4])))
-        bits.append(contentsOf: unmappedBits(channel: 0o16, value: channel16, mappedMask: bitsMask([14, 15])))
+        bits.append(contentsOf: unmappedBits(channel: 0o16, value: channel16, mappedMask: bitsMask([6, 7])))
         return bits
     }
 

@@ -105,11 +105,18 @@ public struct AGCRotationalHandControllerInput: Equatable, Sendable {
     public let pitch: Int
     public let yaw: Int
     public let roll: Int
+    public let outOfDetent: Bool
 
-    public init(pitch: Int = 0, yaw: Int = 0, roll: Int = 0) {
+    public init(
+        pitch: Int = 0,
+        yaw: Int = 0,
+        roll: Int = 0,
+        outOfDetent: Bool? = nil
+    ) {
         self.pitch = pitch
         self.yaw = yaw
         self.roll = roll
+        self.outOfDetent = outOfDetent ?? (pitch != 0 || yaw != 0 || roll != 0)
     }
 }
 

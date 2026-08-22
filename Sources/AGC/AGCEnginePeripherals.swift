@@ -30,13 +30,15 @@ extension AGCEngine {
                 let storedValue = writeIO(address: normalizedChannel, value: mergedValue)
                 
                 // If this is a keystroke from the DSKY (channel 15), generate KEYRUPT1
-                if normalizedChannel == 0o15 {
+                if normalizedChannel == 0o15 && event.interrupt {
                     state.interruptRequests[5] = 1  // KEYRUPT1
-                } else if normalizedChannel == 0o16 {
+                } else if normalizedChannel == 0o16 && event.interrupt {
                     state.interruptRequests[6] = 1  // KEYRUPT2 (MARK / descent-rate keys)
                 } else if normalizedChannel == 0o173 {
                     state.erasableMemory[0][Register.regINLINK.rawValue] = storedValue & 0o77777
-                    state.interruptRequests[7] = 1  // UPRUPT interrupt
+                    if event.interrupt {
+                        state.interruptRequests[7] = 1  // UPRUPT interrupt
+                    }
                 } else if normalizedChannel == 0o166 {
                     lastRhcPitch = storedValue
                     channelOutput(channel: normalizedChannel, value: storedValue)

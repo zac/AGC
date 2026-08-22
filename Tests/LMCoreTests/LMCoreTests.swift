@@ -8,7 +8,7 @@ import Testing
 struct LMCoreCommandDecodingTests {
     @Test func `vehicle snapshot decodes AGC raw channels`() {
         let agc = makeAGCSnapshot(
-            inputChannels: [0o16: 0o60000],
+            inputChannels: [0o16: 0o140],
             outputChannels: [
                 0o5: 0o12121,
                 0o6: 0o06060,
@@ -27,7 +27,7 @@ struct LMCoreCommandDecodingTests {
         #expect(snapshot.outputChannel12 == 0o7400)
         #expect(snapshot.outputChannel13 == 0o1420)
         #expect(snapshot.outputChannel14 == 0o10)
-        #expect(snapshot.inputChannel16 == 0o60000)
+        #expect(snapshot.inputChannel16 == 0o140)
         #expect(snapshot.mainEngineOn)
         #expect(snapshot.mainEngineOff)
         #expect(snapshot.thrustDriveActive)
@@ -49,7 +49,7 @@ struct LMCoreCommandDecodingTests {
             outputChannel12: 0o7400,
             outputChannel13: 0o1420,
             outputChannel14: 0o10,
-            inputChannel16: 0o60000
+            inputChannel16: 0o140
         )
 
         #expect(snapshot.mainEngineCommands.map(\.name).contains("main engine on command"))
@@ -72,7 +72,7 @@ struct LMCoreCommandDecodingTests {
             outputChannel12: 0o7400,
             outputChannel13: 0o1420,
             outputChannel14: 0o10,
-            inputChannel16: 0o60000
+            inputChannel16: 0o140
         )
 
         #expect(snapshot.rcsJets.allSatisfy { !$0.source.reference.id.isEmpty })
@@ -202,6 +202,7 @@ struct LMCoreScenarioAndDynamicsTests {
 
     @Test func `auto-land frame holds the AUTO panel and landing-radar altitude`() {
         let input = LMFrameInput.autoLand(altitudeMeters: 100)
+        #expect(input.poweredDescentPanelState == nil)
         #expect(input.rawChannelInputs.map(\.channel) == [0o30, 0o31, 0o33])
         #expect(input.rawChannelInputs.map(\.value) == [
             LMPoweredDescentPanel.channel30,
@@ -212,6 +213,48 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(input.radarInput?.rawAGCInput?.landingRadarVelocityX == nil)
         #expect(input.descentRateInput?.descendPlus == false)
         #expect(input.descentRateInput?.descendMinus == false)
+    }
+
+    @Test func `astronaut landing frame holds ATT HOLD ACA and ROD controls`() {
+        let aca = LMRotationalHandControllerInput(pitch: 0o11, yaw: 0o22, roll: 0o33)
+        let input = LMFrameInput.astronautLand(
+            from: LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100)),
+            panelState: .p66AttitudeHold,
+            attitudeController: aca,
+            descendMinus: true
+        )
+
+        #expect(input.poweredDescentPanelState == .p66AttitudeHold)
+        #expect(
+            input.poweredDescentPanelState?.channel31Value
+                == (LMPoweredDescentPanel.channel31 & ~LMPoweredDescentPanel.channel31AttitudeHold)
+        )
+        #expect(input.rotationalHandControllerInput == aca)
+        #expect(input.descentRateInput == LMDescentRateControlInput(descendMinus: true))
+        #expect(aca.outOfDetent)
+        #expect(
+            input.poweredDescentPanelState?
+                .channel31Value(rhcOutOfDetent: aca.outOfDetent)
+                == (LMPoweredDescentPanel.channel31
+                    & ~LMPoweredDescentPanel.channel31AttitudeHold
+                    & ~LMPoweredDescentPanel.channel31RHCOutOfDetent)
+        )
+    }
+
+    @Test func `astronaut frame drives ATT HOLD and RHC out-of-detent discretes`() async throws {
+        let runtime = try LMSimulationRuntime(coreImage: Data())
+        let state = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100))
+        let snapshot = await runtime.step(
+            deltaTime: 0.001,
+            input: .astronautLand(
+                from: state,
+                panelState: .p66AttitudeHold,
+                attitudeController: LMRotationalHandControllerInput(pitch: 0o1)
+            )
+        )
+        let channel31 = try #require(snapshot.agc.inputChannels[0o31])
+        #expect((channel31 & LMPoweredDescentPanel.channel31AttitudeHold) == 0)
+        #expect((channel31 & LMPoweredDescentPanel.channel31RHCOutOfDetent) == 0)
     }
 
     @Test func `auto-land CH33 altitude data-good survives the panel word`() async throws {
@@ -875,7 +918,15 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta1) == 0o04211)
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lralpha2) == 0o01042)
         #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lrbeta2) == 0o00000)
-
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.rodScale) == 0o14370)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.tauRod) == 0o11300)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.tauRod + 1) == 0o00000)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lagOverTau) == 0o15164)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.lagOverTau + 1) == 0o01420)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.minForce) == 0o00001)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.minForce + 1) == 0o27631)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.maxForce) == 0o00013)
+        #expect(await runtime.readErasable(ecadr: Luminary099Erasable.maxForce + 1) == 0o06551)
         let snapshot = await runtime.snapshot()
         #expect(snapshot.agc.inputChannels[0o31] == LMPoweredDescentPanel.channel31)
         #expect(snapshot.agc.inputChannels[0o30] == LMPoweredDescentPanel.channel30)
@@ -2874,6 +2925,95 @@ struct LMCoreScenarioAndDynamicsTests {
             "soft contact should stay within the descent-rate envelope \(trail)"
         )
         #expect(contact.tiltRadians <= LMLandingContactCriteria.softTiltRadians)
+    }
+
+    @Test func `P65 ATT HOLD takeover enters P66 then ROD changes desired descent rate`() async throws {
+        let romURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AGCTests/Luminary099.bin")
+        try #require(FileManager.default.fileExists(atPath: romURL.path))
+        let runtime = try LMSimulationRuntime(binFile: romURL, scenario: .apollo11SourceBacked)
+        var snapshot = await runtime.bootAndEnterP63()
+        let dt = LMSimulationPace.acceleratedDeltaSeconds
+        let deadline = Luminary99LandingPadLoad.guidDurnCentiseconds / 100.0 + 180.0
+
+        let handController = LMRotationalHandControllerInput(pitch: 0o1)
+
+        while snapshot.timeSeconds < deadline,
+              snapshot.agc.dsky.programNumber != 65,
+              !snapshot.vehicleState.flightOutcome.isTerminal {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .autoLand(from: snapshot.vehicleState)
+            )
+        }
+        try #require(snapshot.agc.dsky.programNumber == 65)
+
+        snapshot = await runtime.step(
+            deltaTime: dt,
+            input: .astronautLand(
+                from: snapshot.vehicleState,
+                panelState: .p66AttitudeHold,
+                attitudeController: handController,
+                descendPlus: true
+            )
+        )
+        for _ in 0..<80 where snapshot.agc.dsky.programNumber != 66 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .astronautLand(
+                    from: snapshot.vehicleState,
+                    panelState: .p66AttitudeHold,
+                    attitudeController: handController
+                )
+            )
+        }
+        #expect(snapshot.agc.dsky.programNumber == 66)
+        #expect(snapshot.sensorState.poweredDescentPanelState == .p66AttitudeHold)
+
+        // P66 is selected and sustained by MODE CONTROL ATT HOLD. Returning
+        // to AUTO takes GUILDENSTERN through GUILDRET, which clears RODCOUNT
+        // before the one-second ROD task can consume a crew click.
+        for _ in 0..<4 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .astronautLand(
+                    from: snapshot.vehicleState,
+                    panelState: .p66AttitudeHold,
+                    attitudeController: handController
+                )
+            )
+        }
+        #expect(snapshot.agc.dsky.programNumber == 66)
+        #expect(snapshot.sensorState.poweredDescentPanelState == .p66AttitudeHold)
+        let desiredBefore = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vdgVert)
+        snapshot = await runtime.step(
+            deltaTime: dt,
+            input: .astronautLand(
+                from: snapshot.vehicleState,
+                panelState: .p66AttitudeHold,
+                attitudeController: handController,
+                descendPlus: true
+            )
+        )
+        for _ in 0..<20 {
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .astronautLand(
+                    from: snapshot.vehicleState,
+                    panelState: .p66AttitudeHold,
+                    attitudeController: handController
+                )
+            )
+        }
+        let desiredAfter = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.vdgVert)
+
+        #expect(desiredAfter != desiredBefore, "one ROD closure should update VDGVERT")
+        #expect(snapshot.agc.dsky.programNumber == 66)
+        #expect(snapshot.sensorState.descentRateChannel16 == 0, "the momentary ROD switch should release")
+        #expect(snapshot.sensorState.rotationalHandControllerInput == handController)
+        #expect(snapshot.sensorState.rotationalHandControllerInput.outOfDetent)
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {

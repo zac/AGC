@@ -126,6 +126,16 @@ public enum Luminary099Erasable {
     public static let lrwvfy = 0o2534
     public static let lrwvfx = 0o2535
     public static let lrwvff = 0o2536
+    /// E5,1537. Apollo 11 P66 rate-of-descent step, 1 ft/s (B-7).
+    public static let rodScale = 0o2537
+    /// E5,1540. Apollo 11 P66 ROD response time, 1.5 seconds (B9 DP).
+    public static let tauRod = 0o2540
+    /// E5,1542. Apollo 11 P66 DPS lag divided by TAUROD (B0 DP).
+    public static let lagOverTau = 0o2542
+    /// E5,1544. Apollo 11 minimum P66 thrust, 980 lbf (B12 DP).
+    public static let minForce = 0o2544
+    /// E5,1546. Apollo 11 maximum P66 thrust, 6300 lbf (B12 DP).
+    public static let maxForce = 0o2546
     /// E7,1420. SERVICER bypasses every altitude update when H > LRHMAX.
     public static let lrhmax = 0o3420
     public static let lrwh = 0o3421
@@ -146,6 +156,10 @@ public enum Luminary099Erasable {
     public static let land = 0o3634
     /// E7,1642 TTF/8.
     public static let ttf8 = 0o3642
+    /// E7,1644. P65/P66 desired vertical rate, updated by RODCOMP.
+    public static let vdgVert = 0o3644
+    /// E7,1746. ROD switch accumulator consumed by P66 RODCOMP.
+    public static let rodCount = 0o3746
     /// Unswitched FLAGWRD11 / LRSTAT. READLR bit 6, NOLRREAD bit 10, LRBYPASS bit 15.
     public static let flagwrd11 = 0o107
     /// Unswitched FLAGWRD12 / RADMODES. LRPOSBIT is bit 6, ALTSCBIT is bit 9.
