@@ -189,15 +189,19 @@ public enum LMRCSGeometry {
 
         let plusZ = LMVector3D(z: 1)
         let minusZ = LMVector3D(z: -1)
+        // The two fore/aft jets in each physical RCS cluster share a quadrant.
+        // Luminary's ROT-TOUV transform defines +U=(+Q,+R), +V=(-Q,+R),
+        // -U=(-Q,-R), and -V=(+Q,-R). ALLJETS then pairs U/V commands
+        // to request a pure Q or R torque.
         return [
-            .jet10: jet(.jet10, simPosition: LMVector3D(x: s, y: s), simThrust: plusZ),
+            .jet10: jet(.jet10, simPosition: LMVector3D(x: -s, y: -s), simThrust: plusZ),
             .jet14: jet(.jet14, simPosition: LMVector3D(x: -s, y: s), simThrust: plusZ),
             .jet6: jet(.jet6, simPosition: LMVector3D(x: s, y: -s), simThrust: plusZ),
-            .jet2: jet(.jet2, simPosition: LMVector3D(x: -s, y: -s), simThrust: plusZ),
-            .jet1: jet(.jet1, simPosition: LMVector3D(x: s, y: -s), simThrust: minusZ),
-            .jet5: jet(.jet5, simPosition: LMVector3D(x: -s, y: -s), simThrust: minusZ),
-            .jet9: jet(.jet9, simPosition: LMVector3D(x: -s, y: s), simThrust: minusZ),
-            .jet13: jet(.jet13, simPosition: LMVector3D(x: s, y: s), simThrust: minusZ)
+            .jet2: jet(.jet2, simPosition: LMVector3D(x: s, y: s), simThrust: plusZ),
+            .jet1: jet(.jet1, simPosition: LMVector3D(x: s, y: s), simThrust: minusZ),
+            .jet5: jet(.jet5, simPosition: LMVector3D(x: s, y: -s), simThrust: minusZ),
+            .jet9: jet(.jet9, simPosition: LMVector3D(x: -s, y: -s), simThrust: minusZ),
+            .jet13: jet(.jet13, simPosition: LMVector3D(x: -s, y: s), simThrust: minusZ)
         ]
     }()
 

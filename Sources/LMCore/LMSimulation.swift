@@ -1145,8 +1145,9 @@ public actor LMSimulationRuntime {
     /// operate-only sequence and schedules a delayed ICDU zero.
     /// V65 SNUFFBIT keeps Q,R RCS off so GTS is not stacked with jets
     /// (AFTERTJ XTRANS). P64 FINDCDUW’s LAND−R switch still needs GTS-only:
-    /// clearing SNUFFBIT lets Q,R jets tumble through the window change.
-    private func enableLandingDAP() async {
+    /// clearing SNUFFBIT there lets Q,R jets tumble through the window change.
+    /// P66 ATT HOLD instead requires it clear so ACA rate commands can use RCS.
+    private func enableLandingDAP(allowRotationalRCS: Bool = false) async {
         let imodes33 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.imodes33)
         await agcRuntime.writeErasable(
             ecadr: Luminary099Erasable.imodes33,
@@ -1156,7 +1157,11 @@ public actor LMSimulationRuntime {
             Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.snuffer),
             Luminary099Flag.bit(decimalIndex: Luminary099Flag.snuffer)
         )
-        await agcRuntime.setErasableBit(ecadr: snuffer.0, bit: snuffer.1)
+        if allowRotationalRCS {
+            await agcRuntime.clearErasableBit(ecadr: snuffer.0, bit: snuffer.1)
+        } else {
+            await agcRuntime.setErasableBit(ecadr: snuffer.0, bit: snuffer.1)
+        }
     }
 
     public func readErasable(ecadr: Int) async -> Int {
@@ -1224,7 +1229,9 @@ public actor LMSimulationRuntime {
                 panelState.channelInputs(rhcOutOfDetent: rhcInput.outOfDetent)
                     .filter { $0.channel != 0o33 }
             )
-            await enableLandingDAP()
+            await enableLandingDAP(
+                allowRotationalRCS: panelState.attitudeMode == .attitudeHold
+            )
         }
         if !input.rawChannelInputs.isEmpty {
             // CH33 is the LR discretes word. The held panel value has data-good

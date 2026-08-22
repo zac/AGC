@@ -87,6 +87,77 @@ struct LMCoreCommandDecodingTests {
 
 @Suite("LMCore scenarios and dynamics")
 struct LMCoreScenarioAndDynamicsTests {
+    @Test func `P66 pilot encodes signed ACA counts`() {
+        let input = LMRotationalHandControllerInput.signedCounts(
+            pitch: -1,
+            yaw: 1,
+            roll: -2
+        )
+
+        #expect(input.pitch == 0o77776)
+        #expect(input.yaw == 0o1)
+        #expect(input.roll == 0o77775)
+        #expect(input.outOfDetent)
+    }
+
+    @Test func `P66 pilot tilts thrust against horizontal velocity`() {
+        let pilot = LMP66Pilot()
+        let northbound = pilot.attitudeController(for: LMVehicleStateSnapshot(
+            velocityMetersPerSecond: LMVector3D(x: 10)
+        ))
+        let eastbound = pilot.attitudeController(for: LMVehicleStateSnapshot(
+            velocityMetersPerSecond: LMVector3D(y: 10)
+        ))
+
+        #expect(northbound.roll == 0o77767)
+        #expect(northbound.yaw == 0)
+        #expect(eastbound.pitch == 0o10)
+        #expect(eastbound.roll == 0)
+        let pulsedPilot = LMP66Pilot(correctionIntervalFrames: 4)
+        #expect(
+            pulsedPilot.attitudeController(
+                for: LMVehicleStateSnapshot(velocityMetersPerSecond: LMVector3D(x: 10)),
+                frameIndex: 1
+            ) == .signedCounts()
+        )
+    }
+
+    @Test func `P66 pilot damps tilt and body rate back toward upright`() {
+        let pilot = LMP66Pilot()
+        let tilt = 5 * Double.pi / 180
+        let tilted = pilot.attitudeController(for: LMVehicleStateSnapshot(
+            attitude: LMQuaternion(w: cos(tilt / 2), x: sin(tilt / 2)),
+            angularVelocityRadiansPerSecond: LMVector3D(x: 0.02)
+        ))
+
+        #expect(tilted.pitch == 0o77767)
+        #expect(tilted.yaw == 0)
+        #expect(tilted.roll == 0)
+    }
+
+    @Test func `P66 pilot uses momentary ROD clicks to follow terminal descent profile`() {
+        let pilot = LMP66Pilot()
+        let hoveringHigh = pilot.descentRateController(for: LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 40),
+            velocityMetersPerSecond: LMVector3D(z: 0)
+        ))
+        let descendingFastLow = pilot.descentRateController(for: LMVehicleStateSnapshot(
+            positionMeters: LMVector3D(z: 5),
+            velocityMetersPerSecond: LMVector3D(z: -1)
+        ))
+
+        #expect(hoveringHigh.descendMinus)
+        #expect(!hoveringHigh.descendPlus)
+        #expect(descendingFastLow.descendPlus)
+        #expect(!descendingFastLow.descendMinus)
+        #expect(
+            pilot.descentRateController(
+                for: LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 40)),
+                frameIndex: 1
+            ).channel16Value == 0
+        )
+    }
+
     @Test func `source backed scenario exposes sources and unknowns`() {
         let scenario = LMPoweredDescentScenario.apollo11SourceBacked
 
@@ -255,6 +326,13 @@ struct LMCoreScenarioAndDynamicsTests {
         let channel31 = try #require(snapshot.agc.inputChannels[0o31])
         #expect((channel31 & LMPoweredDescentPanel.channel31AttitudeHold) == 0)
         #expect((channel31 & LMPoweredDescentPanel.channel31RHCOutOfDetent) == 0)
+        let snufferMask = 1 << (
+            Luminary099Flag.bit(decimalIndex: Luminary099Flag.snuffer) - 1
+        )
+        let snufferWord = await runtime.readErasable(
+            ecadr: Luminary099Flag.ecadr(decimalIndex: Luminary099Flag.snuffer)
+        )
+        #expect((snufferWord & snufferMask) == 0, "P66 ACA rate command requires rotational RCS")
     }
 
     @Test func `auto-land CH33 altitude data-good survives the panel word`() async throws {
@@ -1076,7 +1154,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(next.angularVelocityRadiansPerSecond.z > gravityOnly.angularVelocityRadiansPerSecond.z)
     }
 
-    @Test func `channel 5 plus-U jets produce NASA plus-Q torque`() {
+    @Test func `channel 5 plus-U jets produce NASA plus-Q plus-R torque`() {
         let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 14_969)
         let next = LMDynamics.propagate(
             state: initial,
@@ -1086,11 +1164,11 @@ struct LMCoreScenarioAndDynamicsTests {
         )
         #expect(Set(LMVehicleSnapshot(out0: 0o204).rcsJets.map(\.jet)) == Set([.jet5, .jet14]))
         #expect(next.angularVelocityRadiansPerSecond.x > 0)
-        #expect(abs(next.angularVelocityRadiansPerSecond.y) < 1e-9)
+        #expect(next.angularVelocityRadiansPerSecond.y > 0)
         #expect(abs(next.angularVelocityRadiansPerSecond.z) < 1e-9)
     }
 
-    @Test func `channel 5 plus-V jets produce NASA plus-Q torque`() {
+    @Test func `channel 5 plus-V jets produce NASA minus-Q plus-R torque`() {
         let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 14_969)
         let next = LMDynamics.propagate(
             state: initial,
@@ -1099,9 +1177,30 @@ struct LMCoreScenarioAndDynamicsTests {
             deltaTime: 1
         )
         #expect(Set(LMVehicleSnapshot(out0: 0o041).rcsJets.map(\.jet)) == Set([.jet1, .jet10]))
-        #expect(next.angularVelocityRadiansPerSecond.x > 0)
-        #expect(abs(next.angularVelocityRadiansPerSecond.y) < 1e-9)
+        #expect(next.angularVelocityRadiansPerSecond.x < 0)
+        #expect(next.angularVelocityRadiansPerSecond.y > 0)
         #expect(abs(next.angularVelocityRadiansPerSecond.z) < 1e-9)
+    }
+
+    @Test func `Luminary U-V pairs produce pure Q torque`() {
+        let initial = LMVehicleStateSnapshot(positionMeters: LMVector3D(z: 100), massKilograms: 14_969)
+        let positiveQ = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(out0: 0o226),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+        let negativeQ = LMDynamics.propagate(
+            state: initial,
+            commands: LMVehicleSnapshot(out0: 0o151),
+            configuration: .sourceBackedDefault,
+            deltaTime: 1
+        )
+
+        #expect(positiveQ.angularVelocityRadiansPerSecond.x > 0)
+        #expect(abs(positiveQ.angularVelocityRadiansPerSecond.y) < 1e-9)
+        #expect(negativeQ.angularVelocityRadiansPerSecond.x < 0)
+        #expect(abs(negativeQ.angularVelocityRadiansPerSecond.y) < 1e-9)
     }
 
     @Test func `plus-U at PDI increases CDUY`() {
@@ -2927,7 +3026,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(contact.tiltRadians <= LMLandingContactCriteria.softTiltRadians)
     }
 
-    @Test func `P65 ATT HOLD takeover enters P66 then ROD changes desired descent rate`() async throws {
+    @Test func `P66 pilot takes over in ATT HOLD and reaches soft contact`() async throws {
         let romURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2938,7 +3037,7 @@ struct LMCoreScenarioAndDynamicsTests {
         let dt = LMSimulationPace.acceleratedDeltaSeconds
         let deadline = Luminary99LandingPadLoad.guidDurnCentiseconds / 100.0 + 180.0
 
-        let handController = LMRotationalHandControllerInput(pitch: 0o1)
+        let pilot = LMP66Pilot()
 
         while snapshot.timeSeconds < deadline,
               snapshot.agc.dsky.programNumber != 65,
@@ -2949,6 +3048,7 @@ struct LMCoreScenarioAndDynamicsTests {
             )
         }
         try #require(snapshot.agc.dsky.programNumber == 65)
+        var handController = pilot.attitudeController(for: snapshot.vehicleState)
 
         snapshot = await runtime.step(
             deltaTime: dt,
@@ -3014,6 +3114,78 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(snapshot.sensorState.descentRateChannel16 == 0, "the momentary ROD switch should release")
         #expect(snapshot.sensorState.rotationalHandControllerInput == handController)
         #expect(snapshot.sensorState.rotationalHandControllerInput.outOfDetent)
+
+        let contactDeadline = snapshot.timeSeconds + 180
+        var manualStep = 0
+        var manualTrail: [String] = []
+        while snapshot.timeSeconds < contactDeadline,
+              !snapshot.vehicleState.flightOutcome.isTerminal {
+            handController = pilot.attitudeController(
+                for: snapshot.vehicleState,
+                frameIndex: manualStep
+            )
+            let descentRateController = pilot.descentRateController(
+                for: snapshot.vehicleState,
+                frameIndex: manualStep
+            )
+            snapshot = await runtime.step(
+                deltaTime: dt,
+                input: .astronautLand(
+                    from: snapshot.vehicleState,
+                    panelState: .p66AttitudeHold,
+                    attitudeController: handController,
+                    descendPlus: descentRateController.descendPlus,
+                    descendMinus: descentRateController.descendMinus
+                )
+            )
+            if manualStep.isMultiple(of: 20) {
+                let state = snapshot.vehicleState
+                let tilt = acos(min(max(state.attitude.rotated(LMVector3D(z: 1)).z, -1), 1))
+                let omegaQ = AGCSinglePrecision(
+                    word: await runtime.readErasable(ecadr: Luminary099Erasable.omegaq)
+                ).decoded(scale: 0) * .pi / 4
+                let cduy = await runtime.readErasable(ecadr: Register.regCDUY.rawValue)
+                let cduyd = await runtime.readErasable(ecadr: Luminary099Erasable.cduxd + 1)
+                var cduError = (cduy & 0o77777) - (cduyd & 0o77777)
+                if cduError > 16_384 { cduError -= 32_768 }
+                if cduError < -16_384 { cduError += 32_768 }
+                manualTrail.append(String(
+                    format: "t=%.1f alt=%.0fft v=%.1f,%.1f,%.1f tilt=%.1fdeg wx=%.2f oq=%.2f qerr=%.1fdeg aca=%05o,%05o,%05o out=%03o,%03o jets=%d",
+                    snapshot.timeSeconds,
+                    state.altitudeMeters / 0.3048,
+                    state.velocityMetersPerSecond.x,
+                    state.velocityMetersPerSecond.y,
+                    state.velocityMetersPerSecond.z,
+                    tilt * 180 / .pi,
+                    state.angularVelocityRadiansPerSecond.x,
+                    omegaQ,
+                    Double(cduError) * 360 / 32_768,
+                    handController.pitch,
+                    handController.yaw,
+                    handController.roll,
+                    snapshot.vehicleCommands.out0,
+                    snapshot.vehicleCommands.out1,
+                    snapshot.vehicleCommands.rcsJets.count
+                ))
+            }
+            manualStep += 1
+        }
+
+        let final = snapshot.vehicleState
+        let summary = String(
+            format: "outcome=%@ alt=%.1fft vx=%.2f vy=%.2f vz=%.2f tilt=%.1fdeg",
+            final.flightOutcome.rawValue,
+            final.altitudeMeters / 0.3048,
+            final.velocityMetersPerSecond.x,
+            final.velocityMetersPerSecond.y,
+            final.velocityMetersPerSecond.z,
+            acos(min(max(final.attitude.rotated(LMVector3D(z: 1)).z, -1), 1)) * 180 / .pi
+        ) + " | " + manualTrail.joined(separator: " | ")
+        #expect(final.flightOutcome == .softLanding, "P66 pilot should make soft contact: \(summary)")
+        let contact = try #require(final.surfaceContact, "P66 pilot should reach the surface: \(summary)")
+        #expect(contact.horizontalSpeedMetersPerSecond <= LMLandingContactCriteria.softHorizontalSpeedMetersPerSecond)
+        #expect(contact.verticalSpeedMetersPerSecond <= LMLandingContactCriteria.softVerticalSpeedMetersPerSecond)
+        #expect(contact.tiltRadians <= LMLandingContactCriteria.softTiltRadians)
     }
 
     @Test func `Luminary idle boot keeps RP-TO-R RN and NASA RLS`() async throws {
