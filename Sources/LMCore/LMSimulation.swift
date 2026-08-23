@@ -904,6 +904,7 @@ public actor LMSimulationRuntime {
     private var landingRadarInPosition2 = false
     private var poweredDescentIgnitionTimeSeconds: Double?
     private var landingRadarPermissionKeyIndex = 0
+    private var scenarioID: String?
 
     public init(
         binFile: URL,
@@ -937,6 +938,7 @@ public actor LMSimulationRuntime {
         self.initialState = scenario.initialState
         self.vehicleState = scenario.initialState
         self.scenarioSourceStatus = scenario.sourceStatus
+        self.scenarioID = scenario.id
     }
 
     public init(coreImage: Data, scenario: LMPoweredDescentScenario) throws {
@@ -945,6 +947,7 @@ public actor LMSimulationRuntime {
         self.initialState = scenario.initialState
         self.vehicleState = scenario.initialState
         self.scenarioSourceStatus = scenario.sourceStatus
+        self.scenarioID = scenario.id
     }
 
     public func reset() async throws -> LMSimulationSnapshot {
@@ -1459,6 +1462,73 @@ public actor LMSimulationRuntime {
             lastTraceEntryID = newest
         }
         return deltas
+    }
+
+    // MARK: - Checkpoints
+
+    /// Capture the complete resumable flight state. Diagnostic-only buffers
+    /// (the rolling trace-sample window and channel-trace ring) are excluded;
+    /// ``lastTraceEntryID`` is captured so restored runs do not re-report old
+    /// channel deltas.
+    public func captureCheckpoint(scenarioID: String? = nil) async -> LMSimulationCheckpoint {
+        let agcCheckpoint = await agcRuntime.captureCheckpoint()
+        return LMSimulationCheckpoint(
+            schemaVersion: LMSimulationCheckpoint.schemaVersion,
+            coreImageSHA256: agcCheckpoint.coreImageSHA256,
+            scenarioID: scenarioID ?? self.scenarioID ?? "unspecified",
+            simulationTimeSeconds: elapsedTimeSeconds,
+            agc: agcCheckpoint,
+            vehicleState: vehicleState,
+            radarInput: radarInput,
+            panelState: poweredDescentPanelState,
+            rhcInput: rhcInput,
+            descentRateChannel16: descentRateChannel16,
+            cycleRemainder: cycleRemainder,
+            sensorFeedback: sensorFeedback.captureCheckpoint(),
+            lastSpecificForceBody: lastSpecificForceBody,
+            throttle: throttleState.captureCheckpoint(),
+            crewHandshake: p63CrewHandshake.captureCheckpoint(),
+            lastDSKYVerb: lastDSKYVerb,
+            lastDSKYNoun: lastDSKYNoun,
+            landingRadarInPosition2: landingRadarInPosition2,
+            poweredDescentIgnitionTimeSeconds: poweredDescentIgnitionTimeSeconds,
+            landingRadarPermissionKeyIndex: landingRadarPermissionKeyIndex,
+            lastTraceEntryID: lastTraceEntryID
+        )
+    }
+
+    /// Restore a checkpoint captured by this runtime type from the same Luminary
+    /// core image and, when known, the same scenario. Every check runs before
+    /// any mutation so an incompatible fixture is refused without partial state.
+    @discardableResult
+    public func restore(from checkpoint: LMSimulationCheckpoint) async throws -> LMSimulationSnapshot {
+        try checkpoint.validate(
+            coreImageSHA256: await agcRuntime.checkpointCoreImageSHA256(),
+            scenarioID: scenarioID
+        )
+
+        try await agcRuntime.applyCheckpoint(checkpoint.agc)
+
+        vehicleState = checkpoint.vehicleState
+        radarInput = checkpoint.radarInput
+        await agcRuntime.setRadarInput(radarInput?.rawAGCInput)
+        poweredDescentPanelState = checkpoint.panelState
+        rhcInput = checkpoint.rhcInput
+        descentRateChannel16 = checkpoint.descentRateChannel16
+        cycleRemainder = checkpoint.cycleRemainder
+        elapsedTimeSeconds = checkpoint.simulationTimeSeconds
+        sensorFeedback.restore(from: checkpoint.sensorFeedback)
+        lastSpecificForceBody = checkpoint.lastSpecificForceBody
+        throttleState.restore(from: checkpoint.throttle)
+        p63CrewHandshake.restore(from: checkpoint.crewHandshake)
+        lastDSKYVerb = checkpoint.lastDSKYVerb
+        lastDSKYNoun = checkpoint.lastDSKYNoun
+        landingRadarInPosition2 = checkpoint.landingRadarInPosition2
+        poweredDescentIgnitionTimeSeconds = checkpoint.poweredDescentIgnitionTimeSeconds
+        landingRadarPermissionKeyIndex = checkpoint.landingRadarPermissionKeyIndex
+        lastTraceEntryID = checkpoint.lastTraceEntryID
+
+        return await snapshot()
     }
 }
 

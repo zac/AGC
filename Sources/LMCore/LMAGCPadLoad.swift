@@ -270,6 +270,38 @@ public enum LMPoweredDescentPanel {
 /// `ENDMANU1` (“finished with R60”) so KALCMANU is not waited on. `BURNBABY`
 /// pastes V99 at TIG-5. T4RUPT samples inverted CH32 bit 14 every 120 ms, so
 /// PRO is held longer than one sample. ENTER is a one-shot CH15 keycode.
+public struct LMP63CrewHandshakeCheckpoint: Equatable, Sendable, Codable {
+    public var activePrompt: String?
+    public var holdRemaining: Double
+    public var completedPrompts: [String]
+
+    public init(
+        activePrompt: String?,
+        holdRemaining: Double,
+        completedPrompts: [String]
+    ) {
+        self.activePrompt = activePrompt
+        self.holdRemaining = holdRemaining
+        self.completedPrompts = completedPrompts
+    }
+}
+
+extension LMP63CrewHandshake {
+    func captureCheckpoint() -> LMP63CrewHandshakeCheckpoint {
+        LMP63CrewHandshakeCheckpoint(
+            activePrompt: activePRO.map { $0.rawValue },
+            holdRemaining: holdRemaining,
+            completedPrompts: completed.map { $0.rawValue }.sorted()
+        )
+    }
+
+    mutating func restore(from checkpoint: LMP63CrewHandshakeCheckpoint) {
+        activePRO = checkpoint.activePrompt.flatMap(Prompt.init(rawValue:))
+        holdRemaining = checkpoint.holdRemaining
+        completed = Set(checkpoint.completedPrompts.compactMap(Prompt.init(rawValue:)))
+    }
+}
+
 public struct LMP63CrewHandshake: Equatable, Sendable {
     public static let proHoldSeconds = 0.15
 

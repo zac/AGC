@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Channel values may include the AGC "u-bit" (`0o400`) for mask packets. Keeping inputs
 /// as an ordered list prevents repeated writes to the same channel from collapsing.
-public struct AGCChannelInput: Equatable, Sendable {
+public struct AGCChannelInput: Equatable, Sendable, Codable {
     public let channel: Int
     public let value: Int
     /// Whether this external event also raises the channel's associated interrupt.

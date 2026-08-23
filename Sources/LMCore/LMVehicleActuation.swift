@@ -126,6 +126,43 @@ public enum LMDPSGimbalMap {
     }
 }
 
+public struct LMThrottleCheckpoint: Equatable, Sendable, Codable {
+    public var pulsePosition: Double
+    public var pendingPulses: Double
+    public var lastDriveActive: Bool
+    public var lastThrustRegister: Int
+
+    public init(
+        pulsePosition: Double,
+        pendingPulses: Double,
+        lastDriveActive: Bool,
+        lastThrustRegister: Int
+    ) {
+        self.pulsePosition = pulsePosition
+        self.pendingPulses = pendingPulses
+        self.lastDriveActive = lastDriveActive
+        self.lastThrustRegister = lastThrustRegister
+    }
+}
+
+extension LMDPSThrottleState {
+    func captureCheckpoint() -> LMThrottleCheckpoint {
+        LMThrottleCheckpoint(
+            pulsePosition: pulsePosition,
+            pendingPulses: pendingPulses,
+            lastDriveActive: lastDriveActive,
+            lastThrustRegister: lastThrustRegister
+        )
+    }
+
+    mutating func restore(from checkpoint: LMThrottleCheckpoint) {
+        pulsePosition = checkpoint.pulsePosition
+        pendingPulses = checkpoint.pendingPulses
+        lastDriveActive = checkpoint.lastDriveActive
+        lastThrustRegister = checkpoint.lastThrustRegister
+    }
+}
+
 struct LMDPSThrottleState {
     var pulsePosition = 0.0
     var pendingPulses = 0.0

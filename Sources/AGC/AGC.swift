@@ -57,7 +57,7 @@ public struct AGCSnapshot: Equatable, Sendable {
     }
 }
 
-public struct AGCRadarInput: Equatable, Sendable {
+public struct AGCRadarInput: Equatable, Sendable, Codable {
     public let rendezvousRadar: Int?
     public let altitudeMeter: Int?
     /// RNRAD word for LRVELX after CH13 activity is cleared (select 4).
@@ -101,7 +101,7 @@ public struct AGCRadarInput: Equatable, Sendable {
     }
 }
 
-public struct AGCRotationalHandControllerInput: Equatable, Sendable {
+public struct AGCRotationalHandControllerInput: Equatable, Sendable, Codable {
     public let pitch: Int
     public let yaw: Int
     public let roll: Int
@@ -180,6 +180,18 @@ private final class AGCRuntimeInputQueue: AGCIOProtocol, @unchecked Sendable {
         return inputs
     }
 
+    func checkpointQueue() -> [AGCChannelInput] {
+        lock.lock()
+        defer { lock.unlock() }
+        return queue
+    }
+
+    func restore(_ inputs: [AGCChannelInput]) {
+        lock.lock()
+        queue = inputs
+        lock.unlock()
+    }
+
     func requestRadarData() {}
     func shiftToDeda(data: Int) {}
     func channelRoutine() {}
@@ -230,6 +242,127 @@ public actor AGCRuntime {
 
     public func snapshot() -> AGCSnapshot {
         makeSnapshot()
+    }
+
+    // MARK: - Checkpoints
+
+    /// SHA-256 of this runtime's Luminary core image, for checkpoint identity.
+    public func checkpointCoreImageSHA256() -> String {
+        AGCRuntimeCheckpoint.coreImageSHA256(of: coreImage)
+    }
+
+    /// Capture every mutable engine, channel, DSKY, queue, and radar state.
+    /// Fixed memory is not captured; restore reloads it from the core image
+    /// identified by the checkpoint's SHA-256 header. Debugger breakpoints and
+    /// watches are development aids and are excluded from the fixture.
+    public func captureCheckpoint() -> AGCRuntimeCheckpoint {
+        let state = components.state
+        return AGCRuntimeCheckpoint(
+            schemaVersion: AGCRuntimeCheckpoint.schemaVersion,
+            coreImageSHA256: AGCRuntimeCheckpoint.coreImageSHA256(of: coreImage),
+            cycleCounter: state.cycleCounter,
+            erasableMemory: state.erasableMemory.map { $0 },
+            inputChannels: state.inputChannels,
+            outputChannels: state.outputChannels,
+            outputChannel7: state.outputChannel7,
+            outputChannel10: state.outputChannel10,
+            extraCode: state.extraCode,
+            allowInterrupt: state.allowInterrupt,
+            pendFlag: state.pendFlag,
+            pendDelay: state.pendDelay,
+            extraDelay: state.extraDelay,
+            indexValue: state.indexValue,
+            inIsr: state.inIsr,
+            substituteInstruction: state.substituteInstruction,
+            interruptRequests: state.interruptRequests,
+            downruptTimeValid: state.downruptTimeValid,
+            downruptTime: state.downruptTime,
+            downlink: state.downlink,
+            nightWatchman: state.nightWatchman,
+            nightWatchmanTripped: state.nightWatchmanTripped,
+            ruptLock: state.ruptLock,
+            noRupt: state.noRupt,
+            tcTrap: state.tcTrap,
+            noTC: state.noTC,
+            parityFail: state.parityFail,
+            checkParity: state.checkParity,
+            warningFilter: state.warningFilter,
+            generatedWarning: state.generatedWarning,
+            restartLight: state.restartLight,
+            standby: state.standby,
+            sbyPressed: state.sbyPressed,
+            sbyStillPressed: state.sbyStillPressed,
+            nextZ: state.nextZ,
+            scalerCounter: state.scalerCounter,
+            channelRoutineCount: state.channelRoutineCount,
+            dskyTimer: state.dskyTimer,
+            dskyFlash: state.dskyFlash,
+            dskyChannel163: state.dskyChannel163,
+            tookBZF: state.tookBZF,
+            tookBZMF: state.tookBZMF,
+            trap31A: state.trap31A,
+            trap31B: state.trap31B,
+            trap32: state.trap32,
+            radarGateCounter: state.radarGateCounter,
+            dsky: components.dsky.captureCheckpoint(),
+            pendingChannelInputs: components.externalInput.checkpointQueue(),
+            radarInput: radarInputBox.snapshot()
+        )
+    }
+
+    /// Restore a checkpoint captured from a runtime built with the same core
+    /// image. Validation runs before any mutation, so an incompatible fixture
+    /// is refused without leaving partial state behind.
+    public func applyCheckpoint(_ checkpoint: AGCRuntimeCheckpoint) throws {
+        try checkpoint.validate(coreImage: coreImage)
+        let state = components.state
+        state.erasableMemory = checkpoint.erasableMemory.map { $0 }
+        state.inputChannels = checkpoint.inputChannels
+        state.outputChannels = checkpoint.outputChannels
+        state.outputChannel7 = checkpoint.outputChannel7
+        state.outputChannel10 = checkpoint.outputChannel10
+        state.cycleCounter = checkpoint.cycleCounter
+        state.extraCode = checkpoint.extraCode
+        state.allowInterrupt = checkpoint.allowInterrupt
+        state.pendFlag = checkpoint.pendFlag
+        state.pendDelay = checkpoint.pendDelay
+        state.extraDelay = checkpoint.extraDelay
+        state.indexValue = checkpoint.indexValue
+        state.inIsr = checkpoint.inIsr
+        state.substituteInstruction = checkpoint.substituteInstruction
+        state.interruptRequests = checkpoint.interruptRequests
+        state.downruptTimeValid = checkpoint.downruptTimeValid
+        state.downruptTime = checkpoint.downruptTime
+        state.downlink = checkpoint.downlink
+        state.nightWatchman = checkpoint.nightWatchman
+        state.nightWatchmanTripped = checkpoint.nightWatchmanTripped
+        state.ruptLock = checkpoint.ruptLock
+        state.noRupt = checkpoint.noRupt
+        state.tcTrap = checkpoint.tcTrap
+        state.noTC = checkpoint.noTC
+        state.parityFail = checkpoint.parityFail
+        state.checkParity = checkpoint.checkParity
+        state.warningFilter = checkpoint.warningFilter
+        state.generatedWarning = checkpoint.generatedWarning
+        state.restartLight = checkpoint.restartLight
+        state.standby = checkpoint.standby
+        state.sbyPressed = checkpoint.sbyPressed
+        state.sbyStillPressed = checkpoint.sbyStillPressed
+        state.nextZ = checkpoint.nextZ
+        state.scalerCounter = checkpoint.scalerCounter
+        state.channelRoutineCount = checkpoint.channelRoutineCount
+        state.dskyTimer = checkpoint.dskyTimer
+        state.dskyFlash = checkpoint.dskyFlash
+        state.dskyChannel163 = checkpoint.dskyChannel163
+        state.tookBZF = checkpoint.tookBZF
+        state.tookBZMF = checkpoint.tookBZMF
+        state.trap31A = checkpoint.trap31A
+        state.trap31B = checkpoint.trap31B
+        state.trap32 = checkpoint.trap32
+        state.radarGateCounter = checkpoint.radarGateCounter
+        components.dsky.restore(from: checkpoint.dsky)
+        components.externalInput.restore(checkpoint.pendingChannelInputs)
+        radarInputBox.set(checkpoint.radarInput)
     }
 
     public func goldenTraceSample() -> AGCGoldenTraceSample {

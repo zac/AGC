@@ -20,6 +20,18 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
             guard !queue.isEmpty else { return nil }
             return queue.removeFirst()
         }
+
+        func checkpointQueue() -> [AGCChannelInput] {
+            lock.lock()
+            defer { lock.unlock() }
+            return queue
+        }
+
+        func restore(_ inputs: [AGCChannelInput]) {
+            lock.lock()
+            queue = inputs
+            lock.unlock()
+        }
     }
 
     private let keypressQueue = KeypressQueue()
@@ -413,6 +425,49 @@ public final class DSKY: AGCIOProtocol, @unchecked Sendable {
 
     private func formatDigit(_ digit: Int) -> String {
         return digit >= 0 ? String(digit) : " "
+    }
+
+    // MARK: - Checkpoint capture and restore
+
+    public func captureCheckpoint() -> DSKYCheckpoint {
+        DSKYCheckpoint(
+            r1: DSKYCheckpointDisplayRegister(signBits: r1.signBits, digits: r1.digits),
+            r2: DSKYCheckpointDisplayRegister(signBits: r2.signBits, digits: r2.digits),
+            r3: DSKYCheckpointDisplayRegister(signBits: r3.signBits, digits: r3.digits),
+            verbDigits: verbDigits,
+            nounDigits: nounDigits,
+            modeDigits: modeDigits,
+            indicators: indicators.mapValues { DSKYCheckpointIndicatorState(isOn: $0.isOn) },
+            channel163: channel163,
+            channel11: channel11,
+            channel13: channel13,
+            channel32: channel32,
+            channel10Rows: channel10Rows,
+            channel10IndicatorValue: channel10IndicatorValue,
+            verbNounFlash: verbNounFlash,
+            pendingKeypresses: keypressQueue.checkpointQueue()
+        )
+    }
+
+    public func restore(from checkpoint: DSKYCheckpoint) {
+        r1.signBits = checkpoint.r1.signBits
+        r1.digits = checkpoint.r1.digits
+        r2.signBits = checkpoint.r2.signBits
+        r2.digits = checkpoint.r2.digits
+        r3.signBits = checkpoint.r3.signBits
+        r3.digits = checkpoint.r3.digits
+        verbDigits = checkpoint.verbDigits
+        nounDigits = checkpoint.nounDigits
+        modeDigits = checkpoint.modeDigits
+        indicators = checkpoint.indicators.mapValues { IndicatorState(isOn: $0.isOn) }
+        channel163 = checkpoint.channel163
+        channel11 = checkpoint.channel11
+        channel13 = checkpoint.channel13
+        channel32 = checkpoint.channel32
+        channel10Rows = checkpoint.channel10Rows
+        channel10IndicatorValue = checkpoint.channel10IndicatorValue
+        verbNounFlash = checkpoint.verbNounFlash
+        keypressQueue.restore(checkpoint.pendingKeypresses)
     }
 
     public var snapshot: DSKYSnapshot {

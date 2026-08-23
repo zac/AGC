@@ -172,6 +172,57 @@ public enum LMIMUGimbalMap {
     }
 }
 
+public struct LMSensorFeedbackCheckpoint: Equatable, Sendable, Codable {
+    public var pipaRemainder: LMVector3D
+    public var cduRemainder: LMVector3D
+    public var lastCDUX: Int?
+    public var lastCDUY: Int?
+    public var lastCDUZ: Int?
+    public var lastAttitude: LMQuaternion?
+
+    public init(
+        pipaRemainder: LMVector3D,
+        cduRemainder: LMVector3D,
+        lastCDUX: Int?,
+        lastCDUY: Int?,
+        lastCDUZ: Int?,
+        lastAttitude: LMQuaternion?
+    ) {
+        self.pipaRemainder = pipaRemainder
+        self.cduRemainder = cduRemainder
+        self.lastCDUX = lastCDUX
+        self.lastCDUY = lastCDUY
+        self.lastCDUZ = lastCDUZ
+        self.lastAttitude = lastAttitude
+    }
+}
+
+extension LMSensorFeedbackState {
+    func captureCheckpoint() -> LMSensorFeedbackCheckpoint {
+        LMSensorFeedbackCheckpoint(
+            pipaRemainder: pipaRemainder,
+            cduRemainder: cduRemainder,
+            lastCDUX: lastCDUCounts?.x,
+            lastCDUY: lastCDUCounts?.y,
+            lastCDUZ: lastCDUCounts?.z,
+            lastAttitude: lastAttitude
+        )
+    }
+
+    mutating func restore(from checkpoint: LMSensorFeedbackCheckpoint) {
+        pipaRemainder = checkpoint.pipaRemainder
+        cduRemainder = checkpoint.cduRemainder
+        if let x = checkpoint.lastCDUX,
+           let y = checkpoint.lastCDUY,
+           let z = checkpoint.lastCDUZ {
+            lastCDUCounts = (x, y, z)
+        } else {
+            lastCDUCounts = nil
+        }
+        lastAttitude = checkpoint.lastAttitude
+    }
+}
+
 struct LMSensorFeedbackState {
     /// 0.25 s at FMAX is ~73 cm/s. 256 PINCs at 1 cm/s covers that with margin.
     static let maxPIPAPulsesPerAxis = 256
