@@ -46,6 +46,10 @@ public enum Luminary99LandingPadLoad {
     public static let rignZMeters = -436_655.657
     /// NASA VIGN, meters/centisecond B10.
     public static let vignMetersPerCentisecond = 16.90256208
+    /// NASA TN D-6846 Table I Apollo 11 PDI altitude, 48,814 ft.
+    public static let pdiAltitudeMeters = 48_814.0 * 0.3048
+    /// NASA TN D-6846 Table I Apollo 11 PDI inertial speed, 5,560 ft/s.
+    public static let pdiSpeedMetersPerCentisecond = 5_560.0 * 0.3048 / 100.0
     /// NASA TN D-6846 PDI altitude rate, meters/centisecond.
     public static let pdiAltitudeRateMetersPerCentisecond = -4.0 * 0.3048 / 100.0
 

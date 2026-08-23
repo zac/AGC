@@ -275,7 +275,7 @@ public extension LMSourceLocator {
 
     static let nasaR567NavScales = LMSourceLocator(
         reference: .nasaR567NavScales,
-        detail: "PDI kinematics encoded into RN/VN/RLS/MASS at GSOP lunar-SOI scales; RN is ZOOMTIME before RIGN so IGNALG’s first TDEC1 matches the pad."
+        detail: "Sourced PDI kinematics are coasted backward to live GET and encoded into RN/VN/RLS/MASS at GSOP lunar-SOI scales; PDI is ZOOMTIME before RIGN."
     )
 
     static let nasaSNA8D027Luminary99PadLoads = LMSourceLocator(
@@ -296,7 +296,7 @@ public extension LMSourceLocator {
 
     static let luminaryPlanetaryInertialOrientation = LMSourceLocator(
         reference: .luminaryPlanetaryInertialOrientation,
-        detail: "RN is ZOOMTIME of MUM two-body before LAND+(RIGNX,0,RIGNZ) in P52LS SM; VN includes GUIDINIT WM×R so |VGU|=VIGN; RCV=RRECT."
+        detail: "PDI is ZOOMTIME of MUM two-body before LAND+(RIGNX,0,RIGNZ) in P52LS SM; the live RN/VN state is a further pre-ignition coast backward; VN includes GUIDINIT WM×R; RCV=RRECT."
     )
 
     static let luminaryIOChannelsModeControl = LMSourceLocator(
@@ -1117,9 +1117,9 @@ public actor LMSimulationRuntime {
         await agcRuntime.enqueueInputs(LMPoweredDescentPanel.channelInputs)
     }
 
-    /// Encode RIGN RN/VN tagged at first IGNALG `TDEC1` (`GET` + look-ahead)
-    /// so IGNALG’s `LEMPREC` has dt = 0. REFSMMAT stays at GET. Call after
-    /// pad-loads so the tag matches live GET + look-ahead.
+    /// Encode the sourced-PDI runtime lead state into RN/VN at live GET.
+    /// REFSMMAT stays at GET. Call after pad-loads so TLAND and the state-vector
+    /// epoch share the same live clock.
     public func loadPDINavState() async {
         let time2 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time2)
         let time1 = await agcRuntime.readErasable(ecadr: Luminary099Erasable.time1)

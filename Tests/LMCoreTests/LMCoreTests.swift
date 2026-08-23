@@ -230,7 +230,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(
             scenario.initialState.groundRangeMeters
                 > abs(Luminary99LandingPadLoad.rignZMeters) + 100_000,
-            "tabletop starts at PDI, ~look-ahead before RIGN, got \(scenario.initialState.groundRangeMeters)"
+            "tabletop starts at the pre-ignition lead, before PDI and RIGN, got \(scenario.initialState.groundRangeMeters)"
         )
         #expect(scenario.initialState.massKilograms == 33_000.0 * 0.45359237)
         #expect(abs(scenario.initialState.velocityMetersPerSecond.magnitude - Luminary99LandingPadLoad.vignMetersPerCentisecond * 100) < 5)
@@ -245,7 +245,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(
             scenario.initialState.altitudeMeters > 12_000
                 && scenario.initialState.altitudeMeters < 20_000,
-            "PDI altitude should be ~50,000 ft on the sphere, got \(scenario.initialState.altitudeMeters)"
+            "pre-ignition lead altitude should remain near 50,000 ft, got \(scenario.initialState.altitudeMeters)"
         )
         let thrust = scenario.initialState.attitude.rotated(LMVector3D(z: 1))
         #expect(thrust.y < -0.98)
@@ -945,7 +945,7 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(vgu.z > 0)
     }
 
-    @Test func `PDI state coasts look-ahead to RIGN with Luminary MUM`() {
+    @Test func `runtime lead state coasts toward RIGN with Luminary MUM`() {
         let time = Luminary99LandingPadLoad.pdiClockCentiseconds
         let rign = LMAGCNavState.rignPositionMeters(pipTimeCentiseconds: time)
         let pdi = LMAGCNavState.pdiPositionMeters(pipTimeCentiseconds: time)
@@ -2124,10 +2124,57 @@ struct LMCoreScenarioAndDynamicsTests {
                 break
             }
         }
+        func dpVector(_ ecadr: Int, scale: Int) async -> LMVector3D {
+            let x = await runtime.readDoublePrecision(ecadr: ecadr)
+            let y = await runtime.readDoublePrecision(ecadr: ecadr + 2)
+            let z = await runtime.readDoublePrecision(ecadr: ecadr + 4)
+            return LMVector3D(
+                x: x.decoded(scale: scale),
+                y: y.decoded(scale: scale),
+                z: z.decoded(scale: scale)
+            )
+        }
+        var refsmmatRows: [LMVector3D] = []
+        for row in 0..<3 {
+            var values: [Double] = []
+            for column in 0..<3 {
+                let value = await runtime.readDoublePrecision(
+                    ecadr: Luminary099Erasable.refsmmat + (row * 3 + column) * 2
+                )
+                values.append(value.decoded(scale: 0) / Luminary099NavScale.refsmmatHalfUnit)
+            }
+            refsmmatRows.append(LMVector3D(x: values[0], y: values[1], z: values[2]))
+        }
+        let refsmmat = LMMatrix3(r0: refsmmatRows[0], r1: refsmmatRows[1], r2: refsmmatRows[2])
+        let get = AGCDoublePrecision(
+            high: await runtime.readErasable(ecadr: Luminary099Erasable.time2),
+            low: await runtime.readErasable(ecadr: Luminary099Erasable.time1)
+        ).decoded(scale: 28)
+        let pipTime = await runtime.readDoublePrecision(ecadr: Luminary099Erasable.pipTime)
+            .decoded(scale: 28)
+        let plantNow = LMAGCNavState.stableMemberKinematics(
+            from: snapshot.vehicleState,
+            refsmmat: refsmmat,
+            timeCentiseconds: get
+        )
+        let plantAtPip = plantNow.positionMeters
+            - plantNow.velocityMetersPerSecond * ((get - pipTime) / 100.0)
+        let navR = await dpVector(Luminary099Erasable.servicerR, scale: 24)
+        let navV = await dpVector(Luminary099Erasable.servicerV, scale: 7) * 100.0
+        let inertialPositionError = (navR - plantAtPip).magnitude
+        let inertialVelocityError = (navV - plantNow.velocityMetersPerSecond).magnitude
+        #expect(
+            inertialPositionError < 2_000,
+            "inertial MUNRVG R should track plant at PIPTIME; error \(Int(inertialPositionError)) m \(trail)"
+        )
+        #expect(
+            inertialVelocityError < 10,
+            "inertial MUNRVG V should track plant; error \(String(format: "%.1f", inertialVelocityError)) m/s \(trail)"
+        )
         let p65Wch = await runtime.readErasable(ecadr: Luminary099Erasable.wchPhase)
         #expect(await runtime.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 before P65 \(trail)")
         withKnownIssue(
-            "ENU-as-SM inertial feedback leaves TTF/8 just short of TENDAPPR; radar input must not hide the unresolved PIPA/CDU frame coupling."
+            "The sourced inertial trajectory leaves TTF/8 just short of TENDAPPR; radar input must not hide the unresolved LR-free target-closure gap."
         ) {
             #expect(reachedP65, "TENDAPPR should start P65 before GUIDDURN \(trail)")
             #expect(snapshot.agc.dsky.programNumber == 65, "P65START NEWMODEX 65 \(trail)")
@@ -2168,7 +2215,7 @@ struct LMCoreScenarioAndDynamicsTests {
         let vertFlag2 = await runtime.readErasable(ecadr: Luminary099Erasable.flagwrd2)
         #expect(await runtime.readErasable(ecadr: 0o376) != 0o1204, "WAITLIST 01204 under VERTGUID \(trail)")
         withKnownIssue(
-            "P65 is unreachable after the known inertial-only P63/P64 frame-coupling failure."
+            "P65 is unreachable after the known inertial-only P63/P64 target-closure gap."
         ) {
             #expect(heldVertical >= vertHold - dt, "VERTGUID should hold P65 for 30 s \(trail)")
             #expect(snapshot.agc.dsky.programNumber == 65, "VERTGUID should keep P65 \(trail)")
@@ -2370,6 +2417,26 @@ struct LMCoreScenarioAndDynamicsTests {
         #expect(
             snapshot.vehicleCommands.mainEngineOn,
             "V99 should light DPS FAIL=\(String(fail1, radix: 8)) PROG=\(snapshot.agc.dsky.programNumber ?? 0) rng=\(Int(tigRangeNmi))nmi"
+        )
+        let tigTime = AGCDoublePrecision(
+            high: await runtime.readErasable(ecadr: Luminary099Erasable.time2),
+            low: await runtime.readErasable(ecadr: Luminary099Erasable.time1)
+        ).decoded(scale: 28)
+        let tigInertialSpeed = LMAGCNavState.basicReferenceVelocityMetersPerCentisecond(
+            from: snapshot.vehicleState,
+            timeCentiseconds: tigTime
+        ).magnitude * 100.0
+        #expect(
+            abs(snapshot.vehicleState.altitudeMeters - Luminary99LandingPadLoad.pdiAltitudeMeters) < 100,
+            "V99 PDI altitude \(snapshot.vehicleState.altitudeMeters) m should match NASA 48,814 ft"
+        )
+        #expect(
+            abs(snapshot.vehicleState.verticalSpeedMetersPerSecond - Luminary99LandingPadLoad.pdiAltitudeRateMetersPerCentisecond * 100) < 0.5,
+            "V99 PDI H-dot \(snapshot.vehicleState.verticalSpeedMetersPerSecond) m/s should match NASA -4 ft/s"
+        )
+        #expect(
+            abs(tigInertialSpeed - Luminary99LandingPadLoad.pdiSpeedMetersPerCentisecond * 100) < 2,
+            "V99 PDI inertial speed \(tigInertialSpeed) m/s should match NASA 5,560 ft/s"
         )
         for _ in 1...40 {
             snapshot = await runtime.step(
