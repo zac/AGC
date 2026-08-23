@@ -1217,9 +1217,10 @@ public actor LMSimulationRuntime {
     }
 
     private func applyFrameInput(_ input: LMFrameInput) async {
-        if let radarInput = input.radarInput {
-            await setRadarInput(radarInput)
-        }
+        // A missing frame sample means the beam is out of range or off the
+        // surface. Clear the previous measurement so CH33 data-good cannot
+        // remain asserted with stale LR registers.
+        await setRadarInput(input.radarInput)
         if let rhcInput = input.rotationalHandControllerInput {
             await setRotationalHandControllerInput(rhcInput)
         }

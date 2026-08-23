@@ -54,10 +54,10 @@ public enum Luminary099Erasable {
     /// E6,1643. FINDCDUW desired body rates at PI/4 rad/s. OMEGAQD = OMEGAPD+1.
     public static let omegaPD = 0o3243
     public static let omegaQD = 0o3244
-    /// E6,1654. FINDCDUW thrust command (SM), half-unit after NORMUNIT.
-    public static let unfc2 = 0o3254
-    /// E6,1662. FINDCDUW window command (SM).
-    public static let unwc2 = 0o3262
+    /// E6,1653. FINDCDUW thrust command (SM), half-unit after NORMUNIT.
+    public static let unfc2 = 0o3253
+    /// E6,1661. FINDCDUW window command (SM).
+    public static let unwc2 = 0o3261
     /// E7,1515. DVMON low-thrust pass counter.
     public static let dvcntr = 0o3515
     public static let lemMass = 0o1331
