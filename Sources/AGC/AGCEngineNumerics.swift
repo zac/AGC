@@ -3,12 +3,12 @@ import Foundation
 extension AGCEngine {
     func valueOverflowed(_ value: Int) -> Int {
         if (value & 0o140000) == 0o040000 {
-            return 1  // Positive overflow
+            return AGC_P1  // Positive overflow
         }
         if (value & 0o140000) == 0o100000 {
-            return -1 // Negative overflow
+            return AGC_M1  // Negative overflow
         }
-        return 0     // No overflow
+        return AGC_P0  // No overflow
     }
     
     /// Sign extend an SP value into AGC's 17-bit accumulator format

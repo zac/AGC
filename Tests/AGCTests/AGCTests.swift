@@ -22,6 +22,13 @@ class AGCTests {
         return try AGCRuntime(binFile: url)
     }
 
+    private func makeLuminaryEngine() throws -> (AGCEngine, AGCState) {
+        let url = try #require(luminaryURL)
+        let state = AGCState()
+        state.binFile = try Data(contentsOf: url)
+        return (try AGCEngine(state: state), state)
+    }
+
     private func setAccumulator(_ value: Int, engine: AGCEngine) {
         engine.state.accumulator = value & 0o177777
         engine.writeRegister(.regA, engine.state.accumulator)
@@ -477,6 +484,65 @@ class AGCTests {
         #expect(state.erasableMemory[bottomLoc.bank][bottomLoc.offset] == 0o6)
     }
 
+    @Test func luminaryRootFinderConvergesOnCapturedP64TimeToGoPolynomial() throws {
+        let (engine, _) = try makeLuminaryEngine()
+        prepareBareInstructionRun(engine)
+
+        // Luminary 099 ROOTPSRS is in fixed bank 31 at 3553. Its caller passes
+        // A = TABLTTF+3, L = degree-1, and the initial TTF/8 guess in MPAC.
+        engine.writeRegister(.regEB, 0o3400) // Erasable bank 7.
+        engine.writeRegister(.regFB, 0o62000) // Fixed bank 31 (octal).
+        engine.writeRegister(.regBB, 0o62007)
+        engine.writeRegister(.regA, 0o1565)
+        engine.writeRegister(.regL, 0o2)
+        engine.writeRegister(.regQ, 0o3770)
+        engine.writeRegister(.regZ, 0o3553)
+
+        #expect(engine.fetchInstructionWord(at: 0o3557) == 0o33676)
+        #expect(engine.findMemoryWord(0o3676) == 0o147)
+
+        let capturedTable = [
+            0o77777, 0o00130, // A0
+            0o00000, 0o11324, // A1
+            0o77747, 0o56422, // A2
+            0o00022, 0o35646, // A3
+            0o00200,          // PRECROOT at TABLTTF+10
+        ]
+        for (offset, word) in capturedTable.enumerated() {
+            engine.writeErasableECADR(0o3562 + offset, word)
+        }
+
+        let initialGuess = AGCDoublePrecision.encode(value: -1_320, scale: 17)
+        engine.writeErasableECADR(0o154, initialGuess.high)
+        engine.writeErasableECADR(0o155, initialGuess.low)
+
+        var executedInstructions = 0
+        var failed = false
+        while executedInstructions < 20_000 {
+            if engine.executeCycle() {
+                executedInstructions += 1
+            }
+            let z = engine.readRegister(.regZ) & 0o7777
+            if executedInstructions >= 100 && z == 0o132 {
+                failed = true
+                break
+            }
+            if executedInstructions >= 100 && z == 0o3772 {
+                break
+            }
+        }
+
+        let returnAddress = failed ? 0o3770 : engine.readRegister(.regZ) & 0o7777
+        let root = AGCDoublePrecision(
+            high: engine.readErasableECADR(0o154),
+            low: engine.readErasableECADR(0o155)
+        ).decoded(scale: 17)
+
+        #expect(returnAddress == 0o3772, "ROOTPSRS took its failure return after \(executedInstructions) instructions")
+        #expect(abs(root - -1_320) < 0.001, "ROOTPSRS returned \(root) centiseconds")
+        #expect(engine.readErasableECADR(0o156) == 1, "The captured polynomial should converge in one pass")
+    }
+
     @Test func ccsAdjustsNextZForNegativeValues() async throws {
         let (engine, state) = try makeEngine()
         engine.writeRegister(.regA, 0o100000) // Negative overflow
@@ -783,6 +849,19 @@ class AGCTests {
         #expect(state.nextZ == 0o11)
     }
 
+    @Test func tsPropagatesNegativeOverflowAsAGCMinusOne() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o137777, engine: engine)
+        state.nextZ = 0o10
+
+        engine.performTS(address10: 0o60, overflow: true)
+
+        #expect(engine.valueOverflowed(0o137777) == 0o77776)
+        #expect(state.erasableMemory[0][0o60] == 0o77777)
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o177776)
+        #expect(state.nextZ == 0o11)
+    }
+
     @Test func tsTCAAStoresAccumulatorIntoZ() throws {
         let (engine, state) = try makeEngine()
         setAccumulator(0o54321, engine: engine)
@@ -1004,6 +1083,19 @@ class AGCTests {
         engine.performDV(address10: address)
 
         #expect(state.erasableMemory[0][Register.regA.rawValue] == 0)
+        #expect(state.erasableMemory[0][Register.regL.rawValue] == 0)
+    }
+
+    @Test func dvNormalizesMixedSignDividendBeforeBoundaryCheck() throws {
+        let (engine, state) = try makeEngine()
+        setAccumulator(0o1, engine: engine)
+        engine.writeRegister(.regL, signExtend(0o77776))
+        let address = 0o62
+        state.erasableMemory[0][address] = 0o1
+
+        engine.performDV(address10: address)
+
+        #expect(state.erasableMemory[0][Register.regA.rawValue] == 0o37777)
         #expect(state.erasableMemory[0][Register.regL.rawValue] == 0)
     }
 

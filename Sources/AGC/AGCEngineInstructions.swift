@@ -17,9 +17,9 @@ extension AGCEngine {
             assignFromPointer(address10, operand16)
         }
         
-        if address10 < REG16 && valueOverflowed(valueK) == 1 {
+        if address10 < REG16 && valueOverflowed(valueK) == AGC_P1 {
             // No change
-        } else if address10 < REG16 && valueOverflowed(valueK) == -1 {
+        } else if address10 < REG16 && valueOverflowed(valueK) == AGC_M1 {
             state.nextZ += 2
         } else if operand16 == AGC_P0 {
             state.nextZ += 1
@@ -359,9 +359,17 @@ extension AGCEngine {
     }
 
     func performDV(address10: Int) {
-        let accMSW = overflowCorrected(state.accumulator)
-        let accLSW = readRegister(.regL) & 0o177777
-        let dividend = spToDecent(msw: accMSW, lsw: accLSW)
+        let originalMSW = overflowCorrected(state.accumulator)
+        let originalLSW = readRegister(.regL) & 0o177777
+        let dividend = spToDecent(msw: originalMSW, lsw: originalLSW)
+
+        // SpToDecent resolves mixed-sign DP words into one 29-bit value. yaAGC
+        // converts that value back to a canonical A,L pair before applying DV's
+        // magnitude boundary checks; using the original words can falsely send
+        // a valid quotient through SimulateDV's overflow path.
+        let normalizedDividend = decentToSp(dividend)
+        let accMSW = normalizedDividend.msb
+        let accLSW = normalizedDividend.lsb
 
         let absA = absSP(accMSW)
         let absL = absSP(accLSW)
