@@ -76,31 +76,36 @@ public enum LMIMUGimbalMap {
     }
 
     /// Diagnostic CALCGA: body axes in frozen SM via live `RP-TO-R`.
+    /// Supply the vehicle's site along with its attitude and frozen REFSMMAT.
     /// Not for `LMSimulation.stepExact` until CDUY tracks CDUYD through ZOOM
     /// on this map (the production SM wiring hit −148° CDUY error).
     public static func cduRadians(
         from attitude: LMQuaternion,
         refsmmat: LMMatrix3,
-        timeCentiseconds: Double
+        timeCentiseconds: Double,
+        site: LMLunarLandingSite? = nil
     ) -> (x: Double, y: Double, z: Double) {
         cduRadians(
             xnb: LMAGCNavState.specificForceSM(
                 body: LMVector3D(z: 1),
                 attitude: attitude,
                 refsmmat: refsmmat,
-                timeCentiseconds: timeCentiseconds
+                timeCentiseconds: timeCentiseconds,
+                site: site
             ),
             ynb: LMAGCNavState.specificForceSM(
                 body: LMVector3D(x: 1),
                 attitude: attitude,
                 refsmmat: refsmmat,
-                timeCentiseconds: timeCentiseconds
+                timeCentiseconds: timeCentiseconds,
+                site: site
             ),
             znb: LMAGCNavState.specificForceSM(
                 body: LMVector3D(y: 1),
                 attitude: attitude,
                 refsmmat: refsmmat,
-                timeCentiseconds: timeCentiseconds
+                timeCentiseconds: timeCentiseconds,
+                site: site
             ),
             fallbackInner: attitude.yawPitchRollRadians.x
         )
@@ -113,9 +118,10 @@ public enum LMIMUGimbalMap {
     public static func cduCounts(
         from attitude: LMQuaternion,
         refsmmat: LMMatrix3,
-        timeCentiseconds: Double
+        timeCentiseconds: Double,
+        site: LMLunarLandingSite? = nil
     ) -> (x: Int, y: Int, z: Int) {
-        counts(cduRadians(from: attitude, refsmmat: refsmmat, timeCentiseconds: timeCentiseconds))
+        counts(cduRadians(from: attitude, refsmmat: refsmmat, timeCentiseconds: timeCentiseconds, site: site))
     }
 
     private static func cduRadians(
@@ -252,7 +258,8 @@ struct LMSensorFeedbackState {
         attitude: LMQuaternion,
         deltaTime: Double,
         refsmmat: LMMatrix3? = nil,
-        timeCentiseconds: Double? = nil
+        timeCentiseconds: Double? = nil,
+        site: LMLunarLandingSite? = nil
     ) -> [AGCChannelInput] {
         var inputs: [AGCChannelInput] = []
         inputs.append(contentsOf: pipaIncrements(
@@ -264,7 +271,8 @@ struct LMSensorFeedbackState {
             target = LMIMUGimbalMap.cduCounts(
                 from: attitude,
                 refsmmat: refsmmat,
-                timeCentiseconds: timeCentiseconds
+                timeCentiseconds: timeCentiseconds,
+                site: site
             )
         } else {
             target = LMIMUGimbalMap.cduCounts(from: attitude)
@@ -435,7 +443,7 @@ enum LMLandingRadar {
         // ENU is a tangent plane pinned at RLS; at PDI the LM is 21° of lunar
         // arc uprange of it, so `-beamWorld.z` overstates the slant range by
         // 2.2x (56.7 km against a true 25.3 km).
-        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis(site: state.landingSite)
         let beamMoon = north * beamWorld.x + east * beamWorld.y + up * beamWorld.z
         let moon = LMAGCNavState.moonCenteredPositionMeters(from: state)
         guard moon.magnitude > 0 else { return nil }

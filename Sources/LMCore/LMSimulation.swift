@@ -598,18 +598,25 @@ public struct LMSurfaceContactSnapshot: Equatable, Sendable, Codable {
     public let groundRangeMeters: Double
     public let horizontalSpeedMetersPerSecond: Double
     public let verticalSpeedMetersPerSecond: Double
+    /// Vehicle thrust-axis angle relative to the first loaded pad's normal.
+    /// This is not the terrain slope.
     public let tiltRadians: Double
+    /// First-contact pad-scale normal in site ENU (north, east, up).
+    /// Older recordings and sphere-only contacts may not contain this value.
+    public let surfaceNormal: LMVector3D?
 
     public init(
         groundRangeMeters: Double,
         horizontalSpeedMetersPerSecond: Double,
         verticalSpeedMetersPerSecond: Double,
-        tiltRadians: Double
+        tiltRadians: Double,
+        surfaceNormal: LMVector3D? = nil
     ) {
         self.groundRangeMeters = groundRangeMeters
         self.horizontalSpeedMetersPerSecond = horizontalSpeedMetersPerSecond
         self.verticalSpeedMetersPerSecond = verticalSpeedMetersPerSecond
         self.tiltRadians = tiltRadians
+        self.surfaceNormal = surfaceNormal
     }
 
     public var flightOutcome: LMFlightOutcome {
@@ -655,6 +662,7 @@ public enum LMLandingContactCriteria {
 }
 
 public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
+    public fileprivate(set) var landingSite: LMLunarLandingSite?
     public let positionMeters: LMVector3D
     public let velocityMetersPerSecond: LMVector3D
     public let attitude: LMQuaternion
@@ -664,6 +672,9 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public let isLanded: Bool
     public let flightOutcome: LMFlightOutcome
     public let surfaceContact: LMSurfaceContactSnapshot?
+    /// Crushable-strut landing-gear state. Optional so checkpoints and flight
+    /// recordings captured before the gear model still decode unchanged.
+    public let landingGear: LMLandingGearState?
     public let dpsPitchGimbalRadians: Double
     public let dpsRollGimbalRadians: Double
 
@@ -677,9 +688,12 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         isLanded: Bool = false,
         flightOutcome: LMFlightOutcome? = nil,
         surfaceContact: LMSurfaceContactSnapshot? = nil,
+        landingGear: LMLandingGearState? = nil,
         dpsPitchGimbalRadians: Double = 0,
-        dpsRollGimbalRadians: Double = 0
+        dpsRollGimbalRadians: Double = 0,
+        landingSite: LMLunarLandingSite? = nil
     ) {
+        self.landingSite = landingSite
         self.positionMeters = positionMeters
         self.velocityMetersPerSecond = velocityMetersPerSecond
         self.attitude = attitude.normalized()
@@ -689,6 +703,7 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
         let resolvedOutcome = flightOutcome ?? (isLanded ? .softLanding : .inFlight)
         self.flightOutcome = resolvedOutcome
         self.surfaceContact = surfaceContact
+        self.landingGear = landingGear
         self.isLanded = resolvedOutcome.isIntactLanding
         self.dpsPitchGimbalRadians = dpsPitchGimbalRadians
         self.dpsRollGimbalRadians = dpsRollGimbalRadians
@@ -698,7 +713,7 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     /// plane, which is below the LM at PDI range.
     public var altitudeMeters: Double {
         let moon = LMAGCNavState.moonCenteredPositionMeters(from: self)
-        return moon.magnitude - LMAGCNavState.landingSiteMeters().magnitude
+        return moon.magnitude - LMAGCNavState.landingSiteMeters(site: landingSite).magnitude
     }
 
     /// East of the landing site. Negative is uprange (PDI); positive is past.
@@ -715,7 +730,7 @@ public struct LMVehicleStateSnapshot: Equatable, Sendable, Codable {
     public var verticalSpeedMetersPerSecond: Double {
         let moon = LMAGCNavState.moonCenteredPositionMeters(from: self)
         guard moon.magnitude > 0 else { return 0 }
-        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis(site: landingSite)
         let velocity = north * velocityMetersPerSecond.x
             + east * velocityMetersPerSecond.y
             + up * velocityMetersPerSecond.z
@@ -905,6 +920,9 @@ public actor LMSimulationRuntime {
     private var poweredDescentIgnitionTimeSeconds: Double?
     private var landingRadarPermissionKeyIndex = 0
     private var scenarioID: String?
+    /// Terrain the landing gear touches. Left unset, contact falls back to the
+    /// AGC landing-site sphere and the vehicle lands as if the mare were flat.
+    private var landingSurface: LMLandingSurfaceModel?
 
     public init(
         binFile: URL,
@@ -948,6 +966,13 @@ public actor LMSimulationRuntime {
         self.vehicleState = scenario.initialState
         self.scenarioSourceStatus = scenario.sourceStatus
         self.scenarioID = scenario.id
+    }
+
+    /// Install the contact surface the landing gear touches. The renderer
+    /// supplies the same evaluator that builds the visible mesh so a footpad
+    /// cannot rest above or below the terrain the crew is looking at.
+    public func setLandingSurface(_ surface: LMLandingSurfaceModel?) {
+        landingSurface = surface
     }
 
     public func reset() async throws -> LMSimulationSnapshot {
@@ -1130,7 +1155,7 @@ public actor LMSimulationRuntime {
         vehicleState = LMAGCNavState.vehicleState(
             timeCentiseconds: time,
             attitude: vehicleState.attitude,
-            massKilograms: vehicleState.massKilograms ?? 0
+            massKilograms: vehicleState.massKilograms ?? 0, site: vehicleState.landingSite
         )
         await agcRuntime.writeErasable(
             LMAGCNavState.erasableWords(vehicle: vehicleState, time2: time2, time1: time1)
@@ -1374,7 +1399,8 @@ public actor LMSimulationRuntime {
                 state: vehicleState,
                 commands: commands,
                 configuration: configuration,
-                deltaTime: slice.deltaTime
+                deltaTime: slice.deltaTime,
+                surface: landingSurface
             )
         }
         lastDSKYVerb = agc.dsky.verb
@@ -1507,6 +1533,9 @@ public actor LMSimulationRuntime {
             scenarioID: scenarioID
         )
 
+        guard checkpoint.vehicleState.landingSite == initialState.landingSite else {
+            throw LMLunarLandingSite.SiteError.incompatibleCheckpoint
+        }
         try await agcRuntime.applyCheckpoint(checkpoint.agc)
 
         vehicleState = checkpoint.vehicleState
@@ -1537,7 +1566,21 @@ enum LMDynamics {
         state: LMVehicleStateSnapshot,
         commands: LMVehicleSnapshot,
         configuration: LMVehicleConfiguration,
-        deltaTime: Double
+        deltaTime: Double,
+        surface: LMLandingSurfaceModel? = nil
+    ) -> LMVehicleStateSnapshot {
+        var result = propagateInSite(state: state, commands: commands, configuration: configuration,
+                                     deltaTime: deltaTime, surface: surface)
+        result.landingSite = state.landingSite
+        return result
+    }
+
+    private static func propagateInSite(
+        state: LMVehicleStateSnapshot,
+        commands: LMVehicleSnapshot,
+        configuration: LMVehicleConfiguration,
+        deltaTime: Double,
+        surface: LMLandingSurfaceModel? = nil
     ) -> LMVehicleStateSnapshot {
         guard deltaTime > 0, !state.flightOutcome.isTerminal else { return state }
 
@@ -1546,8 +1589,15 @@ enum LMDynamics {
         var torqueBody = LMVector3D.zero
         var expendedForceNewtons = 0.0
 
+        // Apollo shut the descent engine down at touchdown: Aldrin called the
+        // contact light, Armstrong stopped the engine. Model that, because the
+        // AGC references altitude to a sphere and cannot tell that terrain
+        // relief has already put the footpads on the ground. Without it the
+        // guidance keeps flying a vehicle that has landed.
+        let descentEngineStopped = state.surfaceContact != nil
         if commands.mainEngineOn,
            !commands.mainEngineOff,
+           !descentEngineStopped,
            let thrust = commands.dps.commandedThrustNewtons ?? configuration.mainEngine?.engineOnThrustNewtons?.value {
             let bodyForce = LMDPSGimbalMap.thrustDirectionBody(pitchRadians: pitch, rollRadians: roll) * thrust
             forceWorld = forceWorld + state.attitude.rotated(bodyForce)
@@ -1565,8 +1615,8 @@ enum LMDynamics {
             torqueBody = torqueBody + jet.positionMeters.value.cross(bodyForce)
         }
 
-        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis()
-        let site = LMAGCNavState.landingSiteMeters()
+        let (north, east, up) = LMAGCNavState.moonFixedSiteBasis(site: state.landingSite)
+        let site = LMAGCNavState.landingSiteMeters(site: state.landingSite)
         var moonPosition = LMAGCNavState.moonCenteredPositionMeters(from: state)
         var moonVelocity = north * state.velocityMetersPerSecond.x
             + east * state.velocityMetersPerSecond.y
@@ -1593,10 +1643,6 @@ enum LMDynamics {
             - omega.cross(moonVelocity) * 2.0
             - omega.cross(omega.cross(moonPosition))
 
-        moonVelocity = moonVelocity + acceleration * deltaTime
-        moonPosition = moonPosition + moonVelocity * deltaTime
-        var angularVelocity = state.angularVelocityRadiansPerSecond
-
         let inertia = configuration.diagonalInertiaKilogramMetersSquared?.value
             ?? state.massKilograms.flatMap { mass in
                 mass > 0
@@ -1606,12 +1652,58 @@ enum LMDynamics {
                     )
                     : nil
             }
-        if let inertia {
-            let angularAcceleration = LMVector3D(
+        let angularAcceleration = inertia.map { inertia in
+            LMVector3D(
                 x: inertia.x == 0 ? 0 : torqueBody.x / inertia.x,
                 y: inertia.y == 0 ? 0 : torqueBody.y / inertia.y,
                 z: inertia.z == 0 ? 0 : torqueBody.z / inertia.z
             )
+        } ?? .zero
+
+        let burned = LMDPSThrottleMap.burnedMassKilograms(
+            forceNewtons: expendedForceNewtons,
+            deltaTime: deltaTime
+        )
+        let massKilograms = state.massKilograms.map { mass in
+            max(mass - burned, 1.0)
+        }
+        let propellantMassKilograms = state.propellantMassKilograms.map { propellant in
+            max(propellant - burned, 0)
+        }
+
+        // Within gear reach the crushable-strut solver owns the step. It works
+        // in the site tangent plane, which over the final few meters differs
+        // from the moon-fixed arc by far less than the honeycomb stroke it is
+        // resolving, and it substeps at a rate the contact stiffness survives.
+        if let surface,
+           let inertia,
+           let mass = state.massKilograms,
+           LMLandingGearDynamics.isWithinContactRange(
+               positionMeters: state.positionMeters,
+               attitude: state.attitude,
+               gear: state.landingGear ?? LMLandingGearState(),
+               surface: surface
+           ) {
+            return propagateOnGear(
+                state: state,
+                surface: surface,
+                inertia: inertia,
+                massKilograms: mass,
+                accelerationMoonFixed: acceleration,
+                angularAccelerationBody: angularAcceleration,
+                basis: (north, east, up),
+                updatedMassKilograms: massKilograms,
+                propellantMassKilograms: propellantMassKilograms,
+                dpsPitchGimbalRadians: pitch,
+                dpsRollGimbalRadians: roll,
+                deltaTime: deltaTime
+            )
+        }
+
+        moonVelocity = moonVelocity + acceleration * deltaTime
+        moonPosition = moonPosition + moonVelocity * deltaTime
+        var angularVelocity = state.angularVelocityRadiansPerSecond
+        if inertia != nil {
             angularVelocity = angularVelocity + angularAcceleration * deltaTime
         }
 
@@ -1623,7 +1715,9 @@ enum LMDynamics {
         var flightOutcome = state.flightOutcome
         var surfaceContact = state.surfaceContact
         let siteRadius = site.magnitude
-        if moonPosition.magnitude <= siteRadius, siteRadius > 0 {
+        // An installed terrain surface owns touchdown, including depressions
+        // below the guidance datum. The sphere is only the no-terrain fallback.
+        if surface == nil, moonPosition.magnitude <= siteRadius, siteRadius > 0 {
             moonPosition = moonPosition.normalized() * siteRadius
             let radial = moonPosition.normalized()
             let radialSpeed = moonVelocity.dot(radial)
@@ -1661,17 +1755,6 @@ enum LMDynamics {
             z: moonVelocity.dot(up)
         )
 
-        let burned = LMDPSThrottleMap.burnedMassKilograms(
-            forceNewtons: expendedForceNewtons,
-            deltaTime: deltaTime
-        )
-        let massKilograms = state.massKilograms.map { mass in
-            max(mass - burned, 1.0)
-        }
-        let propellantMassKilograms = state.propellantMassKilograms.map { propellant in
-            max(propellant - burned, 0)
-        }
-
         return LMVehicleStateSnapshot(
             positionMeters: position,
             velocityMetersPerSecond: velocity,
@@ -1681,8 +1764,84 @@ enum LMDynamics {
             propellantMassKilograms: propellantMassKilograms,
             flightOutcome: flightOutcome,
             surfaceContact: surfaceContact,
+            landingGear: state.landingGear,
             dpsPitchGimbalRadians: pitch,
             dpsRollGimbalRadians: roll
+        )
+    }
+
+    /// Terrain-relative touchdown, settling, rebound, and tip-over.
+    ///
+    /// The vehicle is not frozen at first contact. It keeps integrating on its
+    /// gear until every footpad is quiescent, so the difference between a soft
+    /// arrival, a crushed-strut arrival, and a slope that rolls the vehicle off
+    /// its downhill legs is produced by the dynamics rather than by a label.
+    private static func propagateOnGear(
+        state: LMVehicleStateSnapshot,
+        surface: LMLandingSurfaceModel,
+        inertia: LMVector3D,
+        massKilograms mass: Double,
+        accelerationMoonFixed: LMVector3D,
+        angularAccelerationBody: LMVector3D,
+        basis: (north: LMVector3D, east: LMVector3D, up: LMVector3D),
+        updatedMassKilograms: Double?,
+        propellantMassKilograms: Double?,
+        dpsPitchGimbalRadians: Double,
+        dpsRollGimbalRadians: Double,
+        deltaTime: Double
+    ) -> LMVehicleStateSnapshot {
+        let accelerationSite = LMVector3D(
+            x: accelerationMoonFixed.dot(basis.north),
+            y: accelerationMoonFixed.dot(basis.east),
+            z: accelerationMoonFixed.dot(basis.up)
+        )
+        let result = LMLandingGearDynamics.integrate(
+            positionMeters: state.positionMeters,
+            velocityMetersPerSecond: state.velocityMetersPerSecond,
+            attitude: state.attitude,
+            angularVelocityRadiansPerSecond: state.angularVelocityRadiansPerSecond,
+            massKilograms: mass,
+            inertiaKilogramMetersSquared: inertia,
+            accelerationMetersPerSecondSquared: accelerationSite,
+            angularAccelerationRadiansPerSecondSquared: angularAccelerationBody,
+            gear: state.landingGear ?? LMLandingGearState(),
+            surface: surface,
+            deltaTime: deltaTime
+        )
+
+        let surfaceContact = state.surfaceContact ?? result.firstContact
+        var gear = result.gear
+        var flightOutcome = LMFlightOutcome.inFlight
+        if let contact = surfaceContact, contact.flightOutcome == .crashed {
+            // Arriving outside the rated gear envelope is not survivable, so
+            // there is nothing left to settle.
+            gear = LMLandingGearState(
+                legs: gear.legs,
+                isProbeContact: gear.isProbeContact,
+                quiescentSeconds: gear.quiescentSeconds,
+                failure: gear.failure ?? .contactEnvelopeExceeded,
+                peakLoadNewtons: gear.peakLoadNewtons,
+                touchdownEvents: gear.touchdownEvents
+            )
+            flightOutcome = .crashed
+        } else if gear.failure != nil {
+            flightOutcome = .crashed
+        } else if result.isSettled {
+            flightOutcome = surfaceContact?.flightOutcome ?? .softLanding
+        }
+
+        return LMVehicleStateSnapshot(
+            positionMeters: result.positionMeters,
+            velocityMetersPerSecond: result.velocityMetersPerSecond,
+            attitude: result.attitude,
+            angularVelocityRadiansPerSecond: result.angularVelocityRadiansPerSecond,
+            massKilograms: updatedMassKilograms,
+            propellantMassKilograms: propellantMassKilograms,
+            flightOutcome: flightOutcome,
+            surfaceContact: surfaceContact,
+            landingGear: gear,
+            dpsPitchGimbalRadians: dpsPitchGimbalRadians,
+            dpsRollGimbalRadians: dpsRollGimbalRadians
         )
     }
 

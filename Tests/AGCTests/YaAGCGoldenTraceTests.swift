@@ -16,6 +16,9 @@ struct YaAGCGoldenTraceTests {
         fixtureNamed("luminary099-boot")
     }
 
+    // Only desktop hosts can launch the optional external yaAGC tracer.
+    // Committed golden-trace fixtures remain testable on every platform.
+    #if os(macOS) || os(Linux)
     private static var repoRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -29,6 +32,7 @@ struct YaAGCGoldenTraceTests {
         let url = env ?? fallback
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
+    #endif
 
     @Test func luminaryBootMatchesCommittedYaAGCFixture() async throws {
         let fixtureURL = try #require(fixtureURL)
@@ -40,6 +44,7 @@ struct YaAGCGoldenTraceTests {
         assertTracesMatch(expected: expected, actual: actual, source: "committed yaAGC fixture")
     }
 
+    #if os(macOS) || os(Linux)
     @Test(.enabled(if: YaAGCGoldenTraceTests.liveTracerURL != nil))
     func luminaryBootMatchesLiveYaAGCWhenTracerIsPresent() async throws {
         let tracer = try #require(Self.liveTracerURL)
@@ -51,6 +56,7 @@ struct YaAGCGoldenTraceTests {
         let actual = await runtime.collectGoldenTrace()
         assertTracesMatch(expected: live, actual: actual, source: "live yaAGC")
     }
+    #endif
 
     @Test func luminaryV35EMatchesCommittedYaAGCFixture() async throws {
         try await assertKeyedScriptMatchesFixture(.v35e, fixture: "luminary099-v35e")
@@ -60,10 +66,12 @@ struct YaAGCGoldenTraceTests {
         try await assertKeyedScriptMatchesFixture(.v37e63e, fixture: "luminary099-v37e63e")
     }
 
+    #if os(macOS) || os(Linux)
     @Test(.enabled(if: YaAGCGoldenTraceTests.liveTracerURL != nil))
     func luminaryV35EMatchesLiveYaAGCWhenTracerIsPresent() async throws {
         try await assertKeyedScriptMatchesLive(.v35e)
     }
+    #endif
 
     private func assertKeyedScriptMatchesFixture(_ script: DSKYScript, fixture: String) async throws {
         let fixtureURL = try #require(fixtureNamed(fixture))
@@ -76,6 +84,7 @@ struct YaAGCGoldenTraceTests {
         assertTracesMatch(expected: expected, actual: actual, source: "committed yaAGC \(script.id)")
     }
 
+    #if os(macOS) || os(Linux)
     private func assertKeyedScriptMatchesLive(_ script: DSKYScript) async throws {
         let tracer = try #require(Self.liveTracerURL)
         let rom = try #require(luminaryURL)
@@ -107,6 +116,7 @@ struct YaAGCGoldenTraceTests {
         try #require(process.terminationStatus == 0, "yaAGC tracer failed: \(err)")
         return try AGCGoldenTrace.loadJSONL(outData)
     }
+    #endif
 
     private func assertTracesMatch(
         expected: [AGCGoldenTraceSample],
@@ -140,4 +150,3 @@ struct YaAGCGoldenTraceTests {
         #expect(actual.count >= expected.count)
     }
 }
-

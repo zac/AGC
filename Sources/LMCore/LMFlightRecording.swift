@@ -91,6 +91,40 @@ public struct LMFlightRecording: Equatable, Sendable, Codable {
         return try encoder.encode(self)
     }
 
+    /// Writes the compact sorted-key JSON representation at the handle's current
+    /// offset without constructing the entire recording's JSON in memory.
+    /// The caller owns closing and atomic publication of the destination.
+    /// Cancellation or an I/O error can leave partial bytes in this handle.
+    public func writeJSON(to handle: FileHandle) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var pending = Data()
+        let bufferLimit = 1_048_576
+        func append(_ bytes: Data) throws {
+            pending.append(bytes)
+            if pending.count >= bufferLimit {
+                try handle.write(contentsOf: pending)
+                pending.removeAll(keepingCapacity: true)
+            }
+        }
+        try Task.checkCancellation()
+        try append(Data(#"{"controlMode":"#.utf8))
+        try append(encoder.encode(controlMode))
+        try append(Data(#","frames":["#.utf8))
+        for (index, frame) in frames.enumerated() {
+            try Task.checkCancellation()
+            if index > 0 { try append(Data(",".utf8)) }
+            try append(encoder.encode(frame))
+        }
+        try append(Data(#"],"scenarioID":"#.utf8))
+        try append(encoder.encode(scenarioID))
+        try append(Data(#","schemaVersion":"#.utf8))
+        try append(encoder.encode(schemaVersion))
+        try append(Data("}".utf8))
+        try Task.checkCancellation()
+        try handle.write(contentsOf: pending)
+    }
+
     public static func decode(_ data: Data) throws -> LMFlightRecording {
         let recording = try JSONDecoder().decode(Self.self, from: data)
         guard recording.schemaVersion == currentSchemaVersion else {
@@ -180,6 +214,9 @@ public struct LMFlightReplay: Equatable, Sendable {
     ) -> LMVehicleStateSnapshot {
         let t = min(max(fraction, 0), 1)
         let discrete = t >= 1 ? upper : lower
+        // Site-local coordinates in different frames cannot be interpolated.
+        // Hold the complete earlier state until the next recorded sample.
+        guard lower.landingSite == upper.landingSite else { return discrete }
         return LMVehicleStateSnapshot(
             positionMeters: lower.positionMeters + (upper.positionMeters - lower.positionMeters) * t,
             velocityMetersPerSecond: lower.velocityMetersPerSecond
@@ -195,10 +232,12 @@ public struct LMFlightReplay: Equatable, Sendable {
             ),
             flightOutcome: discrete.flightOutcome,
             surfaceContact: discrete.surfaceContact,
+            landingGear: discrete.landingGear,
             dpsPitchGimbalRadians: lower.dpsPitchGimbalRadians
                 + (upper.dpsPitchGimbalRadians - lower.dpsPitchGimbalRadians) * t,
             dpsRollGimbalRadians: lower.dpsRollGimbalRadians
-                + (upper.dpsRollGimbalRadians - lower.dpsRollGimbalRadians) * t
+                + (upper.dpsRollGimbalRadians - lower.dpsRollGimbalRadians) * t,
+            landingSite: discrete.landingSite
         )
     }
 

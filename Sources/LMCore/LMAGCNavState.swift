@@ -261,15 +261,17 @@ public enum Luminary099NavScale {
 public enum LMAGCNavState {
     /// Body specific force in frozen SM for MUNRVG. ENU coincides with SM only
     /// at the REFSMMAT epoch; later GET must go through RP-TO-R and REFSMMAT.
+    /// `site` is the origin of the attitude's local axes; nil preserves Apollo 11.
     /// Diagnostic / comparison helper — not the simulation PIPA hot path.
     public static func specificForceSM(
         body: LMVector3D,
         attitude: LMQuaternion,
         refsmmat: LMMatrix3,
-        timeCentiseconds: Double
+        timeCentiseconds: Double,
+        site: LMLunarLandingSite? = nil
     ) -> LMVector3D {
         let enu = attitude.rotated(body)
-        let (north, east, up) = moonFixedSiteBasis()
+        let (north, east, up) = moonFixedSiteBasis(site: site)
         let moon = north * enu.x + east * enu.y + up * enu.z
         let basic = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: timeCentiseconds)
             .timesTranspose(moon)
@@ -319,19 +321,19 @@ public enum LMAGCNavState {
     }
 
     public static func moonCenteredPositionMeters(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
-        let (north, east, up) = moonFixedSiteBasis()
-        return Luminary99CoordinatePadLoad.landingSiteMeters
+        let (north, east, up) = moonFixedSiteBasis(site: vehicle.landingSite)
+        return landingSiteMeters(site: vehicle.landingSite)
             + north * vehicle.positionMeters.x
             + east * vehicle.positionMeters.y
             + up * vehicle.positionMeters.z
     }
 
-    public static func landingSiteMeters() -> LMVector3D {
-        Luminary99CoordinatePadLoad.landingSiteMeters
+    public static func landingSiteMeters(site: LMLunarLandingSite? = nil) -> LMVector3D {
+        site?.positionMeters ?? Luminary99CoordinatePadLoad.landingSiteMeters
     }
 
     public static func velocityMetersPerCentisecond(from vehicle: LMVehicleStateSnapshot) -> LMVector3D {
-        let (north, east, up) = moonFixedSiteBasis()
+        let (north, east, up) = moonFixedSiteBasis(site: vehicle.landingSite)
         let velocity = vehicle.velocityMetersPerSecond
         return (north * velocity.x + east * velocity.y + up * velocity.z) / 100.0
     }
@@ -361,30 +363,30 @@ public enum LMAGCNavState {
     ///
     /// `XSM = UNIT(RLS)`, `ZSM` = horizontal modeled east, `YSM = ZSM × XSM`.
     /// Luminary `MXV REFSMMAT` then takes Basic Reference to SM.
-    public static func refsmmat(timeCentiseconds: Double) -> LMMatrix3 {
+    public static func refsmmat(timeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMMatrix3 {
         let xsm = LuminaryMoonOrientation.rpToR(
-            landingSiteMeters(),
+            landingSiteMeters(site: site),
             timeCentiseconds: timeCentiseconds
         ).normalized()
         let eastBasic = LuminaryMoonOrientation.moonMatrix(timeCentiseconds: timeCentiseconds)
-            .timesTranspose(moonFixedSiteBasis().east)
+            .timesTranspose(moonFixedSiteBasis(site: site).east)
         let zsm = (eastBasic - xsm * eastBasic.dot(xsm)).normalized()
         let ysm = zsm.cross(xsm).normalized()
         return LMMatrix3(r0: xsm, r1: ysm, r2: zsm)
     }
 
     /// IGNALG `LAND`: `RP-TO-R(RLS, TLAND)` with `TLAND` from live GET plus GUIDDURN and the IGNALG look-ahead.
-    public static func landBasic(pipTimeCentiseconds: Double) -> LMVector3D {
+    public static func landBasic(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMVector3D {
         LuminaryMoonOrientation.rpToR(
-            landingSiteMeters(),
+            landingSiteMeters(site: site),
             timeCentiseconds: Luminary99LandingPadLoad.tlandCentiseconds(fromClock: pipTimeCentiseconds)
         )
     }
 
     /// RIGN-epoch position in Basic: `LAND + (RIGNX, 0, RIGNZ)` in landing SM.
-    public static func rignPositionMeters(pipTimeCentiseconds: Double) -> LMVector3D {
-        let matrix = refsmmat(timeCentiseconds: pipTimeCentiseconds)
-        let rsm = matrix.times(landBasic(pipTimeCentiseconds: pipTimeCentiseconds)) + LMVector3D(
+    public static func rignPositionMeters(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMVector3D {
+        let matrix = refsmmat(timeCentiseconds: pipTimeCentiseconds, site: site)
+        let rsm = matrix.times(landBasic(pipTimeCentiseconds: pipTimeCentiseconds, site: site)) + LMVector3D(
             x: Luminary99LandingPadLoad.rignXMeters,
             y: 0,
             z: Luminary99LandingPadLoad.rignZMeters
@@ -393,21 +395,21 @@ public enum LMAGCNavState {
     }
 
     /// Inertial velocity at the RIGN epoch so IGNALG `|VGU| = VIGN`.
-    public static func rignVelocityMetersPerCentisecond(pipTimeCentiseconds: Double) -> LMVector3D {
-        let matrix = refsmmat(timeCentiseconds: pipTimeCentiseconds)
-        let rsm = matrix.times(rignPositionMeters(pipTimeCentiseconds: pipTimeCentiseconds))
-        return matrix.timesTranspose(inertialVelocitySM(rsm: rsm, timeCentiseconds: pipTimeCentiseconds))
+    public static func rignVelocityMetersPerCentisecond(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMVector3D {
+        let matrix = refsmmat(timeCentiseconds: pipTimeCentiseconds, site: site)
+        let rsm = matrix.times(rignPositionMeters(pipTimeCentiseconds: pipTimeCentiseconds, site: site))
+        return matrix.timesTranspose(inertialVelocitySM(rsm: rsm, timeCentiseconds: pipTimeCentiseconds, site: site))
     }
 
     /// State at the start of the runtime lead, backward from the sourced PDI
     /// condition. PDI itself is ZOOMTIME before the RIGN end-of-zoom target.
-    public static func pdiPositionMeters(pipTimeCentiseconds: Double) -> LMVector3D {
-        pdiState(pipTimeCentiseconds: pipTimeCentiseconds).position
+    public static func pdiPositionMeters(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMVector3D {
+        pdiState(pipTimeCentiseconds: pipTimeCentiseconds, site: site).position
     }
 
     /// Inertial velocity matching `pdiPositionMeters` at the runtime lead.
-    public static func pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: Double) -> LMVector3D {
-        pdiState(pipTimeCentiseconds: pipTimeCentiseconds).velocity
+    public static func pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> LMVector3D {
+        pdiState(pipTimeCentiseconds: pipTimeCentiseconds, site: site).velocity
     }
 
     /// Tabletop runtime lead: moon-fixed Kepler state before the sourced PDI
@@ -416,21 +418,22 @@ public enum LMAGCNavState {
     public static func vehicleState(
         timeCentiseconds: Double,
         attitude: LMQuaternion,
-        massKilograms: Double
+        massKilograms: Double,
+        site: LMLunarLandingSite? = nil
     ) -> LMVehicleStateSnapshot {
         let rMoon = LuminaryMoonOrientation.rToRP(
-            pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds),
+            pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds, site: site),
             timeCentiseconds: timeCentiseconds
         )
         let vMoon = LuminaryMoonOrientation.referenceVelocityToMoonRelative(
             inertialMetersPerCentisecond: pdiVelocityMetersPerCentisecond(
-                pipTimeCentiseconds: timeCentiseconds
+                pipTimeCentiseconds: timeCentiseconds, site: site
             ),
             moonFixedPosition: rMoon,
             timeCentiseconds: timeCentiseconds
         ) * 100.0
-        let (north, east, up) = moonFixedSiteBasis()
-        let delta = rMoon - landingSiteMeters()
+        let (north, east, up) = moonFixedSiteBasis(site: site)
+        let delta = rMoon - landingSiteMeters(site: site)
         return LMVehicleStateSnapshot(
             positionMeters: LMVector3D(
                 x: delta.dot(north),
@@ -443,13 +446,14 @@ public enum LMAGCNavState {
                 z: vMoon.dot(up)
             ),
             attitude: attitude,
-            massKilograms: massKilograms
+            massKilograms: massKilograms, landingSite: site
         )
     }
 
     /// Selenographic east is polar × radial. Tranquility is near the equator,
     /// so that cross product is well defined.
-    public static func moonFixedSiteBasis() -> (north: LMVector3D, east: LMVector3D, up: LMVector3D) {
+    public static func moonFixedSiteBasis(site: LMLunarLandingSite? = nil) -> (north: LMVector3D, east: LMVector3D, up: LMVector3D) {
+        if let site { return site.basis }
         let up = Luminary99CoordinatePadLoad.landingSiteMeters.normalized()
         let east = LMVector3D(z: 1).cross(up).normalized()
         let north = up.cross(east).normalized()
@@ -461,10 +465,19 @@ public enum LMAGCNavState {
         time2: Int,
         time1: Int
     ) -> [AGCErasableWord] {
+        let site = vehicle.landingSite
         let timeCentiseconds = AGCDoublePrecision(high: time2, low: time1).decoded(scale: 28)
         let tet = AGCDoublePrecision.encode(value: timeCentiseconds, scale: 28)
-        let position = pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds)
-        let velocity = pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: timeCentiseconds)
+        // Preserve the historical Apollo overlay byte-for-byte. A custom
+        // scenario encodes the actual plant state: the sourced lunar rotation
+        // matrix is quantized, so rToRP/rpToR are not exact numerical inverses.
+        // Recomputing PDI here displaced the encoded custom RN by up to 0.6 m.
+        let position = site == nil
+            ? pdiPositionMeters(pipTimeCentiseconds: timeCentiseconds)
+            : basicReferencePositionMeters(from: vehicle, timeCentiseconds: timeCentiseconds)
+        let velocity = site == nil
+            ? pdiVelocityMetersPerCentisecond(pipTimeCentiseconds: timeCentiseconds)
+            : basicReferenceVelocityMetersPerCentisecond(from: vehicle, timeCentiseconds: timeCentiseconds)
         var words: [AGCErasableWord] = []
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.rn, meters: position))
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.vn, metersPerCentisecond: velocity))
@@ -485,8 +498,8 @@ public enum LMAGCNavState {
         words.append(AGCErasableWord(ecadr: Luminary099Erasable.tetCSM + 1, value: tet.low))
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.rCVCSM, meters: position))
         words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.vCVCSM, metersPerCentisecond: velocity))
-        words.append(contentsOf: refsmmatWords(timeCentiseconds: timeCentiseconds))
-        words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.rls, meters: landingSiteMeters()))
+        words.append(contentsOf: refsmmatWords(timeCentiseconds: timeCentiseconds, site: site))
+        words.append(contentsOf: vectorWords(ecadr: Luminary099Erasable.rls, meters: landingSiteMeters(site: site)))
         if let mass = vehicle.massKilograms {
             let massDP = AGCDoublePrecision.encode(value: mass, scale: Luminary099NavScale.massScale)
             words.append(AGCErasableWord(ecadr: Luminary099Erasable.mass, value: massDP.high))
@@ -548,7 +561,8 @@ public enum LMAGCNavState {
         rsm: LMVector3D,
         timeCentiseconds: Double,
         moonRelativeSpeedMetersPerCentisecond: Double = Luminary99LandingPadLoad.vignMetersPerCentisecond,
-        radialRateMetersPerCentisecond: Double = Luminary99LandingPadLoad.pdiAltitudeRateMetersPerCentisecond
+        radialRateMetersPerCentisecond: Double = Luminary99LandingPadLoad.pdiAltitudeRateMetersPerCentisecond,
+        site: LMLunarLandingSite? = nil
     ) -> LMVector3D {
         let rdot = radialRateMetersPerCentisecond
         let radial = rsm.normalized() * rdot
@@ -561,7 +575,7 @@ public enum LMAGCNavState {
             moonRelativeSpeedMetersPerCentisecond * moonRelativeSpeedMetersPerCentisecond - rdot * rdot
         ))
         let moonRelative = radial + horizontal * horizontalSpeed
-        let polarSM = refsmmat(timeCentiseconds: timeCentiseconds).times(
+        let polarSM = refsmmat(timeCentiseconds: timeCentiseconds, site: site).times(
             LuminaryMoonOrientation.rpToR(LMVector3D(z: 1), timeCentiseconds: timeCentiseconds)
         )
         let wm = polarSM * (
@@ -571,21 +585,21 @@ public enum LMAGCNavState {
         return moonRelative + wm.cross(rsm)
     }
 
-    private static func pdiState(pipTimeCentiseconds: Double) -> (position: LMVector3D, velocity: LMVector3D) {
+    private static func pdiState(pipTimeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> (position: LMVector3D, velocity: LMVector3D) {
         let provisionalPDI = keplerCoast(
-            position: rignPositionMeters(pipTimeCentiseconds: pipTimeCentiseconds),
-            velocity: rignVelocityMetersPerCentisecond(pipTimeCentiseconds: pipTimeCentiseconds),
+            position: rignPositionMeters(pipTimeCentiseconds: pipTimeCentiseconds, site: site),
+            velocity: rignVelocityMetersPerCentisecond(pipTimeCentiseconds: pipTimeCentiseconds, site: site),
             deltaCentiseconds: -Luminary99LandingPadLoad.zoomTimeCentiseconds,
             steps: max(1, Int((Luminary99LandingPadLoad.zoomTimeCentiseconds / 100.0).rounded()))
         )
-        let pdiRadius = landingSiteMeters().magnitude + Luminary99LandingPadLoad.pdiAltitudeMeters
+        let pdiRadius = landingSiteMeters(site: site).magnitude + Luminary99LandingPadLoad.pdiAltitudeMeters
         let pdiPosition = provisionalPDI.position.normalized() * pdiRadius
-        let refsmmat = refsmmat(timeCentiseconds: pipTimeCentiseconds)
+        let refsmmat = refsmmat(timeCentiseconds: pipTimeCentiseconds, site: site)
         let pdiVelocitySM = inertialVelocitySM(
             rsm: refsmmat.times(pdiPosition),
             timeCentiseconds: pipTimeCentiseconds,
             moonRelativeSpeedMetersPerCentisecond: Luminary99LandingPadLoad.pdiSpeedMetersPerCentisecond,
-            radialRateMetersPerCentisecond: Luminary99LandingPadLoad.pdiAltitudeRateMetersPerCentisecond
+            radialRateMetersPerCentisecond: Luminary99LandingPadLoad.pdiAltitudeRateMetersPerCentisecond, site: site
         )
         let pdiVelocity = refsmmat.timesTranspose(pdiVelocitySM)
         return keplerCoast(
@@ -651,8 +665,8 @@ public enum LMAGCNavState {
         return words
     }
 
-    private static func refsmmatWords(timeCentiseconds: Double) -> [AGCErasableWord] {
-        let matrix = refsmmat(timeCentiseconds: timeCentiseconds)
+    private static func refsmmatWords(timeCentiseconds: Double, site: LMLunarLandingSite? = nil) -> [AGCErasableWord] {
+        let matrix = refsmmat(timeCentiseconds: timeCentiseconds, site: site)
         var words: [AGCErasableWord] = []
         for row in 0..<3 {
             for column in 0..<3 {
